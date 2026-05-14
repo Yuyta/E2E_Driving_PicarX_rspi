@@ -1,0 +1,22 @@
+[project]
+name = "picar-x-keyboard-control"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "opencv-python>=4.13.0.92",
+    "gpiozero>=2.0.1",
+    "picarx",
+    "pyaudio>=0.2.14",
+    "robot-hat",
+    "smbus2>=0.6.1",
+    "vilib",
+    "picamera2>=0.3.36",
+]
+
+[tool.uv.sources]
+robot-hat = { git = "https://github.com/sunfounder/robot-hat.git" }
+vilib = { git = "https://github.com/sunfounder/vilib.git" }
+picarx = { git = "https://github.com/sunfounder/picar-x.git" }
+

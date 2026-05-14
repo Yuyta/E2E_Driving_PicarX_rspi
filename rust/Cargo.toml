@@ -1,0 +1,10 @@
+[package]
+name = "picar-x-rust"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+ndarray = "0.17.2"
+rodio = "0.22.2"
+rppal = "0.22.1"
+show-image = "0.14.1"
