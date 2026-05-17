@@ -2,7 +2,7 @@
 use std::process::{Command, Child, Stdio};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use ndarray::{Array1, Array3, ArrayView2};
+use ndarray::{Array1, Array3, ArrayView2, s};
 
 pub struct RpiCamera {
     child: Child,
@@ -83,31 +83,41 @@ impl RpiCamera {
         true
     }
 
-    /// YUV420からRGBへの変換内部ロジック (staticメソッド)
+    /// YUV420からRGBへの変換内部ロジック
     fn convert_yuv420_to_rgb(yuv_array: &Array1<u8>, rgb_array: &mut Array3<u8>, width: usize, height: usize) {
+        let y_size = width * height;
         let uv_width = width / 2;
         let uv_height = height / 2;
-        let y_size = width * height;
         let uv_size = uv_width * uv_height;
         let yuv_slice = yuv_array.as_slice().unwrap();
 
+        // 各プレーンを2次元のビュー(View)として切り出す
         let y_plane = ArrayView2::from_shape((height, width), &yuv_slice[0..y_size]).unwrap();
-        let u_plane = ArrayView2::from_shape((uv_height, uv_width), &yuv_slice[y_size..(y_size + uv_size)]).unwrap();
-        let v_plane = ArrayView2::from_shape((uv_height, uv_width), &yuv_slice[(y_size + uv_size)..]).unwrap();
+        let u_plane_raw = ArrayView2::from_shape((uv_height, uv_width), &yuv_slice[y_size..(y_size + uv_size)]).unwrap();
+        let v_plane_raw = ArrayView2::from_shape((uv_height, uv_width), &yuv_slice[(y_size + uv_size)..]).unwrap();
 
-        for y in 0..height {
-            let uv_y = y / 2;
-            for x in 0..width {
-                let uv_x = x / 2;
-                let yp = y_plane[[y, x]] as f32;
-                let up = u_plane[[uv_y, uv_x]] as f32 - 128.0;
-                let vp = v_plane[[uv_y, uv_x]] as f32 - 128.0;
+        let u_shaped = u_plane_raw.to_shape((uv_height, 1, uv_width, 1)).unwrap();
+        let u_broadcasted = u_shaped.broadcast((uv_height, 2, uv_width, 2)).unwrap();
+        let u_plane = u_broadcasted.to_shape((height, width)).unwrap();
 
-                rgb_array[[y, x, 0]] = (yp + 1.402 * vp).clamp(0.0, 255.0) as u8;
-                rgb_array[[y, x, 1]] = (yp - 0.344136 * up - 0.714136 * vp).clamp(0.0, 255.0) as u8;
-                rgb_array[[y, x, 2]] = (yp + 1.772 * up).clamp(0.0, 255.0) as u8;
-            }
-        }
+        let v_shaped = v_plane_raw.to_shape((uv_height, 1, uv_width, 1)).unwrap();
+        let v_broadcasted = v_shaped.broadcast((uv_height, 2, uv_width, 2)).unwrap();
+        let v_plane = v_broadcasted.to_shape((height, width)).unwrap();
+
+        // 一括浮動小数点演算
+        let y_f32 = y_plane.mapv(|x| x as f32);
+        let u_f32 = u_plane.mapv(|x| x as f32 - 128.0);
+        let v_f32 = v_plane.mapv(|x| x as f32 - 128.0);
+
+        // 各チャンネル(R, G, B)の全ピクセルを一括計算
+        let r_channel = (&y_f32 + &v_f32 * 1.402).mapv(|x| x.clamp(0.0, 255.0) as u8);
+        let g_channel = (&y_f32 - &u_f32 * 0.344136 - &v_f32 * 0.714136).mapv(|x| x.clamp(0.0, 255.0) as u8);
+        let b_channel = (&y_f32 + &u_f32 * 1.772).mapv(|x| x.clamp(0.0, 255.0) as u8);
+
+        // 最終出力用の rgb_array (Array3) の各スライスへ一括代入
+        rgb_array.slice_mut(s![.., .., 0]).assign(&r_channel);
+        rgb_array.slice_mut(s![.., .., 1]).assign(&g_channel);
+        rgb_array.slice_mut(s![.., .., 2]).assign(&b_channel);
     }
 }
 

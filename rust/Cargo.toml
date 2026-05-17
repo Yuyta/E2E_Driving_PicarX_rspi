@@ -8,3 +8,9 @@ ndarray = "0.17.2"
 rodio = "0.22.2"
 rppal = "0.22.1"
 show-image = "0.14.1"
+
+[profile.release]
+opt-level = 3
+codegen-units = 1
+lto = true
+
