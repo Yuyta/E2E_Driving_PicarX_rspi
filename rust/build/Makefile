@@ -46,7 +46,7 @@ build:
 		$(IMAGE_NAME) \
 		cargo build --target $(TARGET) --release
 
-deploy: build
+deploy:
 	@echo "Sending $(APP_NAME) to Raspberry Pi ($(RPI_IP))..."
 	scp $(PROJECT_ROOT)/target/$(TARGET)/release/$(APP_NAME) $(RPI_USER)@$(RPI_IP):$(RPI_DIR)/
 	@echo "Deployment complete! Run './$(APP_NAME)' on your Raspberry Pi."
