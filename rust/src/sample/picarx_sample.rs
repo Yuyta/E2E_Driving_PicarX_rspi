@@ -1,4 +1,5 @@
 ﻿use std::collections::HashMap;
+use std::time::{Duration, Instant};
 use ndarray::Array3;
 use show_image::{create_window, WindowOptions, ImageInfo, PixelFormat, ImageView};
 use show_image::event::VirtualKeyCode;
@@ -43,9 +44,11 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let width = 640;
     let height = 480;
+    let framerate = 30;
+    let frame_interval = Duration::from_secs_f64(1.0 / framerate as f64);
     let mut rgb_buffer = Array3::<u8>::zeros((height, width, 3));
 
-    let mut camera = RpiCamera::new(width, height, 30)?;
+    let mut camera = RpiCamera::new(width, height, framerate)?;
     let mut px = Picarx::new()?;
     let mut controller = RcController::new(key_map);
 
@@ -56,6 +59,8 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     let event_channel = window.event_channel()?;
 
     'main_loop: loop {
+        let loop_start = Instant::now();
+
         // 映像の取得と描画
         if !camera.fetch_latest_frame_to_rgb(&mut rgb_buffer) { break; }
         let image_view = ImageView::new(
@@ -74,6 +79,12 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // コントローラーに px を渡して、ハードウェアへの命令送信を一任する
         controller.update_hardware(&mut px);
+
+        // カメラのフレームレートに合わせてループを間引き、CPU占有とI2C書き込みの過多を防ぐ
+        let elapsed = loop_start.elapsed();
+        if elapsed < frame_interval {
+            std::thread::sleep(frame_interval - elapsed);
+        }
     }
 
     println!("Stopping camera and cleaning up PiCar-X...");
