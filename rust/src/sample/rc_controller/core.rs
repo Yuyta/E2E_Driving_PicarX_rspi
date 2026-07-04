@@ -104,10 +104,10 @@ impl RcController {
             self.pan_angle  = 0;
             self.tilt_angle = 0;
         } else {
-            if self.is_pressed(InputAction::CameraUp)    { self.tilt_angle = (self.tilt_angle - 2).min(-45); }
-            if self.is_pressed(InputAction::CameraDown)  { self.tilt_angle = (self.tilt_angle + 2).max( 45); }
-            if self.is_pressed(InputAction::CameraRight) { self.pan_angle  = (self.pan_angle  - 2).min(-45); }
-            if self.is_pressed(InputAction::CameraLeft)  { self.pan_angle  = (self.pan_angle  + 2).max( 45); }
+            if self.is_pressed(InputAction::CameraUp)    { self.tilt_angle = (self.tilt_angle - 2).max(-45); }
+            if self.is_pressed(InputAction::CameraDown)  { self.tilt_angle = (self.tilt_angle + 2).min( 45); }
+            if self.is_pressed(InputAction::CameraRight) { self.pan_angle  = (self.pan_angle  - 2).max(-45); }
+            if self.is_pressed(InputAction::CameraLeft)  { self.pan_angle  = (self.pan_angle  + 2).min( 45); }
         }
 
         px.set_cam_pan_angle(self.pan_angle);
