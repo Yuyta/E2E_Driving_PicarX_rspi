@@ -2,6 +2,22 @@
 use show_image::event::{WindowEvent, VirtualKeyCode, ElementState};
 use crate::picarx::Picarx;
 
+// 走行・ステアリング
+const MOVE_SPEED: i32 = 80;
+const STEER_ANGLE: i32 = 35;
+
+// カメラPan/Tilt (1キー入力あたりの刻み幅と可動域)
+const CAMERA_STEP_DEG: i32 = 2;
+const CAMERA_ANGLE_LIMIT: i32 = 45;
+
+// バッテリー低下警告の閾値(V)
+const BATTERY_LOW_VOLTAGE: f64 = 7.0;
+
+// ブザー音
+const BEEP_FREQ_HZ: f32 = 2000.0;
+const BEEP_DURATION_MS: u64 = 50;
+const BEEP_VOLUME: f32 = 0.7;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum InputAction {
     MoveForward,
@@ -22,8 +38,6 @@ pub enum InputAction {
 pub struct RcController {
     action_states: HashMap<InputAction, bool>,
     key_map: HashMap<VirtualKeyCode, InputAction>,
-    pan_angle: i32,
-    tilt_angle: i32,
     was_grayscale_pressed: bool,
     was_distance_pressed: bool,
     was_battery_pressed: bool,
@@ -40,8 +54,6 @@ impl RcController {
         Self {
             action_states,
             key_map,
-            pan_angle: 0,
-            tilt_angle: 0,
             was_grayscale_pressed: false,
             was_distance_pressed: false,
             was_battery_pressed: false,
@@ -74,9 +86,9 @@ impl RcController {
     pub fn update_hardware(&mut self, px: &mut Picarx) {
         // 1. モーター制御の計算と命令送信
         let speed = if self.is_pressed(InputAction::MoveForward) {
-            80
+            MOVE_SPEED
         } else if self.is_pressed(InputAction::MoveBackward) {
-            -80
+            -MOVE_SPEED
         } else {
             0
         };
@@ -91,27 +103,31 @@ impl RcController {
 
         // 2. ステアリング制御の計算と命令送信
         let steer = if self.is_pressed(InputAction::SteerRight) {
-            35
+            STEER_ANGLE
         } else if self.is_pressed(InputAction::SteerLeft) {
-            -35
+            -STEER_ANGLE
         } else {
             0
         };
         px.set_dir_servo_angle(steer);
 
         // 3. カメラ角度の計算と命令送信
+        // pan/tilt の現在値は Picarx 側を単一の真実の源とし、ここでは保持しない
+        let mut pan_angle = px.pan_angle;
+        let mut tilt_angle = px.tilt_angle;
+
         if self.is_pressed(InputAction::CameraCenter) {
-            self.pan_angle  = 0;
-            self.tilt_angle = 0;
+            pan_angle = 0;
+            tilt_angle = 0;
         } else {
-            if self.is_pressed(InputAction::CameraUp)    { self.tilt_angle = (self.tilt_angle - 2).max(-45); }
-            if self.is_pressed(InputAction::CameraDown)  { self.tilt_angle = (self.tilt_angle + 2).min( 45); }
-            if self.is_pressed(InputAction::CameraRight) { self.pan_angle  = (self.pan_angle  - 2).max(-45); }
-            if self.is_pressed(InputAction::CameraLeft)  { self.pan_angle  = (self.pan_angle  + 2).min( 45); }
+            if self.is_pressed(InputAction::CameraUp)    { tilt_angle = (tilt_angle - CAMERA_STEP_DEG).max(-CAMERA_ANGLE_LIMIT); }
+            if self.is_pressed(InputAction::CameraDown)  { tilt_angle = (tilt_angle + CAMERA_STEP_DEG).min( CAMERA_ANGLE_LIMIT); }
+            if self.is_pressed(InputAction::CameraRight) { pan_angle  = (pan_angle  - CAMERA_STEP_DEG).max(-CAMERA_ANGLE_LIMIT); }
+            if self.is_pressed(InputAction::CameraLeft)  { pan_angle  = (pan_angle  + CAMERA_STEP_DEG).min( CAMERA_ANGLE_LIMIT); }
         }
 
-        px.set_cam_pan_angle(self.pan_angle);
-        px.set_cam_tilt_angle(self.tilt_angle);
+        px.set_cam_pan_angle(pan_angle);
+        px.set_cam_tilt_angle(tilt_angle);
 
         // GrayScale Sensor
         let is_grayscale_pressed = self.is_pressed(InputAction::GetGrayscale);
@@ -140,7 +156,7 @@ impl RcController {
         let is_battery_pressed = self.is_pressed(InputAction::GetBatteryStatus);
         if is_battery_pressed && !self.was_battery_pressed {
             if let Ok((voltage, percent)) = px.get_battery_status() {
-                if voltage < 7.0 {
+                if voltage < BATTERY_LOW_VOLTAGE {
                     println!("[BatteryStatus] Voltage: {:.2} V ({}%) : Battery Low!", voltage, percent);
                 } else {
                     println!("[BatteryStatus] Voltage: {:.2} V ({}%)", voltage, percent);
@@ -153,8 +169,7 @@ impl RcController {
         // Beep the buzzer
         let is_beep_pressed = self.is_pressed(InputAction::BeepBuzzer);
         if is_beep_pressed && !self.was_beep_pressed {
-            // 2000Hz, 50ms
-            if let Ok(()) = px.play_tone(2000.0, 50, 0.7) {
+            if let Ok(()) = px.play_tone(BEEP_FREQ_HZ, BEEP_DURATION_MS, BEEP_VOLUME) {
                 println!("[Speaker] Played a beep tone.");
             } else {
                 println!("[Speaker] Failed to play tone.");

@@ -32,20 +32,22 @@ pub struct Ultrasonic {
 }
 
 impl Ultrasonic {
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    /// `Picarx`経由で使う場合など、呼び出し元が既にMCUリセット済みのときは
+    /// `reset_mcu = false`を渡してここでの再リセットをスキップする。
+    pub fn new(reset_mcu: bool) -> Result<Self, Box<dyn std::error::Error>> {
         let gpio = Gpio::new()?;
 
-        // MCURSTピンはUltrasonic以外(Picarx::new)でも初期化されるため、
-        // 単体で使う場合に備えてここでも取得を試みる（失敗しても致命的ではない）
-        match gpio.get(PIN_MCU_RST).map(|p| p.into_output()) {
-            Ok(mut mcu_rst) => {
-                mcu_rst.set_low();
-                thread::sleep(Duration::from_millis(MCU_RESET_LOW_MS));
-                mcu_rst.set_high();
-                thread::sleep(Duration::from_millis(MCU_RESET_HIGH_MS));
-            }
-            Err(e) => {
-                eprintln!("⚠ MCU_RSTピン(BCM {})の取得に失敗（他で使用中の可能性）: {}", PIN_MCU_RST, e);
+        if reset_mcu {
+            match gpio.get(PIN_MCU_RST).map(|p| p.into_output()) {
+                Ok(mut mcu_rst) => {
+                    mcu_rst.set_low();
+                    thread::sleep(Duration::from_millis(MCU_RESET_LOW_MS));
+                    mcu_rst.set_high();
+                    thread::sleep(Duration::from_millis(MCU_RESET_HIGH_MS));
+                }
+                Err(e) => {
+                    eprintln!("⚠ MCU_RSTピン(BCM {})の取得に失敗（他で使用中の可能性）: {}", PIN_MCU_RST, e);
+                }
             }
         }
 
