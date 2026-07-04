@@ -1,5 +1,6 @@
 ﻿use std::thread;
 use std::time::Duration;
+use std::collections::HashMap;
 use std::fs::File;
 use std::path::Path;
 use std::io::BufReader;
@@ -87,6 +88,9 @@ pub struct Picarx {
     ultrasonic: Ultrasonic,
     _audio_sink: MixerDeviceSink,
     audio_player: Player,
+
+    // レジスタごとの直近書き込み値。同じ値の再送を避けてI2Cバス負荷を抑える
+    last_written: HashMap<u8, u16>,
 }
 
 impl Picarx {
@@ -135,9 +139,11 @@ impl Picarx {
             // Pythonのデフォルト設定通り、右側だけを反転に
             left_reverse: false,
             right_reverse: true,
-            ultrasonic: Ultrasonic::new()?,
+            // Picarx::new()側で既にMCUリセット済みのため、ここでは再リセットしない
+            ultrasonic: Ultrasonic::new(false)?,
             _audio_sink: audio_sink,
             audio_player,
+            last_written: HashMap::new(),
         };
 
         // スピーカーをONにし、無音を鳴らす (ノイズクリア)
@@ -189,9 +195,15 @@ impl Picarx {
     }
 
     fn write_word(&mut self, reg: u8, value: u16) -> Result<(), Box<dyn std::error::Error>> {
+        // 直前と同じ値であれば、バス負荷を減らすため書き込みを省略する
+        if self.last_written.get(&reg) == Some(&value) {
+            return Ok(());
+        }
+
         let high_byte = ((value >> 8) & 0xFF) as u8;
         let low_byte = (value & 0xFF) as u8;
         self.i2c.write(&[reg, high_byte, low_byte])?;  // big endian
+        self.last_written.insert(reg, value);
         Ok(())
     }
 
