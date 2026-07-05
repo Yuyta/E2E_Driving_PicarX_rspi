@@ -1,5 +1,5 @@
 ﻿use std::collections::HashMap;
-use show_image::event::{WindowEvent, VirtualKeyCode, ElementState};
+use eframe::egui;
 use crate::picarx::Picarx;
 
 // 走行・ステアリング
@@ -37,7 +37,7 @@ pub enum InputAction {
 
 pub struct RcController {
     action_states: HashMap<InputAction, bool>,
-    key_map: HashMap<VirtualKeyCode, InputAction>,
+    key_map: HashMap<egui::Key, InputAction>,
     was_grayscale_pressed: bool,
     was_distance_pressed: bool,
     was_battery_pressed: bool,
@@ -45,7 +45,7 @@ pub struct RcController {
 }
 
 impl RcController {
-    pub fn new(key_map: HashMap<VirtualKeyCode, InputAction>) -> Self {
+    pub fn new(key_map: HashMap<egui::Key, InputAction>) -> Self {
         let mut action_states = HashMap::new();
         for action in key_map.values() {
             action_states.insert(*action, false);
@@ -65,21 +65,18 @@ impl RcController {
         *self.action_states.get(&action).unwrap_or(&false)
     }
 
-    pub fn process_event(&mut self, event: &WindowEvent) -> bool {
-        if let WindowEvent::KeyboardInput(key_event) = event {
-            let is_pressed = key_event.input.state == ElementState::Pressed;
-
-            if let Some(key) = key_event.input.key_code {
-                if is_pressed && (key == VirtualKeyCode::Escape || key == VirtualKeyCode::Q) {
-                    return false;
-                }
-
-                if let Some(action) = self.key_map.get(&key) {
-                    self.action_states.insert(*action, is_pressed);
-                }
-            }
+    /// 現在のキー押下状態をeguiから読み取り、action_statesへ反映する。
+    /// (Escape/Q終了判定やフォーカス管理はpicarx_sample.rs側の責務)
+    pub fn sync_from_egui(&mut self, ctx: &egui::Context) {
+        let pressed: Vec<(InputAction, bool)> = ctx.input(|i| {
+            self.key_map
+                .iter()
+                .map(|(key, action)| (*action, i.key_down(*key)))
+                .collect()
+        });
+        for (action, is_down) in pressed {
+            self.action_states.insert(action, is_down);
         }
-        true
     }
 
     // 現在の入力状態を計算し、実機（px）に直接命令を書き込むメソッド

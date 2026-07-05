@@ -1,24 +1,204 @@
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use ndarray::Array3;
-use show_image::{create_window, WindowOptions, ImageInfo, PixelFormat, ImageView};
-use show_image::event::{VirtualKeyCode, WindowEvent, ElementState};
+use eframe::egui;
 use crate::rpi_camera::RpiCamera;
 use crate::picarx::Picarx;
 use crate::llm_agent::{LlmAgent, LlmResponse, CommandQueue};
 
 use super::rc_controller::{RcController, InputAction};
 
-/// アプリの動作モード。Manual以外ではRcControllerへイベントを渡さないことで、
-/// プロンプト入力中のキー入力(例: "w"を含む文章)が誤って車を動かすのを防ぐ。
+/// 日本語グリフ(egui標準フォントには含まれない)を表示できるようフォントを追加する。
+/// Sawarabi Gothic (OFLライセンス, rust/assets/に同梱)
+fn setup_japanese_font(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "sawarabi_gothic".to_owned(),
+        egui::FontData::from_static(include_bytes!("../../assets/SawarabiGothic-Regular.ttf")).into(),
+    );
+    fonts.families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(0, "sawarabi_gothic".to_owned());
+    fonts.families
+        .entry(egui::FontFamily::Monospace)
+        .or_default()
+        .push("sawarabi_gothic".to_owned());
+    ctx.set_fonts(fonts);
+}
+
+/// アプリの動作モード。Manual以外ではRcControllerを駆動しないことで、
+/// LLMコマンド実行中に手動操作が割り込むのを防ぐ。
 enum AppMode {
     Manual,
-    PromptInput { buffer: String },
     WaitingForLlm,
     ExecutingLlmCommands { queue: CommandQueue },
 }
 
-#[show_image::main]
+struct PiCarApp {
+    camera: RpiCamera,
+    px: Picarx,
+    controller: RcController,
+    llm_agent: LlmAgent,
+    app_mode: AppMode,
+    prompt_buffer: String,
+    prompt_field_id: egui::Id,
+    texture: Option<egui::TextureHandle>,
+    rgb_buffer: Array3<u8>,
+    width: usize,
+    height: usize,
+    frame_interval: Duration,
+}
+
+impl PiCarApp {
+    fn new() -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        let width = 640;
+        let height = 480;
+        let framerate = 30;
+
+        let mut key_map = HashMap::new();
+        key_map.insert(egui::Key::W, InputAction::MoveForward);
+        key_map.insert(egui::Key::S, InputAction::MoveBackward);
+        key_map.insert(egui::Key::A, InputAction::SteerLeft);
+        key_map.insert(egui::Key::D, InputAction::SteerRight);
+        key_map.insert(egui::Key::I, InputAction::CameraUp);
+        key_map.insert(egui::Key::K, InputAction::CameraDown);
+        key_map.insert(egui::Key::J, InputAction::CameraLeft);
+        key_map.insert(egui::Key::L, InputAction::CameraRight);
+        key_map.insert(egui::Key::C, InputAction::CameraCenter);
+        key_map.insert(egui::Key::G, InputAction::GetGrayscale);
+        key_map.insert(egui::Key::U, InputAction::GetDistance);
+        key_map.insert(egui::Key::V, InputAction::GetBatteryStatus);
+        key_map.insert(egui::Key::B, InputAction::BeepBuzzer);
+
+        let camera = RpiCamera::new(width, height, framerate)
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
+        let px = Picarx::new()
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
+
+        Ok(Self {
+            camera,
+            px,
+            controller: RcController::new(key_map),
+            llm_agent: LlmAgent::new(),
+            app_mode: AppMode::Manual,
+            prompt_buffer: String::new(),
+            prompt_field_id: egui::Id::new("prompt_input"),
+            texture: None,
+            rgb_buffer: Array3::<u8>::zeros((height, width, 3)),
+            width,
+            height,
+            frame_interval: Duration::from_secs_f64(1.0 / framerate as f64),
+        })
+    }
+}
+
+impl eframe::App for PiCarApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // カメラのフレームレートに合わせて再描画し続ける(eguiは既定では入力がないと再描画しない)
+        ctx.request_repaint_after(self.frame_interval);
+
+        // 映像の取得とテクスチャ更新 (GPUテクスチャは使い回す)
+        if self.camera.fetch_latest_frame_to_rgb(&mut self.rgb_buffer) {
+            let color_image = egui::ColorImage::from_rgb(
+                [self.width, self.height],
+                self.rgb_buffer.as_slice().unwrap(),
+            );
+            match &mut self.texture {
+                Some(tex) => tex.set(color_image, egui::TextureOptions::LINEAR),
+                None => {
+                    self.texture = Some(ctx.load_texture(
+                        "live_frame",
+                        color_image,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                }
+            }
+        }
+
+        // レイアウトより先にフォーカス状態を確定させる
+        // (プロンプト入力中はWASD等の直接操作もEscape終了も無効にするため)
+        let prompt_has_focus = ctx.memory(|m| m.has_focus(self.prompt_field_id));
+
+        if !prompt_has_focus
+            && ctx.input(|i| i.key_pressed(egui::Key::Escape) || i.key_pressed(egui::Key::Q))
+        {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            return;
+        }
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            if let Some(tex) = &self.texture {
+                ui.add(egui::Image::new(tex).max_width(self.width as f32));
+            }
+
+            let response = ui.add(
+                egui::TextEdit::singleline(&mut self.prompt_buffer)
+                    .id(self.prompt_field_id)
+                    .hint_text("自然言語で指示を入力 (Enterで送信)")
+                    .desired_width(f32::INFINITY),
+            );
+
+            match &self.app_mode {
+                AppMode::WaitingForLlm => { ui.label("[LLM] 応答待ち..."); }
+                AppMode::ExecutingLlmCommands { .. } => { ui.label("[LLM] コマンド実行中 (Escで緊急停止)"); }
+                AppMode::Manual => {}
+            }
+
+            let submitted = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if submitted && matches!(self.app_mode, AppMode::Manual) && !self.prompt_buffer.trim().is_empty() {
+                let prompt = std::mem::take(&mut self.prompt_buffer);
+                println!("[LLM] 送信: {}", prompt);
+                self.px.stop();
+                self.llm_agent.submit_prompt(prompt);
+                self.app_mode = AppMode::WaitingForLlm;
+            }
+
+            // 手動運転はManualモード、かつプロンプト欄が未フォーカスのときだけ反映する
+            if matches!(self.app_mode, AppMode::Manual) && !prompt_has_focus {
+                self.controller.sync_from_egui(ctx);
+                self.controller.update_hardware(&mut self.px);
+            }
+        });
+
+        match &mut self.app_mode {
+            AppMode::Manual => {}
+            AppMode::WaitingForLlm => {
+                if !prompt_has_focus && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    println!("[LLM] 緊急停止");
+                    self.px.stop();
+                    self.app_mode = AppMode::Manual;
+                    return;
+                }
+                if let Some(response) = self.llm_agent.try_recv_response() {
+                    match response {
+                        LlmResponse::Ok(commands) => {
+                            println!("[LLM] {}件のコマンドを受信、実行します", commands.len());
+                            self.app_mode = AppMode::ExecutingLlmCommands { queue: CommandQueue::new(commands) };
+                        }
+                        LlmResponse::Err(e) => {
+                            println!("[LLM] エラー: {}", e);
+                            self.app_mode = AppMode::Manual;
+                        }
+                    }
+                }
+            }
+            AppMode::ExecutingLlmCommands { queue } => {
+                if !prompt_has_focus && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    println!("[LLM] 緊急停止");
+                    self.px.stop();
+                    self.app_mode = AppMode::Manual;
+                    return;
+                }
+                if !queue.tick(&mut self.px) {
+                    println!("[LLM] コマンド実行完了");
+                    self.app_mode = AppMode::Manual;
+                }
+            }
+        }
+    }
+}
+
 pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("=================================================");
     println!(" Starting PiCar-X Key-Control Mode (with Camera)");
@@ -33,152 +213,26 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  ・U     : 超音波センサーの距離 (cm) を表示");
     println!("  ・V     : バッテリーステータス(電圧)を表示");
     println!("  ・B     : スピーカーからBeep音を鳴らす");
-    println!("  ・Enter : 自然言語で指示を入力 (LLM経由でコマンド実行)");
-    println!("  ・Q / ESC : プログラム終了");
+    println!("  ・テキスト欄をクリックして自然言語で指示を入力、Enterで送信 (LLM経由でコマンド実行)");
+    println!("  ・Q / ESC : プログラム終了 (テキスト欄が未フォーカスのとき)");
     println!("-------------------------------------------------");
 
-    // キーマップ設定
-    let mut key_map = HashMap::new();
-    key_map.insert(VirtualKeyCode::W, InputAction::MoveForward);
-    key_map.insert(VirtualKeyCode::S, InputAction::MoveBackward);
-    key_map.insert(VirtualKeyCode::A, InputAction::SteerLeft);
-    key_map.insert(VirtualKeyCode::D, InputAction::SteerRight);
-    key_map.insert(VirtualKeyCode::I, InputAction::CameraUp);
-    key_map.insert(VirtualKeyCode::K, InputAction::CameraDown);
-    key_map.insert(VirtualKeyCode::J, InputAction::CameraLeft);
-    key_map.insert(VirtualKeyCode::L, InputAction::CameraRight);
-    key_map.insert(VirtualKeyCode::C, InputAction::CameraCenter);
-    key_map.insert(VirtualKeyCode::G, InputAction::GetGrayscale);
-    key_map.insert(VirtualKeyCode::U, InputAction::GetDistance);
-    key_map.insert(VirtualKeyCode::V, InputAction::GetBatteryStatus);
-    key_map.insert(VirtualKeyCode::B, InputAction::BeepBuzzer);
-
-    let width = 640;
-    let height = 480;
-    let framerate = 30;
-    let frame_interval = Duration::from_secs_f64(1.0 / framerate as f64);
-    let mut rgb_buffer = Array3::<u8>::zeros((height, width, 3));
-
-    let mut camera = RpiCamera::new(width, height, framerate)?;
-    let mut px = Picarx::new()?;
-    let mut controller = RcController::new(key_map);
-    let llm_agent = LlmAgent::new();
-    let mut app_mode = AppMode::Manual;
-
-    let window = create_window(
+    // Raspberry Pi 3B+ (VideoCore IV, OpenGL ES 2.0)ではglowバックエンドで
+    // GL_INVALID_ENUM等の既知の不具合報告があるため、明示的にwgpuを指定する
+    // (emilk/egui#4302)
+    let native_options = eframe::NativeOptions {
+        renderer: eframe::Renderer::Wgpu,
+        ..Default::default()
+    };
+    eframe::run_native(
         "PiCar-X Rust Camera Live",
-        WindowOptions { preserve_aspect_ratio: true, ..Default::default() },
-    )?;
-    let event_channel = window.event_channel()?;
-
-    'main_loop: loop {
-        let loop_start = Instant::now();
-
-        // 映像の取得と描画
-        if !camera.fetch_latest_frame_to_rgb(&mut rgb_buffer) { break; }
-        let image_view = ImageView::new(
-            ImageInfo::new(PixelFormat::Rgb8, width as u32, height as u32),
-            rgb_buffer.as_slice().unwrap()
-        );
-        if window.set_image("live_frame", image_view).is_err() { break; }
-
-        // キー入力イベントの処理 (モードごとに分岐)
-        while let Ok(event) = event_channel.try_recv() {
-            match &mut app_mode {
-                AppMode::Manual => {
-                    if let WindowEvent::KeyboardInput(k) = &event {
-                        if k.input.state == ElementState::Pressed && k.input.key_code == Some(VirtualKeyCode::Return) {
-                            px.stop();
-                            app_mode = AppMode::PromptInput { buffer: String::new() };
-                            println!("[LLM] プロンプト入力モード: 文章を入力しEnterで送信、Escでキャンセル");
-                            continue;
-                        }
-                    }
-
-                    if !controller.process_event(&event) {
-                        println!("Exit signal received.");
-                        break 'main_loop;
-                    }
-                }
-                AppMode::PromptInput { buffer } => {
-                    match &event {
-                        WindowEvent::TextInput(text_event) => {
-                            if !text_event.character.is_control() {
-                                buffer.push(text_event.character);
-                            }
-                        }
-                        WindowEvent::KeyboardInput(k) if k.input.state == ElementState::Pressed => {
-                            match k.input.key_code {
-                                Some(VirtualKeyCode::Return) => {
-                                    let prompt = buffer.clone();
-                                    println!("[LLM] 送信: {}", prompt);
-                                    llm_agent.submit_prompt(prompt);
-                                    app_mode = AppMode::WaitingForLlm;
-                                }
-                                Some(VirtualKeyCode::Back) => {
-                                    buffer.pop();
-                                }
-                                Some(VirtualKeyCode::Escape) => {
-                                    println!("[LLM] 入力をキャンセルしました");
-                                    app_mode = AppMode::Manual;
-                                }
-                                _ => {}
-                            }
-                        }
-                        _ => {}
-                    }
-                    // PromptInput中はcontroller.process_event()を呼ばない
-                    // (打鍵中の文字が誤ってWASD等のアクションとして解釈されるのを防ぐ)
-                }
-                AppMode::WaitingForLlm | AppMode::ExecutingLlmCommands { .. } => {
-                    // LLM応答待ち/コマンド実行中はEscapeで緊急停止のみ受け付ける
-                    if let WindowEvent::KeyboardInput(k) = &event {
-                        if k.input.state == ElementState::Pressed && k.input.key_code == Some(VirtualKeyCode::Escape) {
-                            println!("[LLM] 緊急停止");
-                            px.stop();
-                            app_mode = AppMode::Manual;
-                        }
-                    }
-                }
-            }
-        }
-
-        // モードごとのハードウェア更新
-        match &mut app_mode {
-            AppMode::Manual => {
-                controller.update_hardware(&mut px);
-            }
-            AppMode::PromptInput { .. } => {
-                // 入力中はハードウェアを更新しない
-            }
-            AppMode::WaitingForLlm => {
-                if let Some(response) = llm_agent.try_recv_response() {
-                    match response {
-                        LlmResponse::Ok(commands) => {
-                            println!("[LLM] {}件のコマンドを受信、実行します", commands.len());
-                            app_mode = AppMode::ExecutingLlmCommands { queue: CommandQueue::new(commands) };
-                        }
-                        LlmResponse::Err(e) => {
-                            println!("[LLM] エラー: {}", e);
-                            app_mode = AppMode::Manual;
-                        }
-                    }
-                }
-            }
-            AppMode::ExecutingLlmCommands { queue } => {
-                if !queue.tick(&mut px) {
-                    println!("[LLM] コマンド実行完了");
-                    app_mode = AppMode::Manual;
-                }
-            }
-        }
-
-        // カメラのフレームレートに合わせてループを間引き、CPU占有とI2C書き込みの過多を防ぐ
-        let elapsed = loop_start.elapsed();
-        if elapsed < frame_interval {
-            std::thread::sleep(frame_interval - elapsed);
-        }
-    }
+        native_options,
+        Box::new(|cc| {
+            setup_japanese_font(&cc.egui_ctx);
+            Ok(Box::new(PiCarApp::new()?))
+        }),
+    )
+    .map_err(|e| -> Box<dyn std::error::Error> { e.to_string().into() })?;
 
     println!("Stopping camera and cleaning up PiCar-X...");
     Ok(())
