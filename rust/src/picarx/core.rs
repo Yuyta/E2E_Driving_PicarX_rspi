@@ -304,6 +304,11 @@ impl Picarx {
         self.ultrasonic.read_distance()
     }
 
+    /// リトライなしで1回だけ距離計測を試みる(バックグラウンドポーリング向け)
+    pub fn try_get_distance_once(&mut self) -> Option<f64> {
+        self.ultrasonic.try_read_distance_once()
+    }
+
     /// バッテリーの実際の電圧(V)を取得する
     pub fn get_battery_voltage(&mut self) -> Result<f64, Box<dyn std::error::Error>> {
         // 1. バッテリー監視用のA4（チャンネル4）から生のADC値(0〜4095)を取得
