@@ -2,6 +2,7 @@
 mod picarx;
 mod sample;
 mod llm_agent;
+mod sensor_monitor;
 
 fn main() {
     if let Err(e) = sample::picarx_sample::main() {
