@@ -10,9 +10,6 @@ const STEER_ANGLE: i32 = 35;
 const CAMERA_STEP_DEG: i32 = 2;
 const CAMERA_ANGLE_LIMIT: i32 = 45;
 
-// バッテリー低下警告の閾値(V)
-const BATTERY_LOW_VOLTAGE: f64 = 7.0;
-
 // ブザー音
 const BEEP_FREQ_HZ: f32 = 2000.0;
 const BEEP_DURATION_MS: u64 = 50;
@@ -29,18 +26,12 @@ pub enum InputAction {
     CameraLeft,
     CameraRight,
     CameraCenter,
-    GetGrayscale,
-    GetDistance,
-    GetBatteryStatus,
     BeepBuzzer,
 }
 
 pub struct RcController {
     action_states: HashMap<InputAction, bool>,
     key_map: HashMap<egui::Key, InputAction>,
-    was_grayscale_pressed: bool,
-    was_distance_pressed: bool,
-    was_battery_pressed: bool,
     was_beep_pressed: bool,
 }
 
@@ -54,9 +45,6 @@ impl RcController {
         Self {
             action_states,
             key_map,
-            was_grayscale_pressed: false,
-            was_distance_pressed: false,
-            was_battery_pressed: false,
             was_beep_pressed: false,
         }
     }
@@ -125,43 +113,6 @@ impl RcController {
 
         px.set_cam_pan_angle(pan_angle);
         px.set_cam_tilt_angle(tilt_angle);
-
-        // GrayScale Sensor
-        let is_grayscale_pressed = self.is_pressed(InputAction::GetGrayscale);
-        if is_grayscale_pressed && !self.was_grayscale_pressed {
-            if let Ok(values) = px.get_grayscale_data() {
-                println!("[Grayscale Sensor] A0(left): {:4} | A1(center): {:4} | A2(right): {:4}", values[0], values[1], values[2]);
-            } else {
-                println!("[Grayscale Sensor] failed to get grayscale-data.");
-            }
-        }
-        self.was_grayscale_pressed = is_grayscale_pressed;
-
-        // Ultrasonic Sensor
-        let is_distance_pressed = self.is_pressed(InputAction::GetDistance);
-        if is_distance_pressed && !self.was_distance_pressed {
-            let distance = px.get_distance();
-            if distance < 0.0 {
-                println!("[Ultrasonic Sensor] Timeout (Object too far or hardware error)");
-            } else {
-                println!("[Ultrasonic Sensor] Distance: {:.2} cm", distance);
-            }
-        }
-        self.was_distance_pressed = is_distance_pressed;
-
-        // BatterStatus
-        let is_battery_pressed = self.is_pressed(InputAction::GetBatteryStatus);
-        if is_battery_pressed && !self.was_battery_pressed {
-            if let Ok((voltage, percent)) = px.get_battery_status() {
-                if voltage < BATTERY_LOW_VOLTAGE {
-                    println!("[BatteryStatus] Voltage: {:.2} V ({}%) : Battery Low!", voltage, percent);
-                } else {
-                    println!("[BatteryStatus] Voltage: {:.2} V ({}%)", voltage, percent);
-                }
-            } else {
-                println!("[BatteryStatus] failed to get battery-status.");
-            }
-        }
 
         // Beep the buzzer
         let is_beep_pressed = self.is_pressed(InputAction::BeepBuzzer);

@@ -1,12 +1,17 @@
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use ndarray::Array3;
 use eframe::egui;
 use crate::rpi_camera::RpiCamera;
 use crate::picarx::Picarx;
 use crate::llm_agent::{LlmAgent, LlmResponse, CommandQueue};
+use crate::sensor_monitor::SensorMonitor;
 
 use super::rc_controller::{RcController, InputAction};
+
+// バッテリー低下警告の閾値(V)
+const BATTERY_LOW_VOLTAGE: f64 = 7.0;
 
 /// 日本語グリフ(egui標準フォントには含まれない)を表示できるようフォントを追加する。
 /// Sawarabi Gothic (OFLライセンス, rust/assets/に同梱)
@@ -37,9 +42,10 @@ enum AppMode {
 
 struct PiCarApp {
     camera: RpiCamera,
-    px: Picarx,
+    px: Arc<Mutex<Picarx>>,
     controller: RcController,
     llm_agent: LlmAgent,
+    sensor_monitor: SensorMonitor,
     app_mode: AppMode,
     prompt_buffer: String,
     prompt_field_id: egui::Id,
@@ -66,21 +72,21 @@ impl PiCarApp {
         key_map.insert(egui::Key::J, InputAction::CameraLeft);
         key_map.insert(egui::Key::L, InputAction::CameraRight);
         key_map.insert(egui::Key::C, InputAction::CameraCenter);
-        key_map.insert(egui::Key::G, InputAction::GetGrayscale);
-        key_map.insert(egui::Key::U, InputAction::GetDistance);
-        key_map.insert(egui::Key::V, InputAction::GetBatteryStatus);
         key_map.insert(egui::Key::B, InputAction::BeepBuzzer);
 
         let camera = RpiCamera::new(width, height, framerate)
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
         let px = Picarx::new()
             .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
+        let px = Arc::new(Mutex::new(px));
+        let sensor_monitor = SensorMonitor::spawn(Arc::clone(&px));
 
         Ok(Self {
             camera,
             px,
             controller: RcController::new(key_map),
             llm_agent: LlmAgent::new(),
+            sensor_monitor,
             app_mode: AppMode::Manual,
             prompt_buffer: String::new(),
             prompt_field_id: egui::Id::new("prompt_input"),
@@ -128,10 +134,37 @@ impl eframe::App for PiCarApp {
         }
 
         egui::CentralPanel::default().show(ctx, |ui| {
+            // 1. センサー計器類 (最上部、バックグラウンドスレッドの最新値を常時表示)
+            let snapshot = self.sensor_monitor.snapshot();
+            ui.horizontal(|ui| {
+                match snapshot.distance_cm {
+                    Some(d) if d >= 0.0 => { ui.label(format!("距離: {:.1} cm", d)); }
+                    _ => { ui.label("距離: -- cm"); }
+                }
+                if let Some(g) = snapshot.grayscale {
+                    ui.label(format!("グレイスケール: L{:4} C{:4} R{:4}", g[0], g[1], g[2]));
+                }
+                match snapshot.battery {
+                    Some((voltage, percent)) if voltage < BATTERY_LOW_VOLTAGE => {
+                        ui.colored_label(egui::Color32::RED, format!("バッテリー: {:.2}V ({}%) 低下!", voltage, percent));
+                    }
+                    Some((voltage, percent)) => {
+                        ui.label(format!("バッテリー: {:.2}V ({}%)", voltage, percent));
+                    }
+                    None => { ui.label("バッテリー: --"); }
+                }
+            });
+
+            ui.separator();
+
+            // 2. カメラ映像 (中央)
             if let Some(tex) = &self.texture {
                 ui.add(egui::Image::new(tex).max_width(self.width as f32));
             }
 
+            ui.separator();
+
+            // 3. プロンプト入力 (最下部)
             let response = ui.add(
                 egui::TextEdit::singleline(&mut self.prompt_buffer)
                     .id(self.prompt_field_id)
@@ -149,7 +182,7 @@ impl eframe::App for PiCarApp {
             if submitted && matches!(self.app_mode, AppMode::Manual) && !self.prompt_buffer.trim().is_empty() {
                 let prompt = std::mem::take(&mut self.prompt_buffer);
                 println!("[LLM] 送信: {}", prompt);
-                self.px.stop();
+                self.px.lock().unwrap().stop();
                 self.llm_agent.submit_prompt(prompt);
                 self.app_mode = AppMode::WaitingForLlm;
             }
@@ -157,7 +190,7 @@ impl eframe::App for PiCarApp {
             // 手動運転はManualモード、かつプロンプト欄が未フォーカスのときだけ反映する
             if matches!(self.app_mode, AppMode::Manual) && !prompt_has_focus {
                 self.controller.sync_from_egui(ctx);
-                self.controller.update_hardware(&mut self.px);
+                self.controller.update_hardware(&mut self.px.lock().unwrap());
             }
         });
 
@@ -166,7 +199,7 @@ impl eframe::App for PiCarApp {
             AppMode::WaitingForLlm => {
                 if !prompt_has_focus && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                     println!("[LLM] 緊急停止");
-                    self.px.stop();
+                    self.px.lock().unwrap().stop();
                     self.app_mode = AppMode::Manual;
                     return;
                 }
@@ -186,11 +219,11 @@ impl eframe::App for PiCarApp {
             AppMode::ExecutingLlmCommands { queue } => {
                 if !prompt_has_focus && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                     println!("[LLM] 緊急停止");
-                    self.px.stop();
+                    self.px.lock().unwrap().stop();
                     self.app_mode = AppMode::Manual;
                     return;
                 }
-                if !queue.tick(&mut self.px) {
+                if !queue.tick(&mut self.px.lock().unwrap()) {
                     println!("[LLM] コマンド実行完了");
                     self.app_mode = AppMode::Manual;
                 }
@@ -209,10 +242,8 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  ・I / K : カメラ首振り Tilt (上下)");
     println!("  ・J / L : カメラ首振り Pan  (左右)");
     println!("  ・C     : カメラを正面に戻す (センタリング)");
-    println!("  · G     : グレイスケールセンサーの値を表示");
-    println!("  ・U     : 超音波センサーの距離 (cm) を表示");
-    println!("  ・V     : バッテリーステータス(電圧)を表示");
     println!("  ・B     : スピーカーからBeep音を鳴らす");
+    println!("  ・距離/グレイスケール/バッテリーはウィンドウ下部に常時表示されます");
     println!("  ・テキスト欄をクリックして自然言語で指示を入力、Enterで送信 (LLM経由でコマンド実行)");
     println!("  ・Q / ESC : プログラム終了 (テキスト欄が未フォーカスのとき)");
     println!("-------------------------------------------------");
