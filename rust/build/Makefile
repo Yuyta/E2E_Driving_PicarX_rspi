@@ -7,7 +7,7 @@ PARENT_DIR   := $(shell dirname ${MAKEFILE_DIR})
 
 # Architecture
 ## 3bplus/zero2w/4b/5
-MODEL          := 3bplus
+MODEL          := 5
 CPU_FOR_3bplus := cortex-a53
 CPU_FOR_zero2w := cortex-a53
 CPU_FOR_4b     := cortex-a72
@@ -17,13 +17,14 @@ TARGET_CPU      = $(CPU_FOR_$(MODEL))
 # build
 IMAGE_NAME   := picar-builder
 TARGET       := aarch64-unknown-linux-gnu
-PROJECT_ROOT := $(PARENT_DIR)
+# PROJECT_ROOT := $(PARENT_DIR)
+PROJECT_ROOT := C:\Users\tacta\Dev\PiCarX\rust
 APP_NAME     := picar-x-rust
 
 # deploy
-RPI_IP     := 192.168.0.17
-RPI_USER   := y0sshi
-RPI_DIR    := /home/y0sshi/
+RPI_IP     := 192.168.40.119
+RPI_USER   := y_murazato
+RPI_DIR    := /home/y_murazato
 
 # ==============================================================================
 # Commands

@@ -1,9 +1,10 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use ndarray::Array3;
 use eframe::egui;
 use crate::rpi_camera::RpiCamera;
+// 自作モジュール、PiCar-X制御用
 use crate::picarx::Picarx;
 use crate::llm_agent::{LlmAgent, LlmResponse, CommandQueue};
 use crate::sensor_monitor::SensorMonitor;
