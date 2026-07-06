@@ -109,5 +109,13 @@ impl Ultrasonic {
         }
         -1.0
     }
+
+    /// リトライなしで1回だけ計測する(最大でもECHO_TIMEOUT_MS程度しかブロックしない)。
+    /// バックグラウンドでの継続的なポーリング用途で、Picarxを共有するMutexの
+    /// ロック保持時間を短く抑えるために使う。
+    pub fn try_read_distance_once(&mut self) -> Option<f64> {
+        let dist = self.read_once();
+        if dist < 0.0 { None } else { Some(dist) }
+    }
 }
 
