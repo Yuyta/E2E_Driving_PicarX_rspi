@@ -2,6 +2,7 @@ use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 use serde::{Deserialize, Serialize};
 use super::command::Command;
+use super::LlmResponse;
 
 const DEFAULT_OLLAMA_URL: &str = "http://127.0.0.1:11434/api/chat";
 const DEFAULT_OLLAMA_MODEL: &str = "llama3.1";
@@ -51,10 +52,7 @@ struct CommandListPayload {
     commands: Vec<Command>,
 }
 
-pub enum LlmResponse {
-    Ok(Vec<Command>),
-    Err(String),
-}
+
 
 /// LLM(Ollama)との通信を専用スレッドで行い、メインループ(カメラ描画)をブロックしない。
 pub struct LlmAgent {
