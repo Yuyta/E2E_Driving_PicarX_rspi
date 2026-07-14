@@ -100,9 +100,7 @@ pub struct GeminiAgent {
 
 ## 4. 動作検証手順
 
-1. **不要ファイルの整理**:
-   `rust/src/ai` 内の未完成なファイル群を削除してビルドエラーを回避します。
-2. **依存関係追加とビルド確認**:
+1. **依存関係追加とビルド確認**:
    `Cargo.toml` に `dotenvy` を追加した上で `cargo check` を実行。
 3. **キー設定と実行**:
    `rust/.env` に `GEMINI_API_KEY` を設定し、`cargo run` を実行。
