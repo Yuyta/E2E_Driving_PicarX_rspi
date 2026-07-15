@@ -8,6 +8,11 @@ use crate::picarx::Picarx;
 // try_get_distance_once()を使うため、この間隔なら手動運転側のロック待ちも問題にならない。
 const POLL_INTERVAL: Duration = Duration::from_millis(300);
 
+// 超音波センサーはモーター動作中の電気的ノイズ等で単発の外れ値(スパイク)が
+// 出やすいため、複数回サンプリングして中央値を採用することでノイズを除去する。
+const DISTANCE_SAMPLE_COUNT: usize = 3;
+const DISTANCE_SAMPLE_GAP_MS: u64 = 10;
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct SensorSnapshot {
     pub distance_cm: Option<f64>,
@@ -35,7 +40,7 @@ impl SensorMonitor {
             while !shutdown_clone.load(Ordering::Relaxed) {
                 {
                     let mut px = px.lock().unwrap();
-                    let distance = px.try_get_distance_once();
+                    let distance = Self::read_distance_median(&mut px);
                     let grayscale = px.get_grayscale_data().ok();
                     let battery = px.get_battery_status().ok();
                     drop(px);
@@ -51,6 +56,25 @@ impl SensorMonitor {
         });
 
         Self { snapshot, shutdown, handle: Some(handle) }
+    }
+
+    /// 複数回計測して中央値を採用することで、モーター動作時の電気的ノイズ等による
+    /// 単発の外れ値(実際より大きく外れた距離)の影響を軽減する。
+    fn read_distance_median(px: &mut Picarx) -> Option<f64> {
+        let mut samples = Vec::with_capacity(DISTANCE_SAMPLE_COUNT);
+        for i in 0..DISTANCE_SAMPLE_COUNT {
+            if let Some(d) = px.try_get_distance_once() {
+                samples.push(d);
+            }
+            if i + 1 < DISTANCE_SAMPLE_COUNT {
+                thread::sleep(Duration::from_millis(DISTANCE_SAMPLE_GAP_MS));
+            }
+        }
+        if samples.is_empty() {
+            return None;
+        }
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        Some(samples[samples.len() / 2])
     }
 
     /// 最新のセンサー値を取得する(軽量・非ブロッキング)
