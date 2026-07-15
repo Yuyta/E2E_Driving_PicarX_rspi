@@ -1,3 +1,3 @@
 mod core;
 
-pub use core::SensorMonitor;
+pub use core::{SensorMonitor, SensorSnapshot};

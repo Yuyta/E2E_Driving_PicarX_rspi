@@ -24,6 +24,7 @@ Required parameters:
 - get_battery_status: action only
 
 If the user specifies a duration (e.g., "10s", "5 seconds", "2秒"), you MUST convert it to milliseconds and set it in "duration_ms" (e.g., "10s" -> 10000).
+To turn while moving, include 'angle' directly inside the 'forward' or 'backward' command.
 
 If the user does not specify:
 - speed, use 30
@@ -174,6 +175,7 @@ impl GeminiAgent {
                             },
                             "angle": {
                                 "type": "INTEGER",
+                                "description": "Streering angle in degrees. Can be used with forward/backward commands to turn while moving. Positive values turn right, negative values turn left.",
                                 "minimum": -90,
                                 "maximum": 90
                             }

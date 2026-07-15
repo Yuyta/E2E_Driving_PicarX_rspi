@@ -143,20 +143,25 @@ impl eframe::App for PiCarApp {
             let snapshot = self.sensor_monitor.snapshot();
             ui.horizontal(|ui| {
                 match snapshot.distance_cm {
-                    Some(d) if d >= 0.0 => { ui.label(format!("距離: {:.1} cm", d)); }
-                    _ => { ui.label("距離: -- cm"); }
+                    Some(d) if d >= 0.0 => {
+                        ui.colored_label(egui::Color32::LIGHT_BLUE, format!("距離: {:.1} cm", d));
+                    }
+                    _ => { ui.colored_label(egui::Color32::LIGHT_BLUE, "距離: -- cm"); }
                 }
                 if let Some(g) = snapshot.grayscale {
-                    ui.label(format!("グレイスケール: L{:4} C{:4} R{:4}", g[0], g[1], g[2]));
+                    ui.colored_label(
+                        egui::Color32::LIGHT_YELLOW,
+                        format!("グレイスケール: L{:4} C{:4} R{:4}", g[0], g[1], g[2]),
+                    );
                 }
                 match snapshot.battery {
                     Some((voltage, percent)) if voltage < BATTERY_LOW_VOLTAGE => {
                         ui.colored_label(egui::Color32::RED, format!("バッテリー: {:.2}V ({}%) 低下!", voltage, percent));
                     }
                     Some((voltage, percent)) => {
-                        ui.label(format!("バッテリー: {:.2}V ({}%)", voltage, percent));
+                        ui.colored_label(egui::Color32::LIGHT_GREEN, format!("バッテリー: {:.2}V ({}%)", voltage, percent));
                     }
-                    None => { ui.label("バッテリー: --"); }
+                    None => { ui.colored_label(egui::Color32::LIGHT_GREEN, "バッテリー: --"); }
                 }
             });
 
@@ -241,7 +246,7 @@ impl eframe::App for PiCarApp {
                     self.app_mode = AppMode::Manual;
                     return;
                 }
-                if !queue.tick(&mut self.px.lock().unwrap()) {
+                if !queue.tick(&mut self.px.lock().unwrap(), self.sensor_monitor.snapshot()) {
                     println!("[LLM] コマンド実行完了");
                     self.app_mode = AppMode::Manual;
                 }
@@ -261,7 +266,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  ・J / L : カメラ首振り Pan  (左右)");
     println!("  ・C     : カメラを正面に戻す (センタリング)");
     println!("  ・B     : スピーカーからBeep音を鳴らす");
-    println!("  ・距離/グレイスケール/バッテリーはウィンドウ下部に常時表示されます");
+    println!("  ・距離/グレイスケール/バッテリーはウィンドウ上部に常時表示されます");
     println!("  ・テキスト欄をクリックして自然言語で指示を入力、Enterで送信 (LLM経由でコマンド実行)");
     println!("  ・Q / ESC : プログラム終了 (テキスト欄が未フォーカスのとき)");
     println!("-------------------------------------------------");
