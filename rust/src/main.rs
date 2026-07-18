@@ -1,4 +1,4 @@
-﻿mod rpi_camera;
+mod rpi_camera;
 mod picarx;
 mod sample;
 mod llm_agent;
