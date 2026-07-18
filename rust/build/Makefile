@@ -2,12 +2,12 @@
 # Config
 # ==============================================================================
 ## Directory Path
-MAKEFILE_DIR :=$(dir $(abspath $(lastword $(MAKEFILE_LIST))))
-PARENT_DIR   := $(shell dirname ${MAKEFILE_DIR})
+MAKEFILE_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+PARENT_DIR   := $(shell dirname $(MAKEFILE_DIR))
 
 # Architecture
 ## 3bplus/zero2w/4b/5
-MODEL          := 3bplus
+MODEL          := 
 CPU_FOR_3bplus := cortex-a53
 CPU_FOR_zero2w := cortex-a53
 CPU_FOR_4b     := cortex-a72
@@ -21,9 +21,8 @@ PROJECT_ROOT := $(PARENT_DIR)
 APP_NAME     := picar-x-rust
 
 # deploy
-RPI_IP     := 192.168.0.17
-RPI_USER   := y0sshi
-RPI_DIR    := /home/y0sshi/
+RPI_HOST   :=  
+RPI_DIR    := 
 
 # ==============================================================================
 # Commands
@@ -47,11 +46,10 @@ build:
 		cargo build --target $(TARGET) --release
 
 deploy:
-	@echo "Sending $(APP_NAME) to Raspberry Pi ($(RPI_IP))..."
-	scp $(PROJECT_ROOT)/target/$(TARGET)/release/$(APP_NAME) $(RPI_USER)@$(RPI_IP):$(RPI_DIR)/
+	@echo "Sending $(APP_NAME) to Raspberry Pi ($(RPI_HOST))..."
+	scp $(PROJECT_ROOT)/target/$(TARGET)/release/$(APP_NAME) $(RPI_HOST):$(RPI_DIR)/
 	@echo "Deployment complete! Run './$(APP_NAME)' on your Raspberry Pi."
 
 clean:
 	@echo "Cleaning up target directory..."
 	cargo clean
-

@@ -21,8 +21,8 @@
   ```bash
   cd <project_root>/rust/build
   make image   # Docker image作成
-  make build   # Dockerコンテナ上でクロスコンパイル
-  make deploy  # 成果物の実行ファイルを`scp`コマンドでRaspberry Piへ転送
+  make build MODEL=<3bplus/zero2w/4b/5>  # Dockerコンテナ上でクロスコンパイル
+  make deploy RPI_HOST=<YOUR-RPI-HOST> RPI_DIR=<YOUR-RPI-DIR> 成果物の実行ファイルを`scp`コマンドでRaspberry Piへ転送
   ```
 
 ## 環境変数 (LLM連携)

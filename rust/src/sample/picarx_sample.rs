@@ -4,8 +4,9 @@ use std::time::Duration;
 use ndarray::Array3;
 use eframe::egui;
 use crate::rpi_camera::RpiCamera;
+// 自作モジュール、PiCar-X制御用
 use crate::picarx::Picarx;
-use crate::llm_agent::{LlmAgent, LlmResponse, CommandQueue};
+use crate::llm_agent::{LlmAgent, GeminiAgent, LlmResponse, LlmType, CommandQueue};
 use crate::sensor_monitor::SensorMonitor;
 
 use super::rc_controller::{RcController, InputAction};
@@ -44,7 +45,9 @@ struct PiCarApp {
     camera: RpiCamera,
     px: Arc<Mutex<Picarx>>,
     controller: RcController,
-    llm_agent: LlmAgent,
+    ollama_agent: LlmAgent,
+    gemini_agent: GeminiAgent,
+    selected_llm: LlmType,
     sensor_monitor: SensorMonitor,
     app_mode: AppMode,
     prompt_buffer: String,
@@ -85,7 +88,9 @@ impl PiCarApp {
             camera,
             px,
             controller: RcController::new(key_map),
-            llm_agent: LlmAgent::new(),
+            ollama_agent: LlmAgent::new(),
+            gemini_agent: GeminiAgent::new(),
+            selected_llm: LlmType::Gemini,
             sensor_monitor,
             app_mode: AppMode::Manual,
             prompt_buffer: String::new(),
@@ -170,6 +175,12 @@ impl eframe::App for PiCarApp {
             ui.separator();
 
             // 3. プロンプト入力 (最下部)
+            ui.horizontal(|ui| {
+                ui.label("使用するLLM:");
+                ui.radio_value(&mut self.selected_llm, LlmType::Gemini, "Gemini API");
+                ui.radio_value(&mut self.selected_llm, LlmType::Ollama, "Ollama (ローカル)");
+            });
+
             let response = ui.add(
                 egui::TextEdit::singleline(&mut self.prompt_buffer)
                     .id(self.prompt_field_id)
@@ -186,9 +197,12 @@ impl eframe::App for PiCarApp {
             let submitted = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if submitted && matches!(self.app_mode, AppMode::Manual) && !self.prompt_buffer.trim().is_empty() {
                 let prompt = std::mem::take(&mut self.prompt_buffer);
-                println!("[LLM] 送信: {}", prompt);
+                println!("[LLM ({:?})] 送信: {}", self.selected_llm, prompt);
                 self.px.lock().unwrap().stop();
-                self.llm_agent.submit_prompt(prompt);
+                match self.selected_llm {
+                    LlmType::Gemini => self.gemini_agent.submit_prompt(prompt),
+                    LlmType::Ollama => self.ollama_agent.submit_prompt(prompt),
+                }
                 self.app_mode = AppMode::WaitingForLlm;
             }
 
@@ -208,14 +222,18 @@ impl eframe::App for PiCarApp {
                     self.app_mode = AppMode::Manual;
                     return;
                 }
-                if let Some(response) = self.llm_agent.try_recv_response() {
-                    match response {
+                let response = match self.selected_llm {
+                    LlmType::Gemini => self.gemini_agent.try_recv_response(),
+                    LlmType::Ollama => self.ollama_agent.try_recv_response(),
+                };
+                if let Some(res) = response {
+                    match res {
                         LlmResponse::Ok(commands) => {
-                            println!("[LLM] {}件のコマンドを受信、実行します", commands.len());
+                            println!("[LLM ({:?})] {}件のコマンドを受信、実行します", self.selected_llm, commands.len());
                             self.app_mode = AppMode::ExecutingLlmCommands { queue: CommandQueue::new(commands) };
                         }
                         LlmResponse::Err(e) => {
-                            println!("[LLM] エラー: {}", e);
+                            println!("[LLM ({:?})] エラー: {}", self.selected_llm, e);
                             self.app_mode = AppMode::Manual;
                         }
                     }

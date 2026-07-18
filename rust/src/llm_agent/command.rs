@@ -100,9 +100,26 @@ impl ConditionExpr {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum Command {
-    Forward { speed: i32, duration_ms: u64, #[serde(default)] until: Option<ConditionExpr> },
-    Backward { speed: i32, duration_ms: u64, #[serde(default)] until: Option<ConditionExpr> },
-    Steer { angle: i32, duration_ms: u64, #[serde(default)] until: Option<ConditionExpr> },
+    Forward {
+        speed: i32,
+        duration_ms: u64,
+        angle: Option<i32>,
+        #[serde(default)]
+        until: Option<ConditionExpr>,
+    },
+    Backward {
+        speed: i32,
+        duration_ms: u64,
+        angle: Option<i32>,
+        #[serde(default)]
+        until: Option<ConditionExpr>,
+    },
+    Steer {
+        angle: i32,
+        duration_ms: u64,
+        #[serde(default)]
+        until: Option<ConditionExpr>,
+    },
     Stop,
     SetCamPan { angle: i32 },
     SetCamTilt { angle: i32 },
@@ -185,8 +202,18 @@ impl CommandQueue {
     fn start_current(&mut self, px: &mut Picarx) {
         self.current_started_at = Some(Instant::now());
         match &self.commands[self.current_index] {
-            Command::Forward { speed, .. } => px.forward(*speed),
-            Command::Backward { speed, .. } => px.backward(*speed),
+            Command::Forward { speed, angle, .. } => {
+                if let Some(angle) = angle {
+                    px.set_dir_servo_angle(*angle);
+                }
+                px.forward(*speed);
+            }
+            Command::Backward { speed, angle, .. } => {
+                if let Some(angle) = angle {
+                    px.set_dir_servo_angle(*angle);
+                }
+                px.backward(*speed);
+            }
             Command::Steer { angle, .. } => px.set_dir_servo_angle(*angle),
             Command::Stop => px.stop(),
             Command::SetCamPan { angle } => px.set_cam_pan_angle(*angle),
@@ -216,7 +243,10 @@ impl CommandQueue {
     fn finish_current(&mut self, px: &mut Picarx) {
         // タイムベースの移動系コマンドが終わったら安全な状態(停止/直進)に戻す
         match &self.commands[self.current_index] {
-            Command::Forward { .. } | Command::Backward { .. } => px.stop(),
+            Command::Forward { .. } | Command::Backward { .. } => {
+                px.stop();
+                px.set_dir_servo_angle(0); // 曲がったタイヤをまっすぐに戻す
+            }
             Command::Steer { .. } => px.set_dir_servo_angle(0),
             _ => {}
         }
