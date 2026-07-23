@@ -6,7 +6,7 @@ use eframe::egui;
 use crate::rpi_camera::RpiCamera;
 // 自作モジュール、PiCar-X制御用
 use crate::picarx::Picarx;
-use crate::llm_agent::{LlmAgent, GeminiAgent, LlmResponse, LlmType, CommandQueue};
+use crate::llm_agent::{CommandQueue, GeminiAgent, LlmResponse, LlmType, OllamaAgent};
 use crate::sensor_monitor::SensorMonitor;
 
 use super::rc_controller::{RcController, InputAction};
@@ -37,7 +37,10 @@ fn setup_japanese_font(ctx: &egui::Context) {
 /// LLMコマンド実行中に手動操作が割り込むのを防ぐ。
 enum AppMode {
     Manual,
-    WaitingForLlm,
+    WaitingForLlm {
+        llm: LlmType,
+        request_id: u64,
+    },
     ExecutingLlmCommands { queue: CommandQueue },
 }
 
@@ -45,7 +48,7 @@ struct PiCarApp {
     camera: RpiCamera,
     px: Arc<Mutex<Picarx>>,
     controller: RcController,
-    ollama_agent: LlmAgent,
+    ollama_agent: OllamaAgent,
     gemini_agent: GeminiAgent,
     selected_llm: LlmType,
     sensor_monitor: SensorMonitor,
@@ -88,7 +91,7 @@ impl PiCarApp {
             camera,
             px,
             controller: RcController::new(key_map),
-            ollama_agent: LlmAgent::new(),
+            ollama_agent: OllamaAgent::new(),
             gemini_agent: GeminiAgent::new(),
             selected_llm: LlmType::Gemini,
             sensor_monitor,
@@ -177,8 +180,11 @@ impl eframe::App for PiCarApp {
             // 3. プロンプト入力 (最下部)
             ui.horizontal(|ui| {
                 ui.label("使用するLLM:");
-                ui.radio_value(&mut self.selected_llm, LlmType::Gemini, "Gemini API");
-                ui.radio_value(&mut self.selected_llm, LlmType::Ollama, "Ollama (ローカル)");
+                let can_change_llm = matches!(&self.app_mode, AppMode::Manual);
+                ui.add_enabled_ui(can_change_llm, |ui| {
+                    ui.radio_value(&mut self.selected_llm, LlmType::Gemini, "Gemini API");
+                    ui.radio_value(&mut self.selected_llm, LlmType::Ollama, "Ollama (ローカル)");
+                });
             });
 
             let response = ui.add(
@@ -189,25 +195,43 @@ impl eframe::App for PiCarApp {
             );
 
             match &self.app_mode {
-                AppMode::WaitingForLlm => { ui.label("[LLM] 応答待ち..."); }
+                AppMode::WaitingForLlm { .. } => { ui.label("[LLM] 応答待ち..."); }
                 AppMode::ExecutingLlmCommands { .. } => { ui.label("[LLM] コマンド実行中 (Escで緊急停止)"); }
                 AppMode::Manual => {}
             }
 
             let submitted = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if submitted && matches!(self.app_mode, AppMode::Manual) && !self.prompt_buffer.trim().is_empty() {
+            if submitted
+                && matches!(&self.app_mode, AppMode::Manual)
+                && !self.prompt_buffer.trim().is_empty()
+            {
                 let prompt = std::mem::take(&mut self.prompt_buffer);
-                println!("[LLM ({:?})] 送信: {}", self.selected_llm, prompt);
+                let active_llm = self.selected_llm;
                 self.px.lock().unwrap().stop();
-                match self.selected_llm {
+                println!("[LLM ({:?})] 送信: {}", active_llm, prompt);
+                let request_id = match active_llm {
                     LlmType::Gemini => self.gemini_agent.submit_prompt(prompt),
                     LlmType::Ollama => self.ollama_agent.submit_prompt(prompt),
-                }
-                self.app_mode = AppMode::WaitingForLlm;
+                };
+                let request_id = match request_id {
+                    Ok(request_id) => request_id,
+                    Err(error) => {
+                        println!("[LLM ({:?})] 要求の登録に失敗しました: {}", active_llm, error);
+                        return;
+                    }
+                };
+                println!(
+                    "[LLM ({:?}, request_id={})] 要求を登録しました",
+                    active_llm, request_id
+                );
+                self.app_mode = AppMode::WaitingForLlm {
+                    llm: active_llm,
+                    request_id,
+                };
             }
 
             // 手動運転はManualモード、かつプロンプト欄が未フォーカスのときだけ反映する
-            if matches!(self.app_mode, AppMode::Manual) && !prompt_has_focus {
+            if matches!(&self.app_mode, AppMode::Manual) && !prompt_has_focus {
                 self.controller.sync_from_egui(ctx);
                 self.controller.update_hardware(&mut self.px.lock().unwrap());
             }
@@ -215,27 +239,54 @@ impl eframe::App for PiCarApp {
 
         match &mut self.app_mode {
             AppMode::Manual => {}
-            AppMode::WaitingForLlm => {
+            AppMode::WaitingForLlm { llm, request_id } => {
+                let active_llm = *llm;
+                let active_request_id = *request_id;
                 if !prompt_has_focus && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
                     println!("[LLM] 緊急停止");
+                    match active_llm {
+                        LlmType::Gemini => self.gemini_agent.cancel(active_request_id),
+                        LlmType::Ollama => self.ollama_agent.cancel(active_request_id),
+                    }
                     self.px.lock().unwrap().stop();
                     self.app_mode = AppMode::Manual;
                     return;
                 }
-                let response = match self.selected_llm {
+                let response = match active_llm {
                     LlmType::Gemini => self.gemini_agent.try_recv_response(),
                     LlmType::Ollama => self.ollama_agent.try_recv_response(),
                 };
-                if let Some(res) = response {
-                    match res {
-                        LlmResponse::Ok(commands) => {
-                            println!("[LLM ({:?})] {}件のコマンドを受信、実行します", self.selected_llm, commands.len());
-                            self.app_mode = AppMode::ExecutingLlmCommands { queue: CommandQueue::new(commands) };
+                match response {
+                    Ok(Some(res)) if res.request_id() != active_request_id => {
+                        println!(
+                            "[LLM ({:?}, request_id={})] 古いレスポンスを破棄します",
+                            active_llm,
+                            res.request_id()
+                        );
+                    }
+                    Ok(Some(res)) => match res {
+                        LlmResponse::Ok { commands, .. } => {
+                            println!(
+                                "[LLM ({:?}, request_id={})] {}件のコマンドを受信、実行します",
+                                active_llm, active_request_id, commands.len()
+                            );
+                            self.app_mode = AppMode::ExecutingLlmCommands {
+                                queue: CommandQueue::new(commands),
+                            };
                         }
-                        LlmResponse::Err(e) => {
-                            println!("[LLM ({:?})] エラー: {}", self.selected_llm, e);
+                        LlmResponse::Err { message, .. } => {
+                            println!(
+                                "[LLM ({:?}, request_id={})] エラー: {}",
+                                active_llm, active_request_id, message
+                            );
                             self.app_mode = AppMode::Manual;
                         }
+                    },
+                    Ok(None) => {}
+                    Err(error) => {
+                        println!("[LLM ({:?})] 応答ワーカーエラー: {}", active_llm, error);
+                        self.px.lock().unwrap().stop();
+                        self.app_mode = AppMode::Manual;
                     }
                 }
             }
