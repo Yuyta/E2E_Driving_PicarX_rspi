@@ -3,7 +3,7 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::common::{command_schema, LlmProvider, ProviderAgent, SYSTEM_PROMPT};
+use super::common::{LlmProvider, ProviderAgent, SYSTEM_PROMPT, command_schema};
 
 const DEFAULT_OLLAMA_HOST: &str = "127.0.0.1";
 const DEFAULT_OLLAMA_PORT: &str = "11434";

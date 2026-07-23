@@ -3,7 +3,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_json::Value;
 
-use super::common::{command_schema, LlmProvider, ProviderAgent, SYSTEM_PROMPT};
+use super::common::{LlmProvider, ProviderAgent, SYSTEM_PROMPT, command_schema};
 
 #[derive(Debug, Deserialize)]
 struct GeminiResponsePart {
@@ -95,10 +95,10 @@ fn load_api_key() -> String {
     // keeping this provider-specific environment handling out of the agent.
     let _ = dotenvy::dotenv();
 
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(exe_dir) = exe_path.parent() {
-            let _ = dotenvy::from_path(exe_dir.join(".env"));
-        }
+    if let Ok(exe_path) = std::env::current_exe()
+        && let Some(exe_dir) = exe_path.parent()
+    {
+        let _ = dotenvy::from_path(exe_dir.join(".env"));
     }
 
     let _ = dotenvy::from_path("rust/.env");
@@ -164,13 +164,13 @@ impl LlmProvider for GeminiProvider {
                     "Gemini APIから回答（candidates）が得られませんでした。".to_string()
                 })?;
 
-                if let Some(reason) = candidate.finish_reason.as_deref() {
-                    if reason != "STOP" {
-                        return Err(format!(
-                            "Geminiが正常終了しませんでした。finishReason={}",
-                            reason
-                        ));
-                    }
+                if let Some(reason) = candidate.finish_reason.as_deref()
+                    && reason != "STOP"
+                {
+                    return Err(format!(
+                        "Geminiが正常終了しませんでした。finishReason={}",
+                        reason
+                    ));
                 }
 
                 let content = candidate

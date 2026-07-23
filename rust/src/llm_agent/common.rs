@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::Arc;
 use std::thread;
 
 use serde::Deserialize;
@@ -503,7 +503,7 @@ fn validate_condition(value: &Value, command_index: usize, depth: usize) -> Resu
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::{parse_commands, LlmProvider, LlmResponse, ProviderAgent};
+    use super::{LlmProvider, LlmResponse, ProviderAgent, parse_commands};
     use crate::llm_agent::command::Command;
 
     struct MockProvider;
@@ -515,6 +515,15 @@ mod tests {
             } else {
                 Ok(r#"{"commands":[{"action":"stop"}]}"#.to_string())
             }
+        }
+    }
+
+    struct SlowProvider;
+
+    impl LlmProvider for SlowProvider {
+        fn request(&self, _prompt: &str) -> Result<String, String> {
+            std::thread::sleep(Duration::from_millis(20));
+            Ok(r#"{"commands":[{"action":"stop"}]}"#.to_string())
         }
     }
 
@@ -612,5 +621,24 @@ mod tests {
         let second = receive_response(&agent);
         assert!(matches!(first, LlmResponse::Ok { request_id: 1, .. }));
         assert!(matches!(second, LlmResponse::Err { request_id: 2, .. }));
+    }
+
+    #[test]
+    fn cancellation_suppresses_in_flight_response() {
+        let agent = ProviderAgent::with_provider(SlowProvider);
+        let request_id = agent.submit_prompt("slow".to_string()).unwrap();
+        agent.cancel(request_id);
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            assert!(
+                agent.try_recv_response().unwrap().is_none(),
+                "cancelled response must not reach the application"
+            );
+            if Instant::now() >= deadline {
+                break;
+            }
+            std::thread::yield_now();
+        }
     }
 }

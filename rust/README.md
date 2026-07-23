@@ -25,6 +25,23 @@
   make deploy RPI_HOST=<YOUR-RPI-HOST> RPI_DIR=<YOUR-RPI-DIR> 成果物の実行ファイルを`scp`コマンドでRaspberry Piへ転送
   ```
 
+## CI
+
+`.github/workflows/rust-ci.yml` は、push、Pull Request、手動実行で以下を確認します。
+
+- `rustfmt` と Clippy (`-D warnings`)
+- Raspberry Pi 3B+向け `aarch64-unknown-linux-gnu` リリースビルド
+- UnitTest実行とJUnit XMLレポート
+
+UnitTestの結果はGitHub Actionsのチェック、ジョブサマリー、JUnit XMLのArtifactで確認できます。ローカルでは次のMakeターゲットを利用できます。
+
+```bash
+cd <project_root>/rust/build
+make fmt
+make lint MODEL=3bplus
+make test MODEL=3bplus  # クロス環境でUnitTestバイナリをコンパイル
+```
+
 ## 環境変数 (LLM連携)
 
 自然言語プロンプトからロボットへの命令を生成するため、LAN上の別ホストPCで動かした[Ollama](https://ollama.com/)サーバーに接続します。実行前に以下の環境変数を設定してください(未設定の場合は既定値が使われます)。

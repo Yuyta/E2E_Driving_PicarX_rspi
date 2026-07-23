@@ -27,7 +27,7 @@ RPI_DIR    :=
 # ==============================================================================
 # Commands
 # ==============================================================================
-.PHONY: all image build deploy clean
+.PHONY: all image build fmt lint test deploy clean
 
 all: build
 
@@ -44,6 +44,30 @@ build:
 		-e RUSTFLAGS="-C target-cpu=$(TARGET_CPU)" \
 		$(IMAGE_NAME) \
 		cargo build --target $(TARGET) --release
+
+fmt:
+	@echo "Checking Rust formatting..."
+	cargo fmt --all -- --check
+
+lint:
+	@echo "Running Rust Clippy for $(TARGET)..."
+	docker run --rm \
+		-v "$(PROJECT_ROOT)":/workspace \
+		-v cargo-cache:/usr/local/cargo/registry \
+		-v cargo-git:/usr/local/cargo/git \
+		-e RUSTFLAGS="-C target-cpu=$(TARGET_CPU)" \
+		$(IMAGE_NAME) \
+		cargo clippy --target $(TARGET) --release -- -D warnings
+
+test:
+	@echo "Compiling Rust unit tests for $(TARGET)..."
+	docker run --rm \
+		-v "$(PROJECT_ROOT)":/workspace \
+		-v cargo-cache:/usr/local/cargo/registry \
+		-v cargo-git:/usr/local/cargo/git \
+		-e RUSTFLAGS="-C target-cpu=$(TARGET_CPU)" \
+		$(IMAGE_NAME) \
+		cargo test --target $(TARGET) --release --no-run
 
 deploy:
 	@echo "Sending $(APP_NAME) to Raspberry Pi ($(RPI_HOST))..."

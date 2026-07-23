@@ -1,15 +1,15 @@
+use crate::rpi_camera::RpiCamera;
+use eframe::egui;
+use ndarray::Array3;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use ndarray::Array3;
-use eframe::egui;
-use crate::rpi_camera::RpiCamera;
 // 自作モジュール、PiCar-X制御用
-use crate::picarx::Picarx;
 use crate::llm_agent::{CommandQueue, GeminiAgent, LlmResponse, LlmType, OllamaAgent};
+use crate::picarx::Picarx;
 use crate::sensor_monitor::SensorMonitor;
 
-use super::rc_controller::{RcController, InputAction};
+use super::rc_controller::{InputAction, RcController};
 
 // バッテリー低下警告の閾値(V)
 const BATTERY_LOW_VOLTAGE: f64 = 7.0;
@@ -20,13 +20,16 @@ fn setup_japanese_font(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         "sawarabi_gothic".to_owned(),
-        egui::FontData::from_static(include_bytes!("../../assets/SawarabiGothic-Regular.ttf")).into(),
+        egui::FontData::from_static(include_bytes!("../../assets/SawarabiGothic-Regular.ttf"))
+            .into(),
     );
-    fonts.families
+    fonts
+        .families
         .entry(egui::FontFamily::Proportional)
         .or_default()
         .insert(0, "sawarabi_gothic".to_owned());
-    fonts.families
+    fonts
+        .families
         .entry(egui::FontFamily::Monospace)
         .or_default()
         .push("sawarabi_gothic".to_owned());
@@ -37,10 +40,7 @@ fn setup_japanese_font(ctx: &egui::Context) {
 /// LLMコマンド実行中に手動操作が割り込むのを防ぐ。
 enum AppMode {
     Manual,
-    WaitingForLlm {
-        llm: LlmType,
-        request_id: u64,
-    },
+    WaitingForLlm { llm: LlmType, request_id: u64 },
     ExecutingLlmCommands { queue: CommandQueue },
 }
 
@@ -149,7 +149,9 @@ impl eframe::App for PiCarApp {
                     Some(d) if d >= 0.0 => {
                         ui.colored_label(egui::Color32::LIGHT_BLUE, format!("距離: {:.1} cm", d));
                     }
-                    _ => { ui.colored_label(egui::Color32::LIGHT_BLUE, "距離: -- cm"); }
+                    _ => {
+                        ui.colored_label(egui::Color32::LIGHT_BLUE, "距離: -- cm");
+                    }
                 }
                 if let Some(g) = snapshot.grayscale {
                     ui.colored_label(
@@ -159,12 +161,20 @@ impl eframe::App for PiCarApp {
                 }
                 match snapshot.battery {
                     Some((voltage, percent)) if voltage < BATTERY_LOW_VOLTAGE => {
-                        ui.colored_label(egui::Color32::RED, format!("バッテリー: {:.2}V ({}%) 低下!", voltage, percent));
+                        ui.colored_label(
+                            egui::Color32::RED,
+                            format!("バッテリー: {:.2}V ({}%) 低下!", voltage, percent),
+                        );
                     }
                     Some((voltage, percent)) => {
-                        ui.colored_label(egui::Color32::LIGHT_GREEN, format!("バッテリー: {:.2}V ({}%)", voltage, percent));
+                        ui.colored_label(
+                            egui::Color32::LIGHT_GREEN,
+                            format!("バッテリー: {:.2}V ({}%)", voltage, percent),
+                        );
                     }
-                    None => { ui.colored_label(egui::Color32::LIGHT_GREEN, "バッテリー: --"); }
+                    None => {
+                        ui.colored_label(egui::Color32::LIGHT_GREEN, "バッテリー: --");
+                    }
                 }
             });
 
@@ -195,8 +205,12 @@ impl eframe::App for PiCarApp {
             );
 
             match &self.app_mode {
-                AppMode::WaitingForLlm { .. } => { ui.label("[LLM] 応答待ち..."); }
-                AppMode::ExecutingLlmCommands { .. } => { ui.label("[LLM] コマンド実行中 (Escで緊急停止)"); }
+                AppMode::WaitingForLlm { .. } => {
+                    ui.label("[LLM] 応答待ち...");
+                }
+                AppMode::ExecutingLlmCommands { .. } => {
+                    ui.label("[LLM] コマンド実行中 (Escで緊急停止)");
+                }
                 AppMode::Manual => {}
             }
 
@@ -216,7 +230,10 @@ impl eframe::App for PiCarApp {
                 let request_id = match request_id {
                     Ok(request_id) => request_id,
                     Err(error) => {
-                        println!("[LLM ({:?})] 要求の登録に失敗しました: {}", active_llm, error);
+                        println!(
+                            "[LLM ({:?})] 要求の登録に失敗しました: {}",
+                            active_llm, error
+                        );
                         return;
                     }
                 };
@@ -233,7 +250,8 @@ impl eframe::App for PiCarApp {
             // 手動運転はManualモード、かつプロンプト欄が未フォーカスのときだけ反映する
             if matches!(&self.app_mode, AppMode::Manual) && !prompt_has_focus {
                 self.controller.sync_from_egui(ctx);
-                self.controller.update_hardware(&mut self.px.lock().unwrap());
+                self.controller
+                    .update_hardware(&mut self.px.lock().unwrap());
             }
         });
 
@@ -268,7 +286,9 @@ impl eframe::App for PiCarApp {
                         LlmResponse::Ok { commands, .. } => {
                             println!(
                                 "[LLM ({:?}, request_id={})] {}件のコマンドを受信、実行します",
-                                active_llm, active_request_id, commands.len()
+                                active_llm,
+                                active_request_id,
+                                commands.len()
                             );
                             self.app_mode = AppMode::ExecutingLlmCommands {
                                 queue: CommandQueue::new(commands),
@@ -318,7 +338,9 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("  ・C     : カメラを正面に戻す (センタリング)");
     println!("  ・B     : スピーカーからBeep音を鳴らす");
     println!("  ・距離/グレイスケール/バッテリーはウィンドウ上部に常時表示されます");
-    println!("  ・テキスト欄をクリックして自然言語で指示を入力、Enterで送信 (LLM経由でコマンド実行)");
+    println!(
+        "  ・テキスト欄をクリックして自然言語で指示を入力、Enterで送信 (LLM経由でコマンド実行)"
+    );
     println!("  ・Q / ESC : プログラム終了 (テキスト欄が未フォーカスのとき)");
     println!("-------------------------------------------------");
 

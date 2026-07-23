@@ -1,7 +1,7 @@
-mod rpi_camera;
-mod picarx;
-mod sample;
 mod llm_agent;
+mod picarx;
+mod rpi_camera;
+mod sample;
 mod sensor_monitor;
 
 fn main() {
@@ -10,4 +10,3 @@ fn main() {
         std::process::exit(1);
     }
 }
-
