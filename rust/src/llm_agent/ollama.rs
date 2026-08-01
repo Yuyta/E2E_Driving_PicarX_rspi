@@ -21,6 +21,13 @@ struct OllamaChatRequest<'a> {
     messages: Vec<OllamaMessage<'a>>,
     format: Value,
     stream: bool,
+    options: OllamaOptions,
+}
+
+#[derive(Serialize)]
+struct OllamaOptions {
+    temperature: f32,
+    num_predict: u32,
 }
 
 #[derive(Deserialize)]
@@ -95,6 +102,10 @@ impl LlmProvider for OllamaProvider {
             ],
             format: command_schema(),
             stream: false,
+            options: OllamaOptions {
+                temperature: 0.0,
+                num_predict: 512,
+            },
         };
 
         ureq::AgentBuilder::new()
@@ -111,7 +122,7 @@ impl LlmProvider for OllamaProvider {
 
 #[cfg(test)]
 mod tests {
-    use super::{OllamaChatRequest, OllamaProvider};
+    use super::{OllamaChatRequest, OllamaOptions, OllamaProvider};
     use crate::llm_agent::common::command_schema;
 
     #[test]
@@ -133,6 +144,10 @@ mod tests {
             messages: Vec::new(),
             format: command_schema(),
             stream: false,
+            options: OllamaOptions {
+                temperature: 0.0,
+                num_predict: 512,
+            },
         };
         let body = serde_json::to_value(request).expect("request should serialize");
 
@@ -141,5 +156,7 @@ mod tests {
             body["format"]["properties"]["commands"]["items"]["properties"]["until"]["$ref"],
             "#/$defs/Condition"
         );
+        assert_eq!(body["options"]["temperature"], 0.0);
+        assert_eq!(body["options"]["num_predict"], 512);
     }
 }

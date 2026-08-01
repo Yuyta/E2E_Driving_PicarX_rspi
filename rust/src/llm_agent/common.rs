@@ -20,6 +20,9 @@ set_cam_pan(angle -90..90), set_cam_tilt(angle -90..90), get_distance,
 get_grayscale, and get_battery_status.
 Movement commands require duration_ms as a safety-bound maximum; use 1000ms when no duration is specified.
 Convert durations such as 2 seconds or 2秒 into milliseconds.
+Always include speed and duration_ms for forward/backward, angle and duration_ms for steer,
+and angle for set_cam_pan/set_cam_tilt. For stop and sensor-read commands, include only action.
+Return only the commands needed for the user's request; do not invent extra movement or camera commands.
 An until condition is optional on movement commands. It can be a sensor leaf
 (sensor distance, grayscale_left, grayscale_center, grayscale_right, battery_voltage, or battery_percent;
 op eq, ne, gte, lte, gt, or lt; and numeric value) or nested and/or/xor/not conditions.
@@ -235,6 +238,41 @@ pub fn command_schema() -> Value {
                         "angle": { "type": "integer", "minimum": -90, "maximum": 90 },
                         "until": { "$ref": "#/$defs/Condition" }
                     },
+                    "anyOf": [
+                        {
+                            "type": "object",
+                            "properties": {
+                                "action": { "enum": ["forward", "backward"] }
+                            },
+                            "required": ["action", "speed", "duration_ms"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "action": { "enum": ["steer"] }
+                            },
+                            "required": ["action", "angle", "duration_ms"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "action": { "enum": ["set_cam_pan", "set_cam_tilt"] }
+                            },
+                            "required": ["action", "angle"]
+                        },
+                        {
+                            "type": "object",
+                            "properties": {
+                                "action": {
+                                    "enum": [
+                                        "stop", "get_distance", "get_grayscale",
+                                        "get_battery_status"
+                                    ]
+                                }
+                            },
+                            "required": ["action"]
+                        }
+                    ],
                     "required": ["action"],
                     "additionalProperties": false
                 }
@@ -303,6 +341,12 @@ fn normalize_and_validate_command(command: &mut Value, index: usize) -> Result<(
         .map(str::to_owned)
         .ok_or_else(|| format!("コマンド[{}]に action がありません", index))?;
 
+    // Some local models serialize an integer-valued JSON number as `1000.0`.
+    // Converting only finite, integral values preserves the range checks below.
+    for field in ["speed", "duration_ms", "angle"] {
+        normalize_integral_number(object, field);
+    }
+
     match action.as_str() {
         "forward" | "backward" => {
             set_default_u64(object, "duration_ms", DEFAULT_DURATION_MS);
@@ -320,6 +364,7 @@ fn normalize_and_validate_command(command: &mut Value, index: usize) -> Result<(
         }
         "steer" => {
             set_default_u64(object, "duration_ms", DEFAULT_DURATION_MS);
+            set_default_i64(object, "angle", 0);
             validate_u64_range(
                 object,
                 "duration_ms",
@@ -331,6 +376,7 @@ fn normalize_and_validate_command(command: &mut Value, index: usize) -> Result<(
             validate_until(object, index)?;
         }
         "set_cam_pan" | "set_cam_tilt" => {
+            set_default_i64(object, "angle", 0);
             validate_i64_range(object, "angle", MIN_ANGLE, MAX_ANGLE, index)?;
         }
         "stop" | "get_distance" | "get_grayscale" | "get_battery_status" => {}
@@ -350,6 +396,27 @@ fn set_default_i64(object: &mut Map<String, Value>, field: &str, default: i64) {
     if object.get(field).is_none_or(Value::is_null) {
         object.insert(field.to_string(), Value::from(default));
     }
+}
+
+fn normalize_integral_number(object: &mut Map<String, Value>, field: &str) {
+    let Some(value) = object.get(field).cloned() else {
+        return;
+    };
+    if value.as_i64().is_some() || value.as_u64().is_some() {
+        return;
+    }
+
+    let Some(number) = value.as_f64() else {
+        return;
+    };
+    if !number.is_finite() || number.fract() != 0.0 || number < 0.0 {
+        if field == "angle" && number.is_finite() && number.fract() == 0.0 {
+            object.insert(field.to_string(), Value::from(number as i64));
+        }
+        return;
+    }
+
+    object.insert(field.to_string(), Value::from(number as u64));
 }
 
 fn validate_u64_range(
@@ -549,6 +616,7 @@ mod tests {
             schema["properties"]["commands"]["items"]["properties"]["until"]["$ref"],
             "#/$defs/Condition"
         );
+        assert!(schema["properties"]["commands"]["items"]["anyOf"].is_array());
         assert_eq!(schema["$defs"]["Condition"]["type"], "object");
     }
 
@@ -588,6 +656,35 @@ mod tests {
         );
         assert!(parse_commands(r#"{"commands":[{"action":"forward","speed":101}]}"#).is_err());
         assert!(parse_commands(r#"{"commands":[{"action":"set_cam_pan","angle":91}]}"#).is_err());
+    }
+
+    #[test]
+    fn parser_defaults_missing_angles_and_normalizes_integral_floats() {
+        let commands = parse_commands(
+            r#"{"commands":[{"action":"steer","duration_ms":1000.0},{"action":"set_cam_pan"},{"action":"forward","speed":40.0,"duration_ms":500.0}]}"#,
+        )
+        .expect("safe angle defaults and integral floats should be accepted");
+
+        assert!(matches!(
+            commands.first(),
+            Some(Command::Steer {
+                angle: 0,
+                duration_ms: 1000,
+                ..
+            })
+        ));
+        assert!(matches!(
+            commands.get(1),
+            Some(Command::SetCamPan { angle: 0 })
+        ));
+        assert!(matches!(
+            commands.get(2),
+            Some(Command::Forward {
+                speed: 40,
+                duration_ms: 500,
+                ..
+            })
+        ));
     }
 
     #[test]
