@@ -60,6 +60,7 @@ struct PiCarApp {
     width: usize,
     height: usize,
     frame_interval: Duration,
+    last_reply: String,
 }
 
 impl PiCarApp {
@@ -103,6 +104,7 @@ impl PiCarApp {
             width,
             height,
             frame_interval: Duration::from_secs_f64(1.0 / framerate as f64),
+            last_reply: String::new(),
         })
     }
 }
@@ -197,6 +199,13 @@ impl eframe::App for PiCarApp {
                 });
             });
 
+            if !self.last_reply.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.colored_label(egui::Color32::LIGHT_GREEN, &self.last_reply);
+                });
+                ui.add_space(4.0);
+            }
+
             let response = ui.add(
                 egui::TextEdit::singleline(&mut self.prompt_buffer)
                     .id(self.prompt_field_id)
@@ -283,13 +292,15 @@ impl eframe::App for PiCarApp {
                         );
                     }
                     Ok(Some(res)) => match res {
-                        LlmResponse::Ok { commands, .. } => {
+                        LlmResponse::Ok { commands, reply, .. } => {
                             println!(
-                                "[LLM ({:?}, request_id={})] {}件のコマンドを受信、実行します",
+                                "[LLM ({:?}, request_id={})] {}件のコマンドを受信、実行します。返答: {}",
                                 active_llm,
                                 active_request_id,
-                                commands.len()
+                                commands.len(),
+                                reply
                             );
+                            self.last_reply = format!("[PiCar-X]: {}", reply);
                             self.app_mode = AppMode::ExecutingLlmCommands {
                                 queue: CommandQueue::new(commands),
                             };

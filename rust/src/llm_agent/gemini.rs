@@ -100,9 +100,13 @@ fn command_response_schema() -> Value {
                     },
                     "required": ["action"]
                 }
+            },
+            "reply": {
+                "type": "STRING",
+                "description": "A short, natural reply message in Japanese to the user's request."
             }
         },
-        "required": ["commands"]
+        "required": ["commands", "reply"]
     })
 }
 
@@ -132,9 +136,9 @@ fn gemini_prompt(prompt: &str) -> String {
         "{}\n\nGemini-specific output rules:\n\
          - Return compact JSON only.\n\
          - Do not include null values, empty objects, markdown, or explanations.\n\
-         - For simple driving, omit sensor stop fields.\n\
-         - For a single sensor stop condition, prefer until_sensor, until_op, and until_value.\n\
-         - For combined sensor stop conditions, use until_logic and until_conditions.\n\
+         - IMPORTANT: Do not output any sensor stop fields (until, until_sensor, until_op, until_value, until_logic, until_conditions) unless the user explicitly requests a sensor-based stopping condition in their prompt.\n\
+         - For a single sensor stop condition (when explicitly requested), prefer until_sensor, until_op, and until_value.\n\
+         - For combined sensor stop conditions (when explicitly requested), use until_logic and until_conditions.\n\
          - Do not output an empty until object.\n\n\
          User request: {}",
         SYSTEM_PROMPT, prompt

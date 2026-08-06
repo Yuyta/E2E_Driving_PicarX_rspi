@@ -12,7 +12,9 @@ use super::command::Command;
 /// Both providers use the same command semantics and defaults.
 pub const SYSTEM_PROMPT: &str = r#"You are a command interpreter for a PiCar-X robot car.
 Given a natural-language instruction in Japanese or English, respond with ONLY a JSON object, no prose or markdown.
-The object has one field "commands": an array of command objects.
+The object must contain:
+1. "commands": an array of command objects.
+2. "reply": a short, natural Japanese message responding to the user's instruction (e.g. "はい、前進します", "こんにちは！何かお手伝いできることはありますか？").
 Supported commands: forward(speed 0-100, duration_ms, optional angle and until),
 backward(speed 0-100, duration_ms, optional angle and until),
 steer(angle -90..90, duration_ms, optional until), stop,
@@ -23,11 +25,12 @@ Convert durations such as 2 seconds or 2秒 into milliseconds.
 Always include speed and duration_ms for forward/backward, angle and duration_ms for steer,
 and angle for set_cam_pan/set_cam_tilt. For stop and sensor-read commands, include only action.
 Return only the commands needed for the user's request; do not invent extra movement or camera commands.
-An until condition is optional on movement commands. It can be a sensor leaf
+An until condition is optional on movement commands. Do not include any until conditions unless the user explicitly requests sensor-based stopping (e.g. "stop when distance < 10").
+When explicitly requested, the until condition can be a sensor leaf
 (sensor distance, grayscale_left, grayscale_center, grayscale_right, battery_voltage, or battery_percent;
 op eq, ne, gte, lte, gt, or lt; and numeric value) or nested and/or/xor/not conditions.
 Use concrete thresholds for vague words such as near, close, or far.
-Example: {"commands":[{"action":"forward","speed":50,"duration_ms":2000},{"action":"stop"}]}"#;
+Example: {"commands":[{"action":"forward","speed":50,"duration_ms":2000},{"action":"stop"}],"reply":"かしこまりました。前進した後に停止します。"}"#;
 
 /// Common response type consumed by the application loop.
 #[derive(Debug)]
@@ -35,6 +38,7 @@ pub enum LlmResponse {
     Ok {
         request_id: u64,
         commands: Vec<Command>,
+        reply: String,
     },
     Err {
         request_id: u64,
@@ -99,9 +103,10 @@ where
                     .request(&prompt.text)
                     .and_then(|json| parse_commands(&json))
                 {
-                    Ok(commands) => LlmResponse::Ok {
+                    Ok((commands, reply)) => LlmResponse::Ok {
                         request_id: prompt.request_id,
                         commands,
+                        reply,
                     },
                     Err(message) => LlmResponse::Err {
                         request_id: prompt.request_id,
@@ -176,6 +181,7 @@ fn advance_atomic_max(value: &AtomicU64, candidate: u64) {
 #[derive(Deserialize)]
 struct CommandListPayload {
     commands: Vec<Command>,
+    reply: String,
 }
 
 /// Standard JSON Schema shared by both provider transports.
@@ -276,9 +282,13 @@ pub fn command_schema() -> Value {
                     "required": ["action"],
                     "additionalProperties": false
                 }
+            },
+            "reply": {
+                "type": "string",
+                "description": "A short, natural reply message in Japanese to the user's request."
             }
         },
-        "required": ["commands"],
+        "required": ["commands", "reply"],
         "additionalProperties": false
     })
 }
@@ -294,7 +304,7 @@ const MAX_ANGLE: i64 = 90;
 const MAX_CONDITION_DEPTH: usize = 8;
 
 /// Parse and normalize the provider-independent command response.
-pub fn parse_commands(response_text: &str) -> Result<Vec<Command>, String> {
+pub fn parse_commands(response_text: &str) -> Result<(Vec<Command>, String), String> {
     let mut value: Value = serde_json::from_str(response_text).map_err(|e| {
         format!(
             "LLMが返したコマンドJSONの解析に失敗: {} (受信内容: {})",
@@ -322,7 +332,7 @@ pub fn parse_commands(response_text: &str) -> Result<Vec<Command>, String> {
     }
 
     serde_json::from_value::<CommandListPayload>(value)
-        .map(|payload| payload.commands)
+        .map(|payload| (payload.commands, payload.reply))
         .map_err(|e| {
             format!(
                 "LLMが返したコマンドJSONの解析に失敗: {} (受信内容: {})",
