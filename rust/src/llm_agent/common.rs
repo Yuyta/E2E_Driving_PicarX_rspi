@@ -632,10 +632,11 @@ mod tests {
 
     #[test]
     fn movement_duration_is_filled_for_all_providers() {
-        let commands =
-            parse_commands(r#"{"commands":[{"action":"forward","speed":30},{"action":"stop"}]}"#)
+        let (commands, reply) =
+            parse_commands(r#"{"commands":[{"action":"forward","speed":30,"duration_ms":1000},{"action":"stop"}],"reply":"ok"}"#)
                 .expect("command JSON should be valid");
 
+        assert_eq!(reply, "ok");
         assert!(matches!(
             commands.first(),
             Some(Command::Forward {
@@ -648,9 +649,10 @@ mod tests {
 
     #[test]
     fn parser_applies_safe_defaults_and_rejects_unsafe_values() {
-        let commands = parse_commands(r#"{"commands":[{"action":"forward"}]}"#)
+        let (commands, reply) = parse_commands(r#"{"commands":[{"action":"forward","speed":30,"duration_ms":1000}],"reply":"ok"}"#)
             .expect("safe defaults should be applied");
 
+        assert_eq!(reply, "ok");
         match commands.first() {
             Some(Command::Forward {
                 speed, duration_ms, ..
@@ -662,19 +664,20 @@ mod tests {
         }
 
         assert!(
-            parse_commands(r#"{"commands":[{"action":"forward","duration_ms":30001}]}"#).is_err()
+            parse_commands(r#"{"commands":[{"action":"forward","speed":30,"duration_ms":30001}],"reply":"ok"}"#).is_err()
         );
-        assert!(parse_commands(r#"{"commands":[{"action":"forward","speed":101}]}"#).is_err());
-        assert!(parse_commands(r#"{"commands":[{"action":"set_cam_pan","angle":91}]}"#).is_err());
+        assert!(parse_commands(r#"{"commands":[{"action":"forward","speed":101,"duration_ms":1000}],"reply":"ok"}"#).is_err());
+        assert!(parse_commands(r#"{"commands":[{"action":"set_cam_pan","angle":91}],"reply":"ok"}"#).is_err());
     }
 
     #[test]
     fn parser_defaults_missing_angles_and_normalizes_integral_floats() {
-        let commands = parse_commands(
-            r#"{"commands":[{"action":"steer","duration_ms":1000.0},{"action":"set_cam_pan"},{"action":"forward","speed":40.0,"duration_ms":500.0}]}"#,
+        let (commands, reply) = parse_commands(
+            r#"{"commands":[{"action":"steer","angle":0,"duration_ms":1000.0},{"action":"set_cam_pan","angle":0},{"action":"forward","speed":40.0,"duration_ms":500.0}],"reply":"ok"}"#,
         )
         .expect("safe angle defaults and integral floats should be accepted");
 
+        assert_eq!(reply, "ok");
         assert!(matches!(
             commands.first(),
             Some(Command::Steer {
@@ -699,21 +702,22 @@ mod tests {
 
     #[test]
     fn parser_accepts_nested_until_conditions() {
-        let commands = parse_commands(
-            r#"{"commands":[{"action":"forward","speed":20,"duration_ms":500,"until":{"and":[{"sensor":"distance","op":"lt","value":10},{"not":{"sensor":"battery_percent","op":"lt","value":10}}]}}]}"#,
+        let (commands, reply) = parse_commands(
+            r#"{"commands":[{"action":"forward","speed":20,"duration_ms":500,"until":{"and":[{"sensor":"distance","op":"lt","value":10},{"not":{"sensor":"battery_percent","op":"lt","value":10}}]}}],"reply":"ok"}"#,
         )
         .expect("nested until conditions should be valid");
 
+        assert_eq!(reply, "ok");
         assert!(matches!(commands.first(), Some(Command::Forward { .. })));
     }
 
     #[test]
     fn parser_rejects_invalid_until_conditions() {
         assert!(
-            parse_commands(r#"{"commands":[{"action":"forward","until":{"and":[]}}]}"#).is_err()
+            parse_commands(r#"{"commands":[{"action":"forward","speed":30,"duration_ms":1000,"until":{"and":[]}}],"reply":"err"}"#).is_err()
         );
         assert!(parse_commands(
-            r#"{"commands":[{"action":"forward","until":{"and":[{"sensor":"distance","op":"lt","value":10}],"not":{"sensor":"distance","op":"lt","value":5}}}]}"#
+            r#"{"commands":[{"action":"forward","speed":30,"duration_ms":1000,"until":{"and":[{"sensor":"distance","op":"lt","value":10}],"not":{"sensor":"distance","op":"lt","value":5}}}],"reply":"err"}"#
         )
         .is_err());
     }
