@@ -3,6 +3,7 @@ mod picarx;
 mod rpi_camera;
 mod sample;
 mod sensor_monitor;
+pub mod tts;
 
 fn main() {
     if let Err(e) = sample::picarx_sample::main() {
