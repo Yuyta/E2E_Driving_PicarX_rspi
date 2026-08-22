@@ -66,43 +66,26 @@ fn command_response_schema() -> Value {
                                 "get_grayscale", "get_battery_status"
                             ]
                         },
-                        "speed": { "type": "INTEGER" },
-                        "duration_ms": { "type": "INTEGER" },
+                        "speed": {
+                            "type": "INTEGER",
+                            "description": "Movement speed from 0 to 100."
+                        },
+                        "duration_ms": {
+                            "type": "INTEGER",
+                            "description": "Movement duration in milliseconds. Use this for time-based requests such as 10 seconds, 10s, 10000ms, or 10秒."
+                        },
                         "angle": { "type": "INTEGER" },
                         "until": condition_leaf_schema(),
-                        "until_sensor": {
-                            "type": "STRING",
-                            "description": "Sensor used for a simple stop condition. Omit unless the user asks for sensor-based stopping.",
-                            "enum": [
-                                "distance", "grayscale_left", "grayscale_center",
-                                "grayscale_right", "battery_voltage", "battery_percent"
-                            ]
-                        },
-                        "until_op": {
-                            "type": "STRING",
-                            "description": "Comparison operator for until_sensor.",
-                            "enum": ["eq", "ne", "gte", "lte", "gt", "lt"]
-                        },
-                        "until_value": {
-                            "type": "NUMBER",
-                            "description": "Numeric threshold for until_sensor."
-                        },
-                        "until_logic": {
-                            "type": "STRING",
-                            "description": "Logical operator for combining until_conditions.",
-                            "enum": ["and", "or", "xor", "not"]
-                        },
-                        "until_conditions": {
-                            "type": "ARRAY",
-                            "description": "Sensor conditions to combine with until_logic.",
-                            "items": condition_leaf_schema()
-                        },
                     },
-                    "required": ["action"]
+                    "required": ["action", "speed", "duration_ms"]
                 }
+            },
+            "reply": {
+                "type": "STRING",
+                "description": "A short, natural reply message in Japanese to the user's request."
             }
         },
-        "required": ["commands"]
+        "required": ["commands", "reply"]
     })
 }
 
@@ -132,9 +115,9 @@ fn gemini_prompt(prompt: &str) -> String {
         "{}\n\nGemini-specific output rules:\n\
          - Return compact JSON only.\n\
          - Do not include null values, empty objects, markdown, or explanations.\n\
-         - For simple driving, omit sensor stop fields.\n\
-         - For a single sensor stop condition, prefer until_sensor, until_op, and until_value.\n\
-         - For combined sensor stop conditions, use until_logic and until_conditions.\n\
+         - Convert time requests exactly: 10 seconds / 10秒 => duration_ms: 10000.\n\
+         - Do not use sensor fields for time requests.\n\
+         - IMPORTANT: Do not output until unless the user explicitly requests a sensor-based stopping condition in their prompt.\n\
          - Do not output an empty until object.\n\n\
          User request: {}",
         SYSTEM_PROMPT, prompt
@@ -165,6 +148,14 @@ fn normalize_gemini_response(response_text: &str) -> Result<String, String> {
         let until_sensor = object.remove("until_sensor");
         let until_op = object.remove("until_op");
         let until_value = object.remove("until_value");
+        let legacy_until_count =
+            until_sensor.is_some() as u8 + until_op.is_some() as u8 + until_value.is_some() as u8;
+        if legacy_until_count > 0 && legacy_until_count < 3 {
+            return Err(
+                "Gemini returned incomplete legacy sensor-stop fields; refusing unsafe command"
+                    .to_string(),
+            );
+        }
         if let (Some(sensor), Some(op), Some(value)) = (until_sensor, until_op, until_value) {
             object.insert(
                 "until".to_string(),
@@ -174,29 +165,6 @@ fn normalize_gemini_response(response_text: &str) -> Result<String, String> {
                     "value": value
                 }),
             );
-        }
-
-        let until_logic = object.remove("until_logic");
-        let until_conditions = object.remove("until_conditions");
-        if let (Some(Value::String(logic)), Some(conditions)) = (until_logic, until_conditions) {
-            match logic.as_str() {
-                "and" | "or" | "xor" => {
-                    object.insert(
-                        "until".to_string(),
-                        serde_json::json!({ logic: conditions }),
-                    );
-                }
-                "not" => {
-                    let first_condition = conditions
-                        .as_array()
-                        .and_then(|conditions| conditions.first())
-                        .cloned();
-                    if let Some(condition) = first_condition {
-                        object.insert("until".to_string(), serde_json::json!({ "not": condition }));
-                    }
-                }
-                _ => {}
-            }
         }
     }
 
@@ -329,15 +297,25 @@ mod tests {
     }
 
     #[test]
-    fn normalizes_flat_until_condition() {
+    fn normalizes_complete_legacy_flat_until_condition() {
         let normalized = normalize_gemini_response(
             r#"{"commands":[{"action":"forward","speed":50,"duration_ms":1000,"until_sensor":"distance","until_op":"lt","until_value":20}]}"#,
         )
-        .expect("response should normalize");
+        .expect("complete legacy response should normalize");
 
         assert_eq!(
             normalized,
             r#"{"commands":[{"action":"forward","duration_ms":1000,"speed":50,"until":{"op":"lt","sensor":"distance","value":20}}]}"#
+        );
+    }
+
+    #[test]
+    fn rejects_incomplete_legacy_flat_until_condition() {
+        assert!(
+            normalize_gemini_response(
+                r#"{"commands":[{"action":"forward","speed":50,"until_sensor":"distance","until_value":10000}]}"#,
+            )
+            .is_err()
         );
     }
 
