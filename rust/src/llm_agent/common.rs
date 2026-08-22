@@ -699,7 +699,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        LlmProvider, LlmResponse, ProviderAgent, parse_commands, parse_commands_for_prompt,
+        LlmProvider, LlmResponse, ProviderAgent, _parse_commands, parse_commands_for_prompt,
     };
     use crate::llm_agent::command::Command;
 
@@ -779,8 +779,8 @@ mod tests {
             Some(Command::Forward {
                 speed, duration_ms, ..
             }) => {
-                assert_eq!(*speed, 30);
-                assert_eq!(*duration_ms, 1000);
+                assert_eq!(speed, 30);
+                assert_eq!(duration_ms, 1000);
             }
             _ => panic!("expected a forward command"),
         }
