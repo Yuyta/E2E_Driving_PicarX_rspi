@@ -327,7 +327,7 @@ const MAX_ANGLE: i64 = 90;
 const MAX_CONDITION_DEPTH: usize = 8;
 
 /// Parse and normalize the provider-independent command response.
-pub fn parse_commands(response_text: &str) -> Result<(Vec<Command>, String), String> {
+pub fn _parse_commands(response_text: &str) -> Result<(Vec<Command>, String), String> {
     parse_commands_for_prompt(response_text, "")
 }
 
