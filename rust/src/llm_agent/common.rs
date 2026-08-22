@@ -1,7 +1,7 @@
 use std::marker::PhantomData;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender, TryRecvError};
-use std::sync::Arc;
 use std::thread;
 
 use serde::Deserialize;
@@ -397,7 +397,6 @@ fn normalize_commands_for_user_prompt(commands: &mut [Value], user_prompt: &str)
     }
 }
 
-
 fn prompt_requests_sensor_stop(prompt: &str) -> bool {
     let prompt = prompt.to_lowercase();
     let sensor_words = [
@@ -700,7 +699,7 @@ mod tests {
     use std::time::{Duration, Instant};
 
     use super::{
-        parse_commands, parse_commands_for_prompt, LlmProvider, LlmResponse, ProviderAgent,
+        LlmProvider, LlmResponse, ProviderAgent, parse_commands, parse_commands_for_prompt,
     };
     use crate::llm_agent::command::Command;
 
@@ -786,18 +785,22 @@ mod tests {
             _ => panic!("expected a forward command"),
         }
 
-        assert!(parse_commands(
-            r#"{"commands":[{"action":"forward","speed":30,"duration_ms":30001}],"reply":"ok"}"#
-        )
-        .is_err());
-        assert!(parse_commands(
-            r#"{"commands":[{"action":"forward","speed":101,"duration_ms":1000}],"reply":"ok"}"#
-        )
-        .is_err());
-        assert!(parse_commands(
-            r#"{"commands":[{"action":"set_cam_pan","angle":91}],"reply":"ok"}"#
-        )
-        .is_err());
+        assert!(
+            parse_commands(
+                r#"{"commands":[{"action":"forward","speed":30,"duration_ms":30001}],"reply":"ok"}"#
+            )
+            .is_err()
+        );
+        assert!(
+            parse_commands(
+                r#"{"commands":[{"action":"forward","speed":101,"duration_ms":1000}],"reply":"ok"}"#
+            )
+            .is_err()
+        );
+        assert!(
+            parse_commands(r#"{"commands":[{"action":"set_cam_pan","angle":91}],"reply":"ok"}"#)
+                .is_err()
+        );
     }
 
     #[test]

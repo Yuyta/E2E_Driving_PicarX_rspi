@@ -201,8 +201,16 @@ impl eframe::App for PiCarApp {
                 });
                 ui.separator();
                 ui.label("TTSエンジン:");
-                ui.radio_value(&mut self.selected_tts, crate::tts::TtsEngine::Default, "標準 (JTalk/eSpeak)");
-                ui.radio_value(&mut self.selected_tts, crate::tts::TtsEngine::PiperPlus, "高品質 (Piper Plus)");
+                ui.radio_value(
+                    &mut self.selected_tts,
+                    crate::tts::TtsEngine::Default,
+                    "標準 (JTalk/eSpeak)",
+                );
+                ui.radio_value(
+                    &mut self.selected_tts,
+                    crate::tts::TtsEngine::PiperPlus,
+                    "高品質 (Piper Plus)",
+                );
             });
 
             if !self.last_reply.is_empty() {
@@ -298,7 +306,9 @@ impl eframe::App for PiCarApp {
                         );
                     }
                     Ok(Some(res)) => match res {
-                        LlmResponse::Ok { commands, reply, .. } => {
+                        LlmResponse::Ok {
+                            commands, reply, ..
+                        } => {
                             println!(
                                 "[LLM ({:?}, request_id={})] {}件のコマンドを受信、実行します。返答: {}",
                                 active_llm,
@@ -307,13 +317,14 @@ impl eframe::App for PiCarApp {
                                 reply
                             );
                             self.last_reply = format!("[PiCar-X]: {}", reply);
-                            
+
                             let reply_clone = reply.clone();
                             let px_clone = Arc::clone(&self.px);
                             let tts_engine = self.selected_tts;
                             std::thread::spawn(move || {
                                 let lang = crate::tts::detect_language(&reply_clone);
-                                match crate::tts::generate_tts_file(&reply_clone, lang, tts_engine) {
+                                match crate::tts::generate_tts_file(&reply_clone, lang, tts_engine)
+                                {
                                     Ok(path) => {
                                         {
                                             let mut px = px_clone.lock().unwrap();
