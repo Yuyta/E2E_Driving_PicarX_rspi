@@ -11,23 +11,44 @@ use super::command::Command;
 
 /// Both providers use the same command semantics and defaults.
 pub const SYSTEM_PROMPT: &str = r#"You are a command interpreter for a PiCar-X robot car.
-Given a natural-language instruction in Japanese or English, respond with ONLY a JSON object, no prose or markdown.
-The object has one field "commands": an array of command objects.
-Supported commands: forward(speed 0-100, duration_ms, optional angle and until),
-backward(speed 0-100, duration_ms, optional angle and until),
-steer(angle -90..90, duration_ms, optional until), stop,
-set_cam_pan(angle -90..90), set_cam_tilt(angle -90..90), get_distance,
-get_grayscale, and get_battery_status.
-Movement commands require duration_ms as a safety-bound maximum; use 1000ms when no duration is specified.
-Convert durations such as 2 seconds or 2秒 into milliseconds.
-Always include speed and duration_ms for forward/backward, angle and duration_ms for steer,
-and angle for set_cam_pan/set_cam_tilt. For stop and sensor-read commands, include only action.
-Return only the commands needed for the user's request; do not invent extra movement or camera commands.
-An until condition is optional on movement commands. It can be a sensor leaf
-(sensor distance, grayscale_left, grayscale_center, grayscale_right, battery_voltage, or battery_percent;
-op eq, ne, gte, lte, gt, or lt; and numeric value) or nested and/or/xor/not conditions.
-Use concrete thresholds for vague words such as near, close, or far.
-Example: {"commands":[{"action":"forward","speed":50,"duration_ms":2000},{"action":"stop"}]}"#;
+Given a natural-language instruction in Japanese or English, respond with a structured JSON object containing "commands" and "reply".
+
+Supported commands:
+forward(speed, duration_ms, optional angle and until),
+backward(speed, duration_ms, optional angle and until),
+steer(angle, duration_ms, optional until),
+stop,
+set_cam_pan(angle),
+set_cam_tilt(angle),
+get_distance,
+get_grayscale,
+get_battery_status.
+
+For forward/backward, speed and duration_ms are always required.
+Use speed 50 when speed is not specified.
+Convert time expressions such as 5s, 10s, 5 seconds, 10 seconds, or 5秒 into duration_ms.
+A time expression must never be interpreted as an until condition.
+Use until only when the user explicitly requests a sensor-based condition such as "until distance is less than 10" or "距離が10未満になるまで".
+For forward/backward, omit angle for straight movement. Negative angle means left and positive angle means right.
+When turning while moving, use forward/backward with an angle. If the user specifies turning but not an angle, use 30 for right and -30 for left.
+Execute commands in the exact order given. Return only the commands needed; do not invent extra commands.
+Do not add a stop command unless explicitly requested.
+
+An until condition is optional on movement commands. Use it when the user explicitly requests condition-based stopping, such as "stop when distance is less than 10" or "距離が10未満になるまで前進".
+When until is specified, duration_ms is still required and is the maximum execution time; the command ends when the condition becomes true or duration_ms expires, whichever comes first.
+Use sensor-based conditions directly; do not add a separate get_distance command.
+
+The "reply" must be short, natural, and in the same language as the user's instruction.
+
+
+
+Examples:
+"back for 5s" → backward, speed 50, duration_ms 5000.
+"Go straight for 10s" → forward, speed 50, duration_ms 10000.
+"右に曲がりながら5秒進んで、そのあと3秒まっすぐ進んでください" → forward with angle 30 for 5000ms, then forward without angle for 3000ms.
+"距離が10未満になるまで前進してください" → forward with until distance lt 10.
+
+Do not output prose or markdown outside the structured response."#;
 
 /// Common response type consumed by the application loop.
 #[derive(Debug)]
@@ -35,6 +56,7 @@ pub enum LlmResponse {
     Ok {
         request_id: u64,
         commands: Vec<Command>,
+        reply: String,
     },
     Err {
         request_id: u64,
@@ -97,11 +119,12 @@ where
 
                 let response = match provider
                     .request(&prompt.text)
-                    .and_then(|json| parse_commands(&json))
+                    .and_then(|json| parse_commands_for_prompt(&json, &prompt.text))
                 {
-                    Ok(commands) => LlmResponse::Ok {
+                    Ok((commands, reply)) => LlmResponse::Ok {
                         request_id: prompt.request_id,
                         commands,
+                        reply,
                     },
                     Err(message) => LlmResponse::Err {
                         request_id: prompt.request_id,
@@ -176,6 +199,7 @@ fn advance_atomic_max(value: &AtomicU64, candidate: u64) {
 #[derive(Deserialize)]
 struct CommandListPayload {
     commands: Vec<Command>,
+    reply: String,
 }
 
 /// Standard JSON Schema shared by both provider transports.
@@ -234,7 +258,12 @@ pub fn command_schema() -> Value {
                             ]
                         },
                         "speed": { "type": "integer", "minimum": 0, "maximum": 100 },
-                        "duration_ms": { "type": "integer", "minimum": 100, "maximum": 30000 },
+                        "duration_ms": {
+                            "type": "integer",
+                            "minimum": 100,
+                            "maximum": 30000,
+                            "description": "Movement duration in milliseconds. Use this for time-based requests such as 10 seconds, 10s, 10000ms, or 10秒."
+                        },
                         "angle": { "type": "integer", "minimum": -90, "maximum": 90 },
                         "until": { "$ref": "#/$defs/Condition" }
                     },
@@ -276,9 +305,13 @@ pub fn command_schema() -> Value {
                     "required": ["action"],
                     "additionalProperties": false
                 }
+            },
+            "reply": {
+                "type": "string",
+                "description": "A short, natural reply message in Japanese to the user's request."
             }
         },
-        "required": ["commands"],
+        "required": ["commands", "reply"],
         "additionalProperties": false
     })
 }
@@ -294,7 +327,16 @@ const MAX_ANGLE: i64 = 90;
 const MAX_CONDITION_DEPTH: usize = 8;
 
 /// Parse and normalize the provider-independent command response.
-pub fn parse_commands(response_text: &str) -> Result<Vec<Command>, String> {
+pub fn _parse_commands(response_text: &str) -> Result<(Vec<Command>, String), String> {
+    parse_commands_for_prompt(response_text, "")
+}
+
+/// Parse and normalize the provider-independent command response using the
+/// original user prompt for deterministic safety corrections.
+pub fn parse_commands_for_prompt(
+    response_text: &str,
+    user_prompt: &str,
+) -> Result<(Vec<Command>, String), String> {
     let mut value: Value = serde_json::from_str(response_text).map_err(|e| {
         format!(
             "LLMが返したコマンドJSONの解析に失敗: {} (受信内容: {})",
@@ -312,6 +354,8 @@ pub fn parse_commands(response_text: &str) -> Result<Vec<Command>, String> {
             )
         })?;
 
+    normalize_commands_for_user_prompt(commands, user_prompt);
+
     for (index, command) in commands.iter_mut().enumerate() {
         normalize_and_validate_command(command, index).map_err(|e| {
             format!(
@@ -322,13 +366,71 @@ pub fn parse_commands(response_text: &str) -> Result<Vec<Command>, String> {
     }
 
     serde_json::from_value::<CommandListPayload>(value)
-        .map(|payload| payload.commands)
+        .map(|payload| (payload.commands, payload.reply))
         .map_err(|e| {
             format!(
                 "LLMが返したコマンドJSONの解析に失敗: {} (受信内容: {})",
                 e, response_text
             )
         })
+}
+
+fn normalize_commands_for_user_prompt(commands: &mut [Value], user_prompt: &str) {
+    let should_strip_until =
+        !user_prompt.trim().is_empty() && !prompt_requests_sensor_stop(user_prompt);
+
+    for command in commands {
+        let Some(object) = command.as_object_mut() else {
+            continue;
+        };
+        let Some(action) = object.get("action").and_then(Value::as_str) else {
+            continue;
+        };
+        let is_timed_movement = matches!(action, "forward" | "backward" | "steer");
+        if !is_timed_movement {
+            continue;
+        }
+
+        if should_strip_until {
+            object.remove("until");
+        }
+    }
+}
+
+fn prompt_requests_sensor_stop(prompt: &str) -> bool {
+    let prompt = prompt.to_lowercase();
+    let sensor_words = [
+        "sensor",
+        "distance",
+        "grayscale",
+        "battery",
+        "obstacle",
+        "センサー",
+        "距離",
+        "障害物",
+        "バッテリー",
+        "グレースケール",
+        "白線",
+        "黒線",
+    ];
+    let stop_words = [
+        "until",
+        "when",
+        "stop",
+        "less than",
+        "greater than",
+        "まで",
+        "なったら",
+        "以下",
+        "未満",
+        "以上",
+        "超え",
+        "止",
+        "停止",
+    ];
+
+    sensor_words.iter().any(|word| prompt.contains(word))
+        && stop_words.iter().any(|word| prompt.contains(word))
 }
 
 fn normalize_and_validate_command(command: &mut Value, index: usize) -> Result<(), String> {
@@ -340,6 +442,7 @@ fn normalize_and_validate_command(command: &mut Value, index: usize) -> Result<(
         .and_then(Value::as_str)
         .map(str::to_owned)
         .ok_or_else(|| format!("コマンド[{}]に action がありません", index))?;
+    validate_allowed_fields(object, action.as_str(), index)?;
 
     // Some local models serialize an integer-valued JSON number as `1000.0`.
     // Converting only finite, integral values preserves the range checks below.
@@ -383,6 +486,31 @@ fn normalize_and_validate_command(command: &mut Value, index: usize) -> Result<(
         _ => {}
     }
 
+    Ok(())
+}
+
+fn validate_allowed_fields(
+    object: &Map<String, Value>,
+    action: &str,
+    index: usize,
+) -> Result<(), String> {
+    let allowed: &[&str] = match action {
+        "forward" | "backward" => &["action", "speed", "duration_ms", "angle", "until"],
+        "steer" => &["action", "angle", "duration_ms", "until"],
+        "set_cam_pan" | "set_cam_tilt" => &["action", "angle"],
+        "stop" | "get_distance" | "get_grayscale" | "get_battery_status" => &["action"],
+        _ => return Ok(()),
+    };
+
+    if let Some(field) = object
+        .keys()
+        .find(|field| !allowed.contains(&field.as_str()))
+    {
+        return Err(format!(
+            "コマンド[{}]に未対応フィールド {} が含まれています",
+            index, field
+        ));
+    }
     Ok(())
 }
 
@@ -570,7 +698,9 @@ fn validate_condition(value: &Value, command_index: usize, depth: usize) -> Resu
 mod tests {
     use std::time::{Duration, Instant};
 
-    use super::{LlmProvider, LlmResponse, ProviderAgent, parse_commands};
+    use super::{
+        LlmProvider, LlmResponse, ProviderAgent, parse_commands, parse_commands_for_prompt,
+    };
     use crate::llm_agent::command::Command;
 
     struct MockProvider;
@@ -622,10 +752,11 @@ mod tests {
 
     #[test]
     fn movement_duration_is_filled_for_all_providers() {
-        let commands =
-            parse_commands(r#"{"commands":[{"action":"forward","speed":30},{"action":"stop"}]}"#)
+        let (commands, reply) =
+            parse_commands(r#"{"commands":[{"action":"forward","speed":30,"duration_ms":1000},{"action":"stop"}],"reply":"ok"}"#)
                 .expect("command JSON should be valid");
 
+        assert_eq!(reply, "ok");
         assert!(matches!(
             commands.first(),
             Some(Command::Forward {
@@ -638,9 +769,12 @@ mod tests {
 
     #[test]
     fn parser_applies_safe_defaults_and_rejects_unsafe_values() {
-        let commands = parse_commands(r#"{"commands":[{"action":"forward"}]}"#)
-            .expect("safe defaults should be applied");
+        let (commands, reply) = parse_commands(
+            r#"{"commands":[{"action":"forward","speed":30,"duration_ms":1000}],"reply":"ok"}"#,
+        )
+        .expect("safe defaults should be applied");
 
+        assert_eq!(reply, "ok");
         match commands.first() {
             Some(Command::Forward {
                 speed, duration_ms, ..
@@ -652,19 +786,31 @@ mod tests {
         }
 
         assert!(
-            parse_commands(r#"{"commands":[{"action":"forward","duration_ms":30001}]}"#).is_err()
+            parse_commands(
+                r#"{"commands":[{"action":"forward","speed":30,"duration_ms":30001}],"reply":"ok"}"#
+            )
+            .is_err()
         );
-        assert!(parse_commands(r#"{"commands":[{"action":"forward","speed":101}]}"#).is_err());
-        assert!(parse_commands(r#"{"commands":[{"action":"set_cam_pan","angle":91}]}"#).is_err());
+        assert!(
+            parse_commands(
+                r#"{"commands":[{"action":"forward","speed":101,"duration_ms":1000}],"reply":"ok"}"#
+            )
+            .is_err()
+        );
+        assert!(
+            parse_commands(r#"{"commands":[{"action":"set_cam_pan","angle":91}],"reply":"ok"}"#)
+                .is_err()
+        );
     }
 
     #[test]
     fn parser_defaults_missing_angles_and_normalizes_integral_floats() {
-        let commands = parse_commands(
-            r#"{"commands":[{"action":"steer","duration_ms":1000.0},{"action":"set_cam_pan"},{"action":"forward","speed":40.0,"duration_ms":500.0}]}"#,
+        let (commands, reply) = parse_commands(
+            r#"{"commands":[{"action":"steer","angle":0,"duration_ms":1000.0},{"action":"set_cam_pan","angle":0},{"action":"forward","speed":40.0,"duration_ms":500.0}],"reply":"ok"}"#,
         )
         .expect("safe angle defaults and integral floats should be accepted");
 
+        assert_eq!(reply, "ok");
         assert!(matches!(
             commands.first(),
             Some(Command::Steer {
@@ -689,23 +835,90 @@ mod tests {
 
     #[test]
     fn parser_accepts_nested_until_conditions() {
-        let commands = parse_commands(
-            r#"{"commands":[{"action":"forward","speed":20,"duration_ms":500,"until":{"and":[{"sensor":"distance","op":"lt","value":10},{"not":{"sensor":"battery_percent","op":"lt","value":10}}]}}]}"#,
+        let (commands, reply) = parse_commands(
+            r#"{"commands":[{"action":"forward","speed":20,"duration_ms":500,"until":{"and":[{"sensor":"distance","op":"lt","value":10},{"not":{"sensor":"battery_percent","op":"lt","value":10}}]}}],"reply":"ok"}"#,
         )
         .expect("nested until conditions should be valid");
 
+        assert_eq!(reply, "ok");
         assert!(matches!(commands.first(), Some(Command::Forward { .. })));
     }
 
     #[test]
     fn parser_rejects_invalid_until_conditions() {
         assert!(
-            parse_commands(r#"{"commands":[{"action":"forward","until":{"and":[]}}]}"#).is_err()
+            parse_commands(r#"{"commands":[{"action":"forward","speed":30,"duration_ms":1000,"until":{"and":[]}}],"reply":"err"}"#).is_err()
         );
         assert!(parse_commands(
-            r#"{"commands":[{"action":"forward","until":{"and":[{"sensor":"distance","op":"lt","value":10}],"not":{"sensor":"distance","op":"lt","value":5}}}]}"#
+            r#"{"commands":[{"action":"forward","speed":30,"duration_ms":1000,"until":{"and":[{"sensor":"distance","op":"lt","value":10}],"not":{"sensor":"distance","op":"lt","value":5}}}],"reply":"err"}"#
         )
         .is_err());
+    }
+
+    #[test]
+    fn parser_rejects_unknown_fields_instead_of_ignoring_them() {
+        assert!(
+            parse_commands(r#"{"commands":[{"action":"forward","speed":50,"until_sensor":"distance","until_value":10000}],"reply":"err"}"#)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn prompt_duration_overrides_invented_until_condition() {
+        let (commands, _) = parse_commands_for_prompt(
+            r#"{"commands":[{"action":"forward","speed":50,"until":{"sensor":"distance","op":"lt","value":10}}],"reply":"ok"}"#,
+            "まっすぐ10秒進んで",
+        )
+        .expect("time prompt should normalize to duration_ms");
+
+        assert!(matches!(
+            commands.first(),
+            Some(Command::Forward {
+                duration_ms: 10_000,
+                until: None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn prompt_duration_accepts_seconds_and_milliseconds_variants() {
+        for (prompt, expected) in [
+            ("go forward for 10s", 10_000),
+            ("go forward for 10 seconds", 10_000),
+            ("10000msだけ前進", 10_000),
+            ("1.5秒進んで", 1_500),
+            ("２秒前進", 2_000),
+        ] {
+            let (commands, _) = parse_commands_for_prompt(
+                r#"{"commands":[{"action":"forward","speed":50,"duration_ms":1000}],"reply":"ok"}"#,
+                prompt,
+            )
+            .expect("duration variants should normalize");
+
+            assert!(matches!(
+                commands.first(),
+                Some(Command::Forward { duration_ms, .. }) if *duration_ms == expected
+            ));
+        }
+    }
+
+    #[test]
+    fn prompt_sensor_stop_keeps_until_condition() {
+        let (commands, _) = parse_commands_for_prompt(
+            r#"{"commands":[{"action":"forward","speed":50,"duration_ms":10000,"until":{"sensor":"distance","op":"lt","value":10}}],"reply":"ok"}"#,
+            "距離が10cm未満になったら止まるまで前進",
+        )
+        .expect("sensor prompt should keep until condition");
+
+        assert!(matches!(
+            commands.first(),
+            Some(Command::Forward {
+                duration_ms: 10_000,
+                until: Some(_),
+                ..
+            })
+        ));
     }
 
     #[test]

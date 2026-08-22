@@ -51,6 +51,7 @@ struct PiCarApp {
     ollama_agent: OllamaAgent,
     gemini_agent: GeminiAgent,
     selected_llm: LlmType,
+    selected_tts: crate::tts::TtsEngine,
     sensor_monitor: SensorMonitor,
     app_mode: AppMode,
     prompt_buffer: String,
@@ -60,6 +61,7 @@ struct PiCarApp {
     width: usize,
     height: usize,
     frame_interval: Duration,
+    last_reply: String,
 }
 
 impl PiCarApp {
@@ -94,6 +96,7 @@ impl PiCarApp {
             ollama_agent: OllamaAgent::new(),
             gemini_agent: GeminiAgent::new(),
             selected_llm: LlmType::Gemini,
+            selected_tts: crate::tts::TtsEngine::Default,
             sensor_monitor,
             app_mode: AppMode::Manual,
             prompt_buffer: String::new(),
@@ -103,6 +106,7 @@ impl PiCarApp {
             width,
             height,
             frame_interval: Duration::from_secs_f64(1.0 / framerate as f64),
+            last_reply: String::new(),
         })
     }
 }
@@ -195,7 +199,26 @@ impl eframe::App for PiCarApp {
                     ui.radio_value(&mut self.selected_llm, LlmType::Gemini, "Gemini API");
                     ui.radio_value(&mut self.selected_llm, LlmType::Ollama, "Ollama (ローカル)");
                 });
+                ui.separator();
+                ui.label("TTSエンジン:");
+                ui.radio_value(
+                    &mut self.selected_tts,
+                    crate::tts::TtsEngine::Default,
+                    "標準 (JTalk/eSpeak)",
+                );
+                ui.radio_value(
+                    &mut self.selected_tts,
+                    crate::tts::TtsEngine::PiperPlus,
+                    "高品質 (Piper Plus)",
+                );
             });
+
+            if !self.last_reply.is_empty() {
+                ui.horizontal(|ui| {
+                    ui.colored_label(egui::Color32::LIGHT_GREEN, &self.last_reply);
+                });
+                ui.add_space(4.0);
+            }
 
             let response = ui.add(
                 egui::TextEdit::singleline(&mut self.prompt_buffer)
@@ -283,13 +306,40 @@ impl eframe::App for PiCarApp {
                         );
                     }
                     Ok(Some(res)) => match res {
-                        LlmResponse::Ok { commands, .. } => {
+                        LlmResponse::Ok {
+                            commands, reply, ..
+                        } => {
                             println!(
-                                "[LLM ({:?}, request_id={})] {}件のコマンドを受信、実行します",
+                                "[LLM ({:?}, request_id={})] {}件のコマンドを受信、実行します。返答: {}",
                                 active_llm,
                                 active_request_id,
-                                commands.len()
+                                commands.len(),
+                                reply
                             );
+                            self.last_reply = format!("[PiCar-X]: {}", reply);
+
+                            let reply_clone = reply.clone();
+                            let px_clone = Arc::clone(&self.px);
+                            let tts_engine = self.selected_tts;
+                            std::thread::spawn(move || {
+                                let lang = crate::tts::detect_language(&reply_clone);
+                                match crate::tts::generate_tts_file(&reply_clone, lang, tts_engine)
+                                {
+                                    Ok(path) => {
+                                        {
+                                            let mut px = px_clone.lock().unwrap();
+                                            if let Err(e) = px.play_file(&path, 1.0) {
+                                                eprintln!("⚠ 音声ファイルの再生に失敗: {}", e);
+                                            }
+                                        }
+                                        if let Err(e) = std::fs::remove_file(&path) {
+                                            eprintln!("⚠ 一時音声ファイルの削除に失敗: {}", e);
+                                        }
+                                    }
+                                    Err(e) => eprintln!("⚠ 音声合成に失敗: {}", e),
+                                }
+                            });
+
                             self.app_mode = AppMode::ExecutingLlmCommands {
                                 queue: CommandQueue::new(commands),
                             };
