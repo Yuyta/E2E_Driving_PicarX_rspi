@@ -19,11 +19,7 @@ pub fn detect_language(text: &str) -> &'static str {
         ('\u{4E00}'..='\u{9FAF}').contains(&c) // 漢字
     });
 
-    if has_japanese {
-        "ja"
-    } else {
-        "en"
-    }
+    if has_japanese { "ja" } else { "en" }
 }
 
 fn preview_file_start(path: &Path) -> String {
