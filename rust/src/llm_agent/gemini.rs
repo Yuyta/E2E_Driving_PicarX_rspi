@@ -195,8 +195,11 @@ fn load_api_key() -> String {
     std::env::var("GEMINI_API_KEY").unwrap_or_default()
 }
 
-impl LlmProvider for GeminiProvider {
-    fn request(&self, prompt: &str) -> Result<String, String> {
+use base64::Engine as _;
+use base64::engine::general_purpose::STANDARD as BASE64;
+
+impl GeminiProvider {
+    fn send_generate_content(&self, contents_parts: Vec<Value>) -> Result<String, String> {
         if self.api_key.is_empty() || self.api_key == "YOUR_GEMINI_API_KEY_HERE" {
             return Err(
                 "GEMINI_API_KEY is not set. Please set your API key in the .env file (same directory as the executable) or set it as a GEMINI_API_KEY environment variable."
@@ -208,12 +211,9 @@ impl LlmProvider for GeminiProvider {
             "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={}",
             self.api_key
         );
-        let prompt = gemini_prompt(prompt);
         let request_body = serde_json::json!({
             "contents": [{
-                "parts": [{
-                    "text": prompt
-                }]
+                "parts": contents_parts
             }],
             "systemInstruction": {
                 "parts": [{
@@ -229,7 +229,7 @@ impl LlmProvider for GeminiProvider {
         });
 
         let agent = ureq::AgentBuilder::new()
-            .timeout(Duration::from_secs(10))
+            .timeout(Duration::from_secs(15))
             .build();
 
         agent
@@ -276,6 +276,43 @@ impl LlmProvider for GeminiProvider {
                 println!("[DEBUG] Gemini API Response: {}", part.text);
                 normalize_gemini_response(&part.text)
             })
+    }
+}
+
+impl LlmProvider for GeminiProvider {
+    fn request(&self, prompt: &str) -> Result<String, String> {
+        let prompt_text = gemini_prompt(prompt);
+        self.send_generate_content(vec![serde_json::json!({
+            "text": prompt_text
+        })])
+    }
+
+    fn request_audio(&self, wav_data: &[u8]) -> Result<String, String> {
+        let base64_audio = BASE64.encode(wav_data);
+        let audio_prompt_guide = format!(
+            "{}\n\nGemini-specific output rules:\n\
+             - Listen to the attached user voice audio carefully.\n\
+             - Interpret the user's spoken instruction and output the corresponding robot control JSON commands.\n\
+             - Return compact JSON only.\n\
+             - Do not include null values, empty objects, markdown, or explanations.\n\
+             - Convert time requests exactly: 10 seconds / 10秒 => duration_ms: 10000.\n\
+             - Do not use sensor fields for time requests.\n\
+             - IMPORTANT: Do not output until unless the user explicitly requests a sensor-based stopping condition in their prompt.\n\
+             - Do not output an empty until object.",
+            SYSTEM_PROMPT
+        );
+
+        self.send_generate_content(vec![
+            serde_json::json!({
+                "inlineData": {
+                    "mimeType": "audio/wav",
+                    "data": base64_audio
+                }
+            }),
+            serde_json::json!({
+                "text": audio_prompt_guide
+            }),
+        ])
     }
 }
 

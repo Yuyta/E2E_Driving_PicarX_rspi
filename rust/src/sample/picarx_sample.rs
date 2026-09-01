@@ -62,6 +62,8 @@ struct PiCarApp {
     height: usize,
     frame_interval: Duration,
     last_reply: String,
+    audio_recorder: crate::audio_input::AudioRecorder,
+    is_voice_recording: bool,
 }
 
 impl PiCarApp {
@@ -107,6 +109,8 @@ impl PiCarApp {
             height,
             frame_interval: Duration::from_secs_f64(1.0 / framerate as f64),
             last_reply: String::new(),
+            audio_recorder: crate::audio_input::AudioRecorder::new(),
+            is_voice_recording: false,
         })
     }
 }
@@ -227,6 +231,70 @@ impl eframe::App for PiCarApp {
                     .desired_width(f32::INFINITY),
             );
 
+            // 4. 音声入力 (Push-to-Talk)
+            let space_down = !prompt_has_focus && ctx.input(|i| i.key_down(egui::Key::Space));
+            let mut record_btn_pressed = false;
+
+            ui.horizontal(|ui| {
+                let btn_text = if self.is_voice_recording {
+                    "🔴 録音中... (離すと送信)"
+                } else {
+                    "🎙 音声指示 (Spaceキー長押し)"
+                };
+                let btn_response = ui.add_sized([220.0, 24.0], egui::Button::new(btn_text));
+                record_btn_pressed = btn_response.is_pointer_button_down_on();
+
+                if self.is_voice_recording {
+                    ui.colored_label(egui::Color32::RED, "マイクに向かって話しかけてください...");
+                }
+            });
+
+            let wants_record =
+                (space_down || record_btn_pressed) && matches!(&self.app_mode, AppMode::Manual);
+
+            if wants_record && !self.is_voice_recording {
+                self.px.lock().unwrap().stop();
+                match self.audio_recorder.start_recording() {
+                    Ok(()) => {
+                        println!("[Audio] 録音開始 (Push-to-Talk)");
+                        self.is_voice_recording = true;
+                    }
+                    Err(e) => {
+                        eprintln!("[Audio] 録音開始失敗: {}", e);
+                    }
+                }
+            } else if !wants_record && self.is_voice_recording {
+                self.is_voice_recording = false;
+                println!("[Audio] 録音終了、WAV生成中...");
+                match self.audio_recorder.stop_recording() {
+                    Ok(wav_bytes) => {
+                        println!(
+                            "[Audio] 録音完了 ({} bytes)、Gemini APIに送信します",
+                            wav_bytes.len()
+                        );
+                        self.px.lock().unwrap().stop();
+                        match self.gemini_agent.submit_audio(wav_bytes) {
+                            Ok(request_id) => {
+                                println!(
+                                    "[LLM (Gemini, request_id={})] 音声要求を登録しました",
+                                    request_id
+                                );
+                                self.app_mode = AppMode::WaitingForLlm {
+                                    llm: LlmType::Gemini,
+                                    request_id,
+                                };
+                            }
+                            Err(error) => {
+                                eprintln!("[LLM (Gemini)] 音声要求の登録に失敗しました: {}", error);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("[Audio] 録音データの取得に失敗: {}", e);
+                    }
+                }
+            }
+
             match &self.app_mode {
                 AppMode::WaitingForLlm { .. } => {
                     ui.label("[LLM] 応答待ち...");
@@ -270,8 +338,11 @@ impl eframe::App for PiCarApp {
                 };
             }
 
-            // 手動運転はManualモード、かつプロンプト欄が未フォーカスのときだけ反映する
-            if matches!(&self.app_mode, AppMode::Manual) && !prompt_has_focus {
+            // 手動運転はManualモード、録音中でなく、プロンプト欄が未フォーカスのときだけ反映する
+            if matches!(&self.app_mode, AppMode::Manual)
+                && !prompt_has_focus
+                && !self.is_voice_recording
+            {
                 self.controller.sync_from_egui(ctx);
                 self.controller
                     .update_hardware(&mut self.px.lock().unwrap());
@@ -391,6 +462,7 @@ pub fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!(
         "  ・テキスト欄をクリックして自然言語で指示を入力、Enterで送信 (LLM経由でコマンド実行)"
     );
+    println!("  ・Spaceキー長押し (またはボタン長押し) : 音声で指示を入力 (離すと送信)");
     println!("  ・Q / ESC : プログラム終了 (テキスト欄が未フォーカスのとき)");
     println!("-------------------------------------------------");
 

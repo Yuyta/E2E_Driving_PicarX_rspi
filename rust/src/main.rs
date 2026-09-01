@@ -1,3 +1,4 @@
+pub mod audio_input;
 mod llm_agent;
 mod picarx;
 mod rpi_camera;
