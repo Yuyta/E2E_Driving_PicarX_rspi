@@ -1,5 +1,6 @@
 pub mod audio_input;
 mod llm_agent;
+pub mod memory;
 mod picarx;
 mod rpi_camera;
 mod sample;

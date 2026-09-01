@@ -83,6 +83,11 @@ fn command_response_schema() -> Value {
             "reply": {
                 "type": "STRING",
                 "description": "A short, natural reply message in Japanese to the user's request."
+            },
+            "memory_updates": {
+                "type": "OBJECT",
+                "description": "Key-value pairs of persistent long-term memory to save (e.g. user.name, robot.name).",
+                "nullable": true
             }
         },
         "required": ["commands", "reply"]
@@ -111,6 +116,16 @@ fn condition_leaf_schema() -> Value {
 }
 
 fn gemini_prompt(prompt: &str) -> String {
+    gemini_prompt_with_context(prompt, "")
+}
+
+fn gemini_prompt_with_context(prompt: &str, context: &str) -> String {
+    let context_section = if context.trim().is_empty() {
+        String::new()
+    } else {
+        format!("\n\nContext:\n{}\n", context)
+    };
+
     format!(
         "{}\n\nGemini-specific output rules:\n\
          - Return compact JSON only.\n\
@@ -118,9 +133,10 @@ fn gemini_prompt(prompt: &str) -> String {
          - Convert time requests exactly: 10 seconds / 10秒 => duration_ms: 10000.\n\
          - Do not use sensor fields for time requests.\n\
          - IMPORTANT: Do not output until unless the user explicitly requests a sensor-based stopping condition in their prompt.\n\
-         - Do not output an empty until object.\n\n\
+         - Do not output an empty until object.\n\
+         - When user gives their name, robot's name, or persistent settings, output them in memory_updates.{}\n\n\
          User request: {}",
-        SYSTEM_PROMPT, prompt
+        SYSTEM_PROMPT, context_section, prompt
     )
 }
 
@@ -277,6 +293,56 @@ impl GeminiProvider {
                 normalize_gemini_response(&part.text)
             })
     }
+
+    /// 要約などのプレーンテキスト生成リクエスト（スキーマ・システムプロンプトなし）
+    pub fn send_text_prompt(&self, prompt_text: &str) -> Result<String, String> {
+        if self.api_key.is_empty() || self.api_key == "YOUR_GEMINI_API_KEY_HERE" {
+            return Err(
+                "GEMINI_API_KEY is not set. Please set your API key in the .env file or set it as a GEMINI_API_KEY environment variable."
+                    .to_string(),
+            );
+        }
+
+        let url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={}",
+            self.api_key
+        );
+        let request_body = serde_json::json!({
+            "contents": [{
+                "parts": [{ "text": prompt_text }]
+            }],
+            "generationConfig": {
+                "temperature": 0.2,
+                "maxOutputTokens": 1024
+            }
+        });
+
+        let agent = ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(20))
+            .build();
+
+        agent
+            .post(&url)
+            .send_json(&request_body)
+            .map_err(|e| format!("Gemini APIへの通信に失敗しました: {}", e))?
+            .into_json::<GeminiResponsePayload>()
+            .map_err(|e| format!("Gemini APIのレスポンス解析に失敗: {}", e))
+            .and_then(|payload| {
+                let candidate = payload
+                    .candidates
+                    .first()
+                    .ok_or_else(|| "Gemini APIから回答が得られませんでした。".to_string())?;
+                let content = candidate
+                    .content
+                    .as_ref()
+                    .ok_or_else(|| "Gemini APIのレスポンスがありません。".to_string())?;
+                let part = content
+                    .parts
+                    .first()
+                    .ok_or_else(|| "Gemini APIのレスポンスが空です。".to_string())?;
+                Ok(part.text.clone())
+            })
+    }
 }
 
 impl LlmProvider for GeminiProvider {
@@ -287,8 +353,24 @@ impl LlmProvider for GeminiProvider {
         })])
     }
 
+    fn request_with_context(&self, prompt: &str, context: &str) -> Result<String, String> {
+        let prompt_text = gemini_prompt_with_context(prompt, context);
+        self.send_generate_content(vec![serde_json::json!({
+            "text": prompt_text
+        })])
+    }
+
     fn request_audio(&self, wav_data: &[u8]) -> Result<String, String> {
+        self.request_audio_with_context(wav_data, "")
+    }
+
+    fn request_audio_with_context(&self, wav_data: &[u8], context: &str) -> Result<String, String> {
         let base64_audio = BASE64.encode(wav_data);
+        let context_section = if context.trim().is_empty() {
+            String::new()
+        } else {
+            format!("\n\nContext:\n{}\n", context)
+        };
         let audio_prompt_guide = format!(
             "{}\n\nGemini-specific output rules:\n\
              - Listen to the attached user voice audio carefully.\n\
@@ -298,8 +380,9 @@ impl LlmProvider for GeminiProvider {
              - Convert time requests exactly: 10 seconds / 10秒 => duration_ms: 10000.\n\
              - Do not use sensor fields for time requests.\n\
              - IMPORTANT: Do not output until unless the user explicitly requests a sensor-based stopping condition in their prompt.\n\
-             - Do not output an empty until object.",
-            SYSTEM_PROMPT
+             - Do not output an empty until object.\n\
+             - When user gives their name, robot's name, or persistent settings, output them in memory_updates.{}\n",
+            SYSTEM_PROMPT, context_section
         );
 
         self.send_generate_content(vec![
@@ -313,6 +396,10 @@ impl LlmProvider for GeminiProvider {
                 "text": audio_prompt_guide
             }),
         ])
+    }
+
+    fn request_summarize(&self, prompt: &str) -> Result<String, String> {
+        self.send_text_prompt(prompt)
     }
 }
 

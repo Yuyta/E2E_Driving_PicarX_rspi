@@ -5,7 +5,9 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 // 自作モジュール、PiCar-X制御用
-use crate::llm_agent::{CommandQueue, GeminiAgent, LlmResponse, LlmType, OllamaAgent};
+use crate::llm_agent::{
+    CommandQueue, GeminiAgent, GeminiProvider, LlmProvider, LlmResponse, LlmType, OllamaAgent,
+};
 use crate::picarx::Picarx;
 use crate::sensor_monitor::SensorMonitor;
 
@@ -64,6 +66,8 @@ struct PiCarApp {
     last_reply: String,
     audio_recorder: crate::audio_input::AudioRecorder,
     is_voice_recording: bool,
+    memory_repo: Arc<crate::memory::repository::MemoryRepository>,
+    conversation_id: String,
 }
 
 impl PiCarApp {
@@ -91,6 +95,22 @@ impl PiCarApp {
         let px = Arc::new(Mutex::new(px));
         let sensor_monitor = SensorMonitor::spawn(Arc::clone(&px));
 
+        // 会話メモリリポジトリの初期化
+        let db_path = "picarx_memory.db";
+        let memory_repo = crate::memory::repository::MemoryRepository::new(db_path)
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.into() })?;
+        let memory_repo = Arc::new(memory_repo);
+
+        let conversation_id = uuid::Uuid::new_v4().to_string();
+        if let Err(e) = memory_repo.create_conversation(&conversation_id) {
+            eprintln!("[Memory] 会話の作成に失敗: {}", e);
+        } else {
+            println!(
+                "[Memory] 新規セッション開始 conversation_id: {}",
+                conversation_id
+            );
+        }
+
         Ok(Self {
             camera,
             px,
@@ -111,6 +131,8 @@ impl PiCarApp {
             last_reply: String::new(),
             audio_recorder: crate::audio_input::AudioRecorder::new(),
             is_voice_recording: false,
+            memory_repo,
+            conversation_id,
         })
     }
 }
@@ -273,7 +295,14 @@ impl eframe::App for PiCarApp {
                             wav_bytes.len()
                         );
                         self.px.lock().unwrap().stop();
-                        match self.gemini_agent.submit_audio(wav_bytes) {
+                        let context = self
+                            .memory_repo
+                            .build_context(&self.conversation_id)
+                            .unwrap_or_default();
+                        match self
+                            .gemini_agent
+                            .submit_audio_with_context(wav_bytes, context)
+                        {
                             Ok(request_id) => {
                                 println!(
                                     "[LLM (Gemini, request_id={})] 音声要求を登録しました",
@@ -313,9 +342,25 @@ impl eframe::App for PiCarApp {
                 let prompt = std::mem::take(&mut self.prompt_buffer);
                 let active_llm = self.selected_llm;
                 self.px.lock().unwrap().stop();
+
+                // ユーザー発話をDBに保存
+                if let Err(e) =
+                    self.memory_repo
+                        .save_message(&self.conversation_id, "user", &prompt)
+                {
+                    eprintln!("[Memory] ユーザーメッセージの保存に失敗: {}", e);
+                }
+
                 println!("[LLM ({:?})] 送信: {}", active_llm, prompt);
                 let request_id = match active_llm {
-                    LlmType::Gemini => self.gemini_agent.submit_prompt(prompt),
+                    LlmType::Gemini => {
+                        let context = self
+                            .memory_repo
+                            .build_context(&self.conversation_id)
+                            .unwrap_or_default();
+                        self.gemini_agent
+                            .submit_prompt_with_context(prompt, context)
+                    }
                     LlmType::Ollama => self.ollama_agent.submit_prompt(prompt),
                 };
                 let request_id = match request_id {
@@ -378,7 +423,10 @@ impl eframe::App for PiCarApp {
                     }
                     Ok(Some(res)) => match res {
                         LlmResponse::Ok {
-                            commands, reply, ..
+                            commands,
+                            reply,
+                            memory_updates,
+                            ..
                         } => {
                             println!(
                                 "[LLM ({:?}, request_id={})] {}件のコマンドを受信、実行します。返答: {}",
@@ -388,6 +436,43 @@ impl eframe::App for PiCarApp {
                                 reply
                             );
                             self.last_reply = format!("[PiCar-X]: {}", reply);
+
+                            // アシスタント発話をDBに保存
+                            if let Err(e) = self.memory_repo.save_message(
+                                &self.conversation_id,
+                                "assistant",
+                                &reply,
+                            ) {
+                                eprintln!("[Memory] 応答メッセージの保存に失敗: {}", e);
+                            }
+
+                            // memory_updates のバリデーション＆反映
+                            if let Some(updates) = memory_updates {
+                                if let Err(e) =
+                                    crate::memory::summarizer::validate_and_apply_memory_updates(
+                                        &self.memory_repo,
+                                        &updates,
+                                    )
+                                {
+                                    eprintln!("[Memory] 長期記憶の反映に失敗: {}", e);
+                                }
+                            }
+
+                            // 未要約メッセージの確認＆自動要約（Geminiの場合のみ）
+                            if active_llm == LlmType::Gemini {
+                                let repo_clone = Arc::clone(&self.memory_repo);
+                                let conv_id = self.conversation_id.clone();
+                                let gemini_provider = GeminiProvider::default();
+                                std::thread::spawn(move || {
+                                    if let Err(e) = crate::memory::summarizer::check_and_summarize(
+                                        &repo_clone,
+                                        &conv_id,
+                                        |prompt| gemini_provider.request_summarize(prompt),
+                                    ) {
+                                        eprintln!("[Memory] 要約処理エラー: {}", e);
+                                    }
+                                });
+                            }
 
                             let reply_clone = reply.clone();
                             let px_clone = Arc::clone(&self.px);
