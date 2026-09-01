@@ -48,7 +48,15 @@ Examples:
 "右に曲がりながら5秒進んで、そのあと3秒まっすぐ進んでください" → forward with angle 30 for 5000ms, then forward without angle for 3000ms.
 "距離が10未満になるまで前進してください" → forward with until distance lt 10.
 
-Do not output prose or markdown outside the structured response."#;
+Do not output prose or markdown outside the structured response.
+
+Memory and Personalization Rules:
+- If a "Long-term Memory" section is provided in the context, use names and preferences stored there (e.g. user's name, robot's name, default speed).
+- If the user names you or changes your name (e.g. "あなたの名前は太郎です", "これからはポチと呼ぶね", "名前をピカにして"), treat this as YOUR (the robot's) name and set "robot.name" in memory_updates. Acknowledge and adopt your new name in your reply.
+- If the user tells you their own name (e.g. "私の名前は太郎です", "太郎と呼んで"), set "user.name" in memory_updates.
+- memory_updates format: { "key": "value" } where key uses dot notation (e.g. "user.name", "robot.name", "robot.default_speed").
+- To delete a memory, set its value to null.
+- Only include memory_updates when the user provides new persistent information."#;
 
 /// Common response type consumed by the application loop.
 #[derive(Debug)]
@@ -57,6 +65,7 @@ pub enum LlmResponse {
         request_id: u64,
         commands: Vec<Command>,
         reply: String,
+        memory_updates: Option<Map<String, Value>>,
     },
     Err {
         request_id: u64,
@@ -79,6 +88,26 @@ pub trait LlmProvider: Send + 'static {
     fn request_audio(&self, _wav_data: &[u8]) -> Result<String, String> {
         Err("このLLMプロバイダは音声入力に対応していません".to_string())
     }
+
+    /// メモリコンテキスト付きリクエスト（デフォルトはコンテキスト無視でrequest呼び出し）
+    fn request_with_context(&self, prompt: &str, _context: &str) -> Result<String, String> {
+        self.request(prompt)
+    }
+
+    /// メモリコンテキスト付き音声リクエスト（デフォルトはコンテキスト無視でrequest_audio呼び出し）
+    fn request_audio_with_context(
+        &self,
+        wav_data: &[u8],
+        _context: &str,
+    ) -> Result<String, String> {
+        self.request_audio(wav_data)
+    }
+
+    /// テキスト要約用のリクエスト (コマンドスキーマなし、テキスト生成のみ)
+    /// デフォルトは未実装
+    fn request_summarize(&self, _prompt: &str) -> Result<String, String> {
+        Err("このLLMプロバイダは要約機能に対応していません".to_string())
+    }
 }
 
 /// Non-blocking LLM agent shared by every provider.
@@ -98,6 +127,8 @@ enum PromptContent {
 struct Prompt {
     request_id: u64,
     content: PromptContent,
+    /// メモリコンテキスト (長期記憶・要約・直近会話)
+    context: Option<String>,
 }
 
 impl<P> ProviderAgent<P>
@@ -125,29 +156,61 @@ where
                     continue;
                 }
 
-                let response = match &prompt.content {
-                    PromptContent::Text(text) => match provider
-                        .request(text)
+                let response = match (&prompt.content, &prompt.context) {
+                    (PromptContent::Text(text), Some(ctx)) => match provider
+                        .request_with_context(text, ctx)
                         .and_then(|json| _parse_commands_for_prompt(&json, text))
                     {
-                        Ok((commands, reply)) => LlmResponse::Ok {
+                        Ok((commands, reply, memory_updates)) => LlmResponse::Ok {
                             request_id: prompt.request_id,
                             commands,
                             reply,
+                            memory_updates,
                         },
                         Err(message) => LlmResponse::Err {
                             request_id: prompt.request_id,
                             message,
                         },
                     },
-                    PromptContent::Audio(wav_data) => match provider
-                        .request_audio(wav_data)
-                        .and_then(|json| _parse_commands_for_prompt(&json, ""))
+                    (PromptContent::Text(text), None) => match provider
+                        .request(text)
+                        .and_then(|json| _parse_commands_for_prompt(&json, text))
                     {
-                        Ok((commands, reply)) => LlmResponse::Ok {
+                        Ok((commands, reply, memory_updates)) => LlmResponse::Ok {
                             request_id: prompt.request_id,
                             commands,
                             reply,
+                            memory_updates,
+                        },
+                        Err(message) => LlmResponse::Err {
+                            request_id: prompt.request_id,
+                            message,
+                        },
+                    },
+                    (PromptContent::Audio(wav_data), Some(ctx)) => match provider
+                        .request_audio_with_context(wav_data, ctx)
+                        .and_then(|json| _parse_commands_for_prompt(&json, ""))
+                    {
+                        Ok((commands, reply, memory_updates)) => LlmResponse::Ok {
+                            request_id: prompt.request_id,
+                            commands,
+                            reply,
+                            memory_updates,
+                        },
+                        Err(message) => LlmResponse::Err {
+                            request_id: prompt.request_id,
+                            message,
+                        },
+                    },
+                    (PromptContent::Audio(wav_data), None) => match provider
+                        .request_audio(wav_data)
+                        .and_then(|json| _parse_commands_for_prompt(&json, ""))
+                    {
+                        Ok((commands, reply, memory_updates)) => LlmResponse::Ok {
+                            request_id: prompt.request_id,
+                            commands,
+                            reply,
+                            memory_updates,
                         },
                         Err(message) => LlmResponse::Err {
                             request_id: prompt.request_id,
@@ -182,6 +245,20 @@ where
             .send(Prompt {
                 request_id,
                 content: PromptContent::Text(text),
+                context: None,
+            })
+            .map(|_| request_id)
+            .map_err(|_| "LLM workerが停止しているため要求を登録できません".to_string())
+    }
+
+    /// Submit a text prompt with memory context.
+    pub fn submit_prompt_with_context(&self, text: String, context: String) -> Result<u64, String> {
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        self.prompt_tx
+            .send(Prompt {
+                request_id,
+                content: PromptContent::Text(text),
+                context: Some(context),
             })
             .map(|_| request_id)
             .map_err(|_| "LLM workerが停止しているため要求を登録できません".to_string())
@@ -194,6 +271,24 @@ where
             .send(Prompt {
                 request_id,
                 content: PromptContent::Audio(wav_data),
+                context: None,
+            })
+            .map(|_| request_id)
+            .map_err(|_| "LLM workerが停止しているため要求を登録できません".to_string())
+    }
+
+    /// Submit an audio prompt with memory context.
+    pub fn submit_audio_with_context(
+        &self,
+        wav_data: Vec<u8>,
+        context: String,
+    ) -> Result<u64, String> {
+        let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
+        self.prompt_tx
+            .send(Prompt {
+                request_id,
+                content: PromptContent::Audio(wav_data),
+                context: Some(context),
             })
             .map(|_| request_id)
             .map_err(|_| "LLM workerが停止しているため要求を登録できません".to_string())
@@ -239,6 +334,8 @@ fn advance_atomic_max(value: &AtomicU64, candidate: u64) {
 struct CommandListPayload {
     commands: Vec<Command>,
     reply: String,
+    #[serde(default)]
+    memory_updates: Option<Map<String, Value>>,
 }
 
 /// Standard JSON Schema shared by both provider transports.
@@ -366,7 +463,9 @@ const MAX_ANGLE: i64 = 90;
 const MAX_CONDITION_DEPTH: usize = 8;
 
 /// Parse and normalize the provider-independent command response.
-pub fn _parse_commands(response_text: &str) -> Result<(Vec<Command>, String), String> {
+pub fn _parse_commands(
+    response_text: &str,
+) -> Result<(Vec<Command>, String, Option<Map<String, Value>>), String> {
     _parse_commands_for_prompt(response_text, "")
 }
 
@@ -375,7 +474,7 @@ pub fn _parse_commands(response_text: &str) -> Result<(Vec<Command>, String), St
 pub fn _parse_commands_for_prompt(
     response_text: &str,
     user_prompt: &str,
-) -> Result<(Vec<Command>, String), String> {
+) -> Result<(Vec<Command>, String, Option<Map<String, Value>>), String> {
     let mut value: Value = serde_json::from_str(response_text).map_err(|e| {
         format!(
             "LLMが返したコマンドJSONの解析に失敗: {} (受信内容: {})",
@@ -405,7 +504,7 @@ pub fn _parse_commands_for_prompt(
     }
 
     serde_json::from_value::<CommandListPayload>(value)
-        .map(|payload| (payload.commands, payload.reply))
+        .map(|payload| (payload.commands, payload.reply, payload.memory_updates))
         .map_err(|e| {
             format!(
                 "LLMが返したコマンドJSONの解析に失敗: {} (受信内容: {})",
@@ -791,7 +890,7 @@ mod tests {
 
     #[test]
     fn movement_duration_is_filled_for_all_providers() {
-        let (commands, reply) =
+        let (commands, reply, _memory_updates) =
             _parse_commands(r#"{"commands":[{"action":"forward","speed":30,"duration_ms":1000},{"action":"stop"}],"reply":"ok"}"#)
                 .expect("command JSON should be valid");
 
@@ -808,7 +907,7 @@ mod tests {
 
     #[test]
     fn parser_applies_safe_defaults_and_rejects_unsafe_values() {
-        let (commands, reply) = _parse_commands(
+        let (commands, reply, _memory_updates) = _parse_commands(
             r#"{"commands":[{"action":"forward","speed":30,"duration_ms":1000}],"reply":"ok"}"#,
         )
         .expect("safe defaults should be applied");
@@ -844,7 +943,7 @@ mod tests {
 
     #[test]
     fn parser_defaults_missing_angles_and_normalizes_integral_floats() {
-        let (commands, reply) = _parse_commands(
+        let (commands, reply, _memory_updates) = _parse_commands(
             r#"{"commands":[{"action":"steer","angle":0,"duration_ms":1000.0},{"action":"set_cam_pan","angle":0},{"action":"forward","speed":40.0,"duration_ms":500.0}],"reply":"ok"}"#,
         )
         .expect("safe angle defaults and integral floats should be accepted");
@@ -874,7 +973,7 @@ mod tests {
 
     #[test]
     fn parser_accepts_nested_until_conditions() {
-        let (commands, reply) = _parse_commands(
+        let (commands, reply, _memory_updates) = _parse_commands(
             r#"{"commands":[{"action":"forward","speed":20,"duration_ms":500,"until":{"and":[{"sensor":"distance","op":"lt","value":10},{"not":{"sensor":"battery_percent","op":"lt","value":10}}]}}],"reply":"ok"}"#,
         )
         .expect("nested until conditions should be valid");
@@ -904,7 +1003,7 @@ mod tests {
 
     #[test]
     fn prompt_duration_overrides_invented_until_condition() {
-        let (commands, _) = _parse_commands_for_prompt(
+        let (commands, _, _memory_updates) = _parse_commands_for_prompt(
             r#"{"commands":[{"action":"forward","speed":50,"until":{"sensor":"distance","op":"lt","value":10}}],"reply":"ok"}"#,
             "まっすぐ10秒進んで",
         )
@@ -929,7 +1028,7 @@ mod tests {
             ("1.5秒進んで", 1_500),
             ("２秒前進", 2_000),
         ] {
-            let (commands, _) = _parse_commands_for_prompt(
+            let (commands, _, _memory_updates) = _parse_commands_for_prompt(
                 r#"{"commands":[{"action":"forward","speed":50,"duration_ms":1000}],"reply":"ok"}"#,
                 prompt,
             )
@@ -944,7 +1043,7 @@ mod tests {
 
     #[test]
     fn prompt_sensor_stop_keeps_until_condition() {
-        let (commands, _) = _parse_commands_for_prompt(
+        let (commands, _, _memory_updates) = _parse_commands_for_prompt(
             r#"{"commands":[{"action":"forward","speed":50,"duration_ms":10000,"until":{"sensor":"distance","op":"lt","value":10}}],"reply":"ok"}"#,
             "距離が10cm未満になったら止まるまで前進",
         )
@@ -958,6 +1057,25 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn parser_extracts_memory_updates() {
+        let (_commands, reply, memory_updates) = _parse_commands(
+            r#"{"commands":[{"action":"stop"}],"reply":"覚えました！","memory_updates":{"user.name":"太郎","robot.name":"ピカ"}}"#,
+        )
+        .expect("should parse memory updates");
+
+        assert_eq!(reply, "覚えました！");
+        let updates = memory_updates.expect("memory_updates should be present");
+        assert_eq!(
+            updates.get("user.name").and_then(|v| v.as_str()),
+            Some("太郎")
+        );
+        assert_eq!(
+            updates.get("robot.name").and_then(|v| v.as_str()),
+            Some("ピカ")
+        );
     }
 
     #[test]
