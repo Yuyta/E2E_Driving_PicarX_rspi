@@ -52,6 +52,10 @@ fn command_response_schema() -> Value {
     serde_json::json!({
         "type": "OBJECT",
         "properties": {
+            "user_transcription": {
+                "type": "STRING",
+                "description": "The user's spoken request transcribed into Japanese text. Return exactly what the user said as accurately as possible."
+            },
             "commands": {
                 "type": "ARRAY",
                 "description": "List of robot commands to execute in sequence.",
@@ -90,7 +94,7 @@ fn command_response_schema() -> Value {
                 "nullable": true
             }
         },
-        "required": ["commands", "reply"]
+        "required": ["user_transcription", "commands", "reply"]
     })
 }
 
