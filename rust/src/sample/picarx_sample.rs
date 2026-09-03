@@ -64,6 +64,7 @@ struct PiCarApp {
     height: usize,
     frame_interval: Duration,
     last_reply: String,
+    chat_messages: Vec<(String, String)>,
     audio_recorder: crate::audio_input::AudioRecorder,
     is_voice_recording: bool,
     memory_repo: Arc<crate::memory::repository::MemoryRepository>,
@@ -129,12 +130,38 @@ impl PiCarApp {
             height,
             frame_interval: Duration::from_secs_f64(1.0 / framerate as f64),
             last_reply: String::new(),
+            chat_messages: Vec::new(),
             audio_recorder: crate::audio_input::AudioRecorder::new(),
             is_voice_recording: false,
             memory_repo,
             conversation_id,
         })
     }
+}
+
+
+fn show_chat_bubble(ui: &mut egui::Ui, role: &str, message: &str) {
+    let available_width = ui.available_width();
+    let bubble_width = (available_width * 0.82).max(120.0);
+    let is_user = role == "user";
+
+    // ユーザーは右寄せ、アシスタントは左寄せで表示する。
+    let layout = if is_user {
+        egui::Layout::right_to_left(egui::Align::Min)
+    } else {
+        egui::Layout::left_to_right(egui::Align::Min)
+    };
+
+    ui.with_layout(layout, |ui| {
+        egui::Frame::group(ui.style())
+            .inner_margin(egui::Margin::symmetric(10, 7))
+            .show(ui, |ui| {
+                ui.set_max_width(bubble_width);
+                ui.label(message);
+            });
+    });
+
+    ui.add_space(6.0);
 }
 
 impl eframe::App for PiCarApp {
@@ -171,7 +198,31 @@ impl eframe::App for PiCarApp {
             return;
         }
 
-        egui::CentralPanel::default().show(ctx, |ui| {
+        egui::SidePanel::right("chat_panel")
+            .resizable(true)
+            .default_width(320.0)
+            .min_width(240.0)
+            .show(ctx, |ui| {
+                ui.heading("チャット");
+                ui.separator();
+
+                egui::ScrollArea::vertical()
+                    .stick_to_bottom(true)
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        if self.chat_messages.is_empty() {
+                            ui.centered_and_justified(|ui| {
+                                ui.label("会話履歴はありません");
+                            });
+                        } else {
+                            for (role, message) in &self.chat_messages {
+                                show_chat_bubble(ui, role, message);
+                            }
+                        }
+                    });
+            });
+
+            egui::CentralPanel::default().show(ctx, |ui| {
             // 1. センサー計器類 (最上部、バックグラウンドスレッドの最新値を常時表示)
             let snapshot = self.sensor_monitor.snapshot();
             ui.horizontal(|ui| {
@@ -294,6 +345,7 @@ impl eframe::App for PiCarApp {
                             "[Audio] 録音完了 ({} bytes)、Gemini APIに送信します",
                             wav_bytes.len()
                         );
+
                         self.px.lock().unwrap().stop();
                         let context = self
                             .memory_repo
@@ -334,12 +386,15 @@ impl eframe::App for PiCarApp {
                 AppMode::Manual => {}
             }
 
+            // TextEditからフォーカスが外れたフレームでEnterが押された場合に送信する。
             let submitted = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
             if submitted
                 && matches!(&self.app_mode, AppMode::Manual)
                 && !self.prompt_buffer.trim().is_empty()
             {
                 let prompt = std::mem::take(&mut self.prompt_buffer);
+                self.chat_messages
+                    .push(("user".to_owned(), prompt.clone()));
                 let active_llm = self.selected_llm;
                 self.px.lock().unwrap().stop();
 
@@ -423,6 +478,7 @@ impl eframe::App for PiCarApp {
                     }
                     Ok(Some(res)) => match res {
                         LlmResponse::Ok {
+                            user_transcription,
                             commands,
                             reply,
                             memory_updates,
@@ -436,6 +492,41 @@ impl eframe::App for PiCarApp {
                                 reply
                             );
                             self.last_reply = format!("[PiCar-X]: {}", reply);
+
+                            // 音声入力の場合は、Geminiが返した文字起こしをチャットに追加する。
+                            // テキスト入力の場合は送信時点ですでに追加されているため、
+                            // 同じ内容を二重表示しない。
+                            if !user_transcription.trim().is_empty() {
+                                let already_shown = self
+                                    .chat_messages
+                                    .last()
+                                    .map(|(role, message)| {
+                                        role == "user" && message == &user_transcription
+                                    })
+                                    .unwrap_or(false);
+
+                                if !already_shown {
+                                    self.chat_messages.push((
+                                        "user".to_owned(),
+                                        user_transcription.clone(),
+                                    ));
+
+                                    // 音声入力の文字起こしをユーザー発話としてDBに保存
+                                    if let Err(e) = self.memory_repo.save_message(
+                                        &self.conversation_id,
+                                        "user",
+                                        &user_transcription,
+                                    ) {
+                                        eprintln!(
+                                            "[Memory] 音声ユーザーメッセージの保存に失敗: {}",
+                                            e
+                                        );
+                                    }
+                                }
+                            }
+
+                            self.chat_messages
+                                .push(("assistant".to_owned(), reply.clone()));
 
                             // アシスタント発話をDBに保存
                             if let Err(e) = self.memory_repo.save_message(
