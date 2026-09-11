@@ -164,13 +164,15 @@ where
                         .request_with_context(text, ctx)
                         .and_then(|json| _parse_commands_for_prompt(&json, text))
                     {
-                        Ok((user_transcription, commands, reply, memory_updates)) => LlmResponse::Ok {
-                            request_id: prompt.request_id,
-                            user_transcription,
-                            commands,
-                            reply,
-                            memory_updates,
-                        },
+                        Ok((user_transcription, commands, reply, memory_updates)) => {
+                            LlmResponse::Ok {
+                                request_id: prompt.request_id,
+                                user_transcription,
+                                commands,
+                                reply,
+                                memory_updates,
+                            }
+                        }
                         Err(message) => LlmResponse::Err {
                             request_id: prompt.request_id,
                             message,
@@ -180,13 +182,15 @@ where
                         .request(text)
                         .and_then(|json| _parse_commands_for_prompt(&json, text))
                     {
-                        Ok((user_transcription, commands, reply, memory_updates)) => LlmResponse::Ok {
-                            request_id: prompt.request_id,
-                            user_transcription,
-                            commands,
-                            reply,
-                            memory_updates,
-                        },
+                        Ok((user_transcription, commands, reply, memory_updates)) => {
+                            LlmResponse::Ok {
+                                request_id: prompt.request_id,
+                                user_transcription,
+                                commands,
+                                reply,
+                                memory_updates,
+                            }
+                        }
                         Err(message) => LlmResponse::Err {
                             request_id: prompt.request_id,
                             message,
@@ -196,13 +200,15 @@ where
                         .request_audio_with_context(wav_data, ctx)
                         .and_then(|json| _parse_commands_for_prompt(&json, ""))
                     {
-                        Ok((user_transcription, commands, reply, memory_updates)) => LlmResponse::Ok {
-                            request_id: prompt.request_id,
-                            user_transcription,
-                            commands,
-                            reply,
-                            memory_updates,
-                        },
+                        Ok((user_transcription, commands, reply, memory_updates)) => {
+                            LlmResponse::Ok {
+                                request_id: prompt.request_id,
+                                user_transcription,
+                                commands,
+                                reply,
+                                memory_updates,
+                            }
+                        }
                         Err(message) => LlmResponse::Err {
                             request_id: prompt.request_id,
                             message,
@@ -212,13 +218,15 @@ where
                         .request_audio(wav_data)
                         .and_then(|json| _parse_commands_for_prompt(&json, ""))
                     {
-                        Ok((user_transcription, commands, reply, memory_updates)) => LlmResponse::Ok {
-                            request_id: prompt.request_id,
-                            user_transcription,
-                            commands,
-                            reply,
-                            memory_updates,
-                        },
+                        Ok((user_transcription, commands, reply, memory_updates)) => {
+                            LlmResponse::Ok {
+                                request_id: prompt.request_id,
+                                user_transcription,
+                                commands,
+                                reply,
+                                memory_updates,
+                            }
+                        }
                         Err(message) => LlmResponse::Err {
                             request_id: prompt.request_id,
                             message,
@@ -272,6 +280,7 @@ where
     }
 
     /// Submit an audio prompt without blocking the caller and return its request ID.
+    #[allow(dead_code)]
     pub fn submit_audio(&self, wav_data: Vec<u8>) -> Result<u64, String> {
         let request_id = self.next_request_id.fetch_add(1, Ordering::Relaxed);
         self.prompt_tx
@@ -475,19 +484,17 @@ const MIN_ANGLE: i64 = -90;
 const MAX_ANGLE: i64 = 90;
 const MAX_CONDITION_DEPTH: usize = 8;
 
+pub type ParsedCommandResult =
+    Result<(String, Vec<Command>, String, Option<Map<String, Value>>), String>;
+
 /// Parse and normalize the provider-independent command response.
-pub fn _parse_commands(
-    response_text: &str,
-) -> Result<(String, Vec<Command>, String, Option<Map<String, Value>>), String> {
+pub fn _parse_commands(response_text: &str) -> ParsedCommandResult {
     _parse_commands_for_prompt(response_text, "")
 }
 
 /// Parse and normalize the provider-independent command response using the
 /// original user prompt for deterministic safety corrections.
-pub fn _parse_commands_for_prompt(
-    response_text: &str,
-    user_prompt: &str,
-) -> Result<(String, Vec<Command>, String, Option<Map<String, Value>>), String> {
+pub fn _parse_commands_for_prompt(response_text: &str, user_prompt: &str) -> ParsedCommandResult {
     let mut value: Value = serde_json::from_str(response_text).map_err(|e| {
         format!(
             "LLMが返したコマンドJSONの解析に失敗: {} (受信内容: {})",
@@ -517,7 +524,14 @@ pub fn _parse_commands_for_prompt(
     }
 
     serde_json::from_value::<CommandListPayload>(value)
-        .map(|payload| (payload.user_transcription,payload.commands, payload.reply, payload.memory_updates))
+        .map(|payload| {
+            (
+                payload.user_transcription,
+                payload.commands,
+                payload.reply,
+                payload.memory_updates,
+            )
+        })
         .map_err(|e| {
             format!(
                 "LLMが返したコマンドJSONの解析に失敗: {} (受信内容: {})",
@@ -526,9 +540,83 @@ pub fn _parse_commands_for_prompt(
         })
 }
 
+fn extract_duration_ms_from_prompt(prompt: &str) -> Option<u64> {
+    let normalized = prompt
+        .chars()
+        .map(|c| match c {
+            '０'..='９' => (c as u32 - '０' as u32 + '0' as u32) as u8 as char,
+            '．' => '.',
+            _ => c,
+        })
+        .collect::<String>()
+        .to_lowercase();
+
+    for (start, ch) in normalized.char_indices() {
+        if !ch.is_ascii_digit() {
+            continue;
+        }
+        let slice = &normalized[start..];
+        let mut num_end = 0;
+        let mut seen_dot = false;
+        for (i, c) in slice.char_indices() {
+            if c.is_ascii_digit() {
+                num_end = i + c.len_utf8();
+            } else if c == '.' && !seen_dot {
+                let after_dot = &slice[i + 1..];
+                if after_dot
+                    .chars()
+                    .next()
+                    .is_some_and(|next_c| next_c.is_ascii_digit())
+                {
+                    seen_dot = true;
+                    num_end = i + 1;
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        let num_str = &slice[..num_end];
+        let rest = slice[num_end..].trim_start();
+
+        if let Some(after_unit) = rest.strip_prefix("ms")
+            && !after_unit.starts_with(|c: char| c.is_ascii_alphabetic())
+            && let Ok(val) = num_str.parse::<f64>()
+        {
+            return Some(val.round() as u64);
+        }
+        if rest.strip_prefix("ミリ秒").is_some()
+            && let Ok(val) = num_str.parse::<f64>()
+        {
+            return Some(val.round() as u64);
+        }
+
+        if let Some(after_unit) = rest
+            .strip_prefix("seconds")
+            .or_else(|| rest.strip_prefix("second"))
+            .or_else(|| rest.strip_prefix("sec"))
+            .or_else(|| rest.strip_prefix('s'))
+            && !after_unit.starts_with(|c: char| c.is_ascii_alphabetic())
+            && let Ok(val) = num_str.parse::<f64>()
+        {
+            return Some((val * 1000.0).round() as u64);
+        }
+        if rest.strip_prefix("秒").is_some()
+            && let Ok(val) = num_str.parse::<f64>()
+        {
+            return Some((val * 1000.0).round() as u64);
+        }
+    }
+
+    None
+}
+
 fn normalize_commands_for_user_prompt(commands: &mut [Value], user_prompt: &str) {
     let should_strip_until =
         !user_prompt.trim().is_empty() && !prompt_requests_sensor_stop(user_prompt);
+    let prompt_duration_ms = extract_duration_ms_from_prompt(user_prompt);
 
     for command in commands {
         let Some(object) = command.as_object_mut() else {
@@ -544,6 +632,10 @@ fn normalize_commands_for_user_prompt(commands: &mut [Value], user_prompt: &str)
 
         if should_strip_until {
             object.remove("until");
+        }
+
+        if let Some(duration) = prompt_duration_ms {
+            object.insert("duration_ms".to_string(), Value::from(duration));
         }
     }
 }
@@ -861,8 +953,12 @@ mod tests {
             if prompt == "error" {
                 Err("mock error".to_string())
             } else {
-                Ok(r#"{"commands":[{"action":"stop"}]}"#.to_string())
+                Ok(r#"{"commands":[{"action":"stop"}],"reply":"ok"}"#.to_string())
             }
+        }
+
+        fn request_audio(&self, _wav_data: &[u8]) -> Result<String, String> {
+            Ok(r#"{"commands":[{"action":"stop"}],"reply":"ok"}"#.to_string())
         }
     }
 
@@ -871,7 +967,7 @@ mod tests {
     impl LlmProvider for SlowProvider {
         fn request(&self, _prompt: &str) -> Result<String, String> {
             std::thread::sleep(Duration::from_millis(20));
-            Ok(r#"{"commands":[{"action":"stop"}]}"#.to_string())
+            Ok(r#"{"commands":[{"action":"stop"}],"reply":"ok"}"#.to_string())
         }
     }
 
@@ -958,7 +1054,7 @@ mod tests {
 
     #[test]
     fn parser_defaults_missing_angles_and_normalizes_integral_floats() {
-        let (user_transcription, commands, reply, _memory_updates) = _parse_commands(
+        let (_user_transcription, commands, reply, _memory_updates) = _parse_commands(
             r#"{"user_transcription":"test","commands":[{"action":"steer","angle":0,"duration_ms":1000.0},{"action":"set_cam_pan","angle":0},{"action":"forward","speed":40.0,"duration_ms":500.0}],"reply":"ok"}"#,
         )
         .expect("safe angle defaults and integral floats should be accepted");
@@ -988,7 +1084,7 @@ mod tests {
 
     #[test]
     fn parser_accepts_nested_until_conditions() {
-        let (user_transcription, commands, reply, _memory_updates) = _parse_commands(
+        let (_user_transcription, commands, reply, _memory_updates) = _parse_commands(
             r#"{"user_transcription":"test","commands":[{"action":"forward","speed":20,"duration_ms":500,"until":{"and":[{"sensor":"distance","op":"lt","value":10},{"not":{"sensor":"battery_percent","op":"lt","value":10}}]}}],"reply":"ok"}"#,
         )
         .expect("nested until conditions should be valid");
@@ -1018,7 +1114,7 @@ mod tests {
 
     #[test]
     fn prompt_duration_overrides_invented_until_condition() {
-        let (user_transcription, commands, _, _memory_updates) = _parse_commands_for_prompt(
+        let (_user_transcription, commands, _, _memory_updates) = _parse_commands_for_prompt(
             r#"{"user_transcription":"test","commands":[{"action":"forward","speed":50,"until":{"sensor":"distance","op":"lt","value":10}}],"reply":"ok"}"#,
             "まっすぐ10秒進んで",
         )
@@ -1043,7 +1139,7 @@ mod tests {
             ("1.5秒進んで", 1_500),
             ("２秒前進", 2_000),
         ] {
-            let (user_transcription, commands, _, _memory_updates) = _parse_commands_for_prompt(
+            let (_user_transcription, commands, _, _memory_updates) = _parse_commands_for_prompt(
                 r#"{"user_transcription":"test","commands":[{"action":"forward","speed":50,"duration_ms":1000}],"reply":"ok"}"#,
                 prompt,
             )
@@ -1058,7 +1154,7 @@ mod tests {
 
     #[test]
     fn prompt_sensor_stop_keeps_until_condition() {
-        let (user_transcription, commands, _, _memory_updates) = _parse_commands_for_prompt(
+        let (_user_transcription, commands, _, _memory_updates) = _parse_commands_for_prompt(
             r#"{"user_transcription":"test","commands":[{"action":"forward","speed":50,"duration_ms":10000,"until":{"sensor":"distance","op":"lt","value":10}}],"reply":"ok"}"#,
             "距離が10cm未満になったら止まるまで前進",
         )

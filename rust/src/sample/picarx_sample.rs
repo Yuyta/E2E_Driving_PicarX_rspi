@@ -139,7 +139,6 @@ impl PiCarApp {
     }
 }
 
-
 fn show_chat_bubble(ui: &mut egui::Ui, role: &str, message: &str) {
     let available_width = ui.available_width();
     let bubble_width = (available_width * 0.82).max(120.0);
@@ -222,7 +221,7 @@ impl eframe::App for PiCarApp {
                     });
             });
 
-            egui::CentralPanel::default().show(ctx, |ui| {
+        egui::CentralPanel::default().show(ctx, |ui| {
             // 1. センサー計器類 (最上部、バックグラウンドスレッドの最新値を常時表示)
             let snapshot = self.sensor_monitor.snapshot();
             ui.horizontal(|ui| {
@@ -393,8 +392,7 @@ impl eframe::App for PiCarApp {
                 && !self.prompt_buffer.trim().is_empty()
             {
                 let prompt = std::mem::take(&mut self.prompt_buffer);
-                self.chat_messages
-                    .push(("user".to_owned(), prompt.clone()));
+                self.chat_messages.push(("user".to_owned(), prompt.clone()));
                 let active_llm = self.selected_llm;
                 self.px.lock().unwrap().stop();
 
@@ -506,10 +504,8 @@ impl eframe::App for PiCarApp {
                                     .unwrap_or(false);
 
                                 if !already_shown {
-                                    self.chat_messages.push((
-                                        "user".to_owned(),
-                                        user_transcription.clone(),
-                                    ));
+                                    self.chat_messages
+                                        .push(("user".to_owned(), user_transcription.clone()));
 
                                     // 音声入力の文字起こしをユーザー発話としてDBに保存
                                     if let Err(e) = self.memory_repo.save_message(
@@ -538,15 +534,14 @@ impl eframe::App for PiCarApp {
                             }
 
                             // memory_updates のバリデーション＆反映
-                            if let Some(updates) = memory_updates {
-                                if let Err(e) =
+                            if let Some(updates) = memory_updates
+                                && let Err(e) =
                                     crate::memory::summarizer::validate_and_apply_memory_updates(
                                         &self.memory_repo,
                                         &updates,
                                     )
-                                {
-                                    eprintln!("[Memory] 長期記憶の反映に失敗: {}", e);
-                                }
+                            {
+                                eprintln!("[Memory] 長期記憶の反映に失敗: {}", e);
                             }
 
                             // 未要約メッセージの確認＆自動要約（Geminiの場合のみ）
