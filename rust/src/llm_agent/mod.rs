@@ -4,8 +4,8 @@ mod gemini;
 mod ollama;
 
 pub use command::CommandQueue;
-pub use common::LlmResponse;
-pub use gemini::GeminiAgent;
+pub use common::{LlmProvider, LlmResponse};
+pub use gemini::{GeminiAgent, GeminiProvider};
 pub use ollama::OllamaAgent;
 
 // LLMの選択肢
