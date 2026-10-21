@@ -167,7 +167,7 @@ impl CommandQueue {
 
     /// 1フレーム分実行を進める。まだ実行中なら true、全コマンド消化済みなら false を返す。
     /// `sensors`はforward/backward/steerに付与された`until`条件の判定に使う
-    /// (duration_ms経過前でも、条件が成立した時点でアクションを終了する)。
+    /// (duration_ms経過前でも、条件が成立した時点で早期に打ち切る)。
     pub fn tick(&mut self, px: &mut Picarx, sensors: SensorSnapshot) -> bool {
         if self.current_index >= self.commands.len() {
             return false;
