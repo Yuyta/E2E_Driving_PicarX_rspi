@@ -1,10 +1,7 @@
 use crate::picarx::Picarx;
 use crate::sensor_monitor::SensorSnapshot;
-<<<<<<< HEAD
 use serde::Deserialize;
 use std::time::Instant;
-=======
->>>>>>> origin/main
 
 // 時間指定コマンドの最小継続時間。LLMが0msなどの退化値を返した場合の安全策
 const MIN_DURATION_MS: u64 = 100;
@@ -134,6 +131,26 @@ pub enum Command {
         #[serde(default)]
         until: Option<ConditionExpr>,
     },
+    Forward {
+        speed: i32,
+        duration_ms: u64,
+        angle: Option<i32>,
+        #[serde(default)]
+        until: Option<ConditionExpr>,
+    },
+    Backward {
+        speed: i32,
+        duration_ms: u64,
+        angle: Option<i32>,
+        #[serde(default)]
+        until: Option<ConditionExpr>,
+    },
+    Steer {
+        angle: i32,
+        duration_ms: u64,
+        #[serde(default)]
+        until: Option<ConditionExpr>,
+    },
     Stop,
     SetCamPan {
         angle: i32,
@@ -153,6 +170,15 @@ impl Command {
             | Command::Backward { duration_ms, .. }
             | Command::Steer { duration_ms, .. } => (*duration_ms).max(MIN_DURATION_MS),
             _ => 0,
+        }
+    }
+
+    fn until(&self) -> Option<&ConditionExpr> {
+        match self {
+            Command::Forward { until, .. }
+            | Command::Backward { until, .. }
+            | Command::Steer { until, .. } => until.as_ref(),
+            _ => None,
         }
     }
 
@@ -200,11 +226,21 @@ impl CommandQueue {
         let until = current.until();
 
         let duration_elapsed = self
+        let current = &self.commands[self.current_index];
+        let duration_ms = current.duration_ms();
+        let until = current.until();
+
+        let duration_elapsed = self
             .current_started_at
             .map(|t| t.elapsed().as_millis() as u64 >= duration_ms)
             .unwrap_or(true);
         let condition_met = until.map(|c| c.is_met(&sensors)).unwrap_or(false);
+        let condition_met = until.map(|c| c.is_met(&sensors)).unwrap_or(false);
 
+        if duration_elapsed || condition_met {
+            if condition_met && !duration_elapsed {
+                println!("[LLM] センサー条件が成立したため中断します");
+            }
         if duration_elapsed || condition_met {
             if condition_met && !duration_elapsed {
                 println!("[LLM] センサー条件が成立したため中断します");
@@ -220,6 +256,18 @@ impl CommandQueue {
     fn start_current(&mut self, px: &mut Picarx) {
         self.current_started_at = Some(Instant::now());
         match &self.commands[self.current_index] {
+            Command::Forward { speed, angle, .. } => {
+                if let Some(angle) = angle {
+                    px.set_dir_servo_angle(*angle);
+                }
+                px.forward(*speed);
+            }
+            Command::Backward { speed, angle, .. } => {
+                if let Some(angle) = angle {
+                    px.set_dir_servo_angle(*angle);
+                }
+                px.backward(*speed);
+            }
             Command::Forward { speed, angle, .. } => {
                 if let Some(angle) = angle {
                     px.set_dir_servo_angle(*angle);
@@ -263,6 +311,10 @@ impl CommandQueue {
     fn finish_current(&mut self, px: &mut Picarx) {
         // タイムベースの移動系コマンドが終わったら安全な状態(停止/直進)に戻す
         match &self.commands[self.current_index] {
+            Command::Forward { .. } | Command::Backward { .. } => {
+                px.stop();
+                px.set_dir_servo_angle(0); // 曲がったタイヤをまっすぐに戻す
+            }
             Command::Forward { .. } | Command::Backward { .. } => {
                 px.stop();
                 px.set_dir_servo_angle(0); // 曲がったタイヤをまっすぐに戻す
