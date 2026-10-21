@@ -1,22 +1,52 @@
 [project]
-name = "picar-x-keyboard-control"
+name = "picarx-agent"
 version = "0.1.0"
-description = "Add your description here"
+description = "PiCar-X Agentic AI (LangGraph Multi-Agent, GUI, and Token Optimization)"
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = ">=3.11"
 dependencies = [
-    "opencv-python>=4.13.0.92",
-    "gpiozero>=2.0.1",
-    "picarx",
-    "pyaudio>=0.2.14",
-    "robot-hat",
-    "smbus2>=0.6.1",
-    "vilib",
-    "picamera2>=0.3.36",
+    "httpx>=0.27.0",
+    "langchain>=0.3.0",
+    "langchain-community>=0.3.0",
+    "langchain-google-genai>=2.0.0",
+    "langchain-ollama>=0.2.0",
+    "langgraph>=0.2.0",
+    "pillow>=10.0.0",
+    "pydantic>=2.7.0",
+    "pyside6>=6.7.0",
+    "python-dotenv>=1.0.0",
 ]
 
-[tool.uv.sources]
-robot-hat = { git = "https://github.com/sunfounder/robot-hat.git" }
-vilib = { git = "https://github.com/sunfounder/vilib.git" }
-picarx = { git = "https://github.com/sunfounder/picar-x.git" }
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "respx>=0.21.0",
+    "ruff>=0.5.0",
+]
+e2e = [
+    "torch>=2.2.0",
+    "torchvision>=0.17.0",
+    "onnx>=1.15.0",
+    "onnxscript>=0.7.0",
+    "onnxruntime>=1.17.0",
+    "opencv-python>=4.8.0",
+]
 
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

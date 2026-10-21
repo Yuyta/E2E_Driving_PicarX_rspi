@@ -76,6 +76,9 @@ pub struct Picarx {
     pub dir_angle: i32,
     pub pan_angle: i32,
     pub tilt_angle: i32,
+    pub dir_offset: i32,
+    pub pan_offset: i32,
+    pub tilt_offset: i32,
 
     // ラズパイの物理GPIOから直接伸びている方向制御ピン (D4, D5)
     motor1_dir_pin: OutputPin, // 左モーター方向 (D4 -> BCM 23)
@@ -126,6 +129,8 @@ impl Picarx {
         let mut i2c = I2c::new()?;
         i2c.set_slave_address(HAT_ADDR)?;
 
+        let (dir_offset, pan_offset, tilt_offset) = Self::load_calibration_offsets();
+
         let mut s = Self {
             i2c,
             _servo_en: servo_en,
@@ -134,6 +139,9 @@ impl Picarx {
             dir_angle: 0,
             pan_angle: 0,
             tilt_angle: 0,
+            dir_offset,
+            pan_offset,
+            tilt_offset,
             motor1_dir_pin,
             motor2_dir_pin,
             // Pythonのデフォルト設定通り、右側だけを反転に
@@ -305,17 +313,107 @@ impl Picarx {
 
     pub fn set_dir_servo_angle(&mut self, angle: i32) {
         self.dir_angle = angle;
-        self.set_servo_angle(REG_PWM_CH2, angle);
+        self.set_servo_angle(REG_PWM_CH2, angle + self.dir_offset);
     }
 
     pub fn set_cam_pan_angle(&mut self, angle: i32) {
         self.pan_angle = angle;
-        self.set_servo_angle(REG_PWM_CH0, angle);
+        self.set_servo_angle(REG_PWM_CH0, angle + self.pan_offset);
     }
 
     pub fn set_cam_tilt_angle(&mut self, angle: i32) {
         self.tilt_angle = angle;
-        self.set_servo_angle(REG_PWM_CH1, angle);
+        self.set_servo_angle(REG_PWM_CH1, angle + self.tilt_offset);
+    }
+
+    fn load_calibration_offsets() -> (i32, i32, i32) {
+        let mut dir_offset = 0;
+        let mut pan_offset = 0;
+        let mut tilt_offset = 0;
+
+        let config_paths = ["/opt/picar-x/picar-x.conf", "/etc/picar-x/picar-x.conf"];
+
+        let mut loaded = false;
+        for path in &config_paths {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                println!("✓ Calibration file found: {}", path);
+                Self::parse_calibration_content(
+                    &content,
+                    &mut dir_offset,
+                    &mut pan_offset,
+                    &mut tilt_offset,
+                );
+                loaded = true;
+                break;
+            }
+        }
+
+        if !loaded {
+            if let Ok(home) = std::env::var("HOME") {
+                let user_path = format!("{}/.config/picar-x/picar-x.conf", home);
+                if let Ok(content) = std::fs::read_to_string(&user_path) {
+                    println!("✓ User calibration file found: {}", user_path);
+                    Self::parse_calibration_content(
+                        &content,
+                        &mut dir_offset,
+                        &mut pan_offset,
+                        &mut tilt_offset,
+                    );
+                }
+            }
+        }
+
+        // 環境変数 (.env) からのオーバーライドに対応
+        if let Ok(val) = std::env::var("DIR_SERVO_OFFSET") {
+            if let Ok(num) = val.parse::<i32>() {
+                dir_offset = num;
+            }
+        }
+        if let Ok(val) = std::env::var("CAM_PAN_OFFSET") {
+            if let Ok(num) = val.parse::<i32>() {
+                pan_offset = num;
+            }
+        }
+        if let Ok(val) = std::env::var("CAM_TILT_OFFSET") {
+            if let Ok(num) = val.parse::<i32>() {
+                tilt_offset = num;
+            }
+        }
+
+        println!(
+            "✓ Servo offsets applied: Dir={}, Pan={}, Tilt={}",
+            dir_offset, pan_offset, tilt_offset
+        );
+
+        (dir_offset, pan_offset, tilt_offset)
+    }
+
+    fn parse_calibration_content(
+        content: &str,
+        dir_offset: &mut i32,
+        pan_offset: &mut i32,
+        tilt_offset: &mut i32,
+    ) {
+        for line in content.lines() {
+            let line = line.trim();
+            if line.starts_with('#') || line.starts_with('[') || line.is_empty() {
+                continue;
+            }
+            if let Some((k, v)) = line.split_once('=') {
+                let key = k.trim().to_lowercase();
+                let val_str = v.trim();
+                if let Ok(val) = val_str.parse::<f32>() {
+                    let rounded = val.round() as i32;
+                    if key.contains("cam_pan") || key.contains("pan_servo") {
+                        *pan_offset = rounded;
+                    } else if key.contains("cam_tilt") || key.contains("tilt_servo") {
+                        *tilt_offset = rounded;
+                    } else if key.contains("dir_servo") || key.contains("direction") {
+                        *dir_offset = rounded;
+                    }
+                }
+            }
+        }
     }
 
     pub fn get_grayscale_data(&mut self) -> Result<[u16; 3], Box<dyn std::error::Error>> {
