@@ -1,7 +1,10 @@
 use crate::picarx::Picarx;
 use crate::sensor_monitor::SensorSnapshot;
+<<<<<<< HEAD
 use serde::Deserialize;
 use std::time::Instant;
+=======
+>>>>>>> origin/main
 
 // 時間指定コマンドの最小継続時間。LLMが0msなどの退化値を返した場合の安全策
 const MIN_DURATION_MS: u64 = 100;

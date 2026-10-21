@@ -83,6 +83,25 @@ impl SensorMonitor {
         median_distance(&mut samples)
     }
 
+    /// 複数回計測して中央値を採用することで、モーター動作時の電気的ノイズ等による
+    /// 単発の外れ値(実際より大きく外れた距離)の影響を軽減する。
+    fn read_distance_median(px: &mut Picarx) -> Option<f64> {
+        let mut samples = Vec::with_capacity(DISTANCE_SAMPLE_COUNT);
+        for i in 0..DISTANCE_SAMPLE_COUNT {
+            if let Some(d) = px.try_get_distance_once() {
+                samples.push(d);
+            }
+            if i + 1 < DISTANCE_SAMPLE_COUNT {
+                thread::sleep(Duration::from_millis(DISTANCE_SAMPLE_GAP_MS));
+            }
+        }
+        if samples.is_empty() {
+            return None;
+        }
+        samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        Some(samples[samples.len() / 2])
+    }
+
     /// 最新のセンサー値を取得する(軽量・非ブロッキング)
     pub fn snapshot(&self) -> SensorSnapshot {
         *self.snapshot.lock().unwrap()
