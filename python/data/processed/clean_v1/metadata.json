@@ -1,0 +1,29 @@
+{
+  "session_id": "clean_v1",
+  "total_frames": 67,
+  "duration_sec": 0.0,
+  "fps": 0.0,
+  "distribution": {
+    "straight_ratio": 0.881,
+    "left_ratio": 0.0,
+    "right_ratio": 0.119
+  },
+  "avg_steering": -0.0085,
+  "avg_throttle": 0.0,
+  "is_cleaned": true,
+  "cleaning_report": {
+    "model_used": "models\\v003\\model.onnx",
+    "threshold": 0.4,
+    "top_k_percent": null,
+    "total_samples": 150,
+    "clean_samples": 67,
+    "removed_samples": 83,
+    "removal_rate": 0.5533,
+    "mae_before": 0.5625,
+    "mae_before_deg": 19.69,
+    "mae_after": 0.0814,
+    "mae_after_deg": 2.85,
+    "labels_file": "data\\processed\\clean_v1\\labels.jsonl",
+    "bad_cases_file": "data\\processed\\clean_v1\\bad_cases.jsonl"
+  }
+}

@@ -1,0 +1,4 @@
+{"session_id": "20261016_001943", "frame": "frame_000006.jpg", "target_steering": 0.0, "pred_steering": -0.7861, "abs_error": 0.7861, "reason": "Error 0.786 > threshold 0.400"}
+{"session_id": "20261016_001943", "frame": "frame_000014.jpg", "target_steering": -0.8571, "pred_steering": 0.0525, "abs_error": 0.9096, "reason": "Error 0.910 > threshold 0.400"}
+{"session_id": "20261016_001943", "frame": "frame_000084.jpg", "target_steering": -1.0, "pred_steering": -0.4396, "abs_error": 0.5604, "reason": "Error 0.560 > threshold 0.400"}
+{"session_id": "20261016_001943", "frame": "frame_000109.jpg", "target_steering": -0.1429, "pred_steering": -0.7927, "abs_error": 0.6498, "reason": "Error 0.650 > threshold 0.400"}

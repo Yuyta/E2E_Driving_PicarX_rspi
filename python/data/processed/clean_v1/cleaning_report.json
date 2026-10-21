@@ -1,0 +1,15 @@
+{
+  "model_used": "models\\v003\\model.onnx",
+  "threshold": 0.4,
+  "top_k_percent": null,
+  "total_samples": 150,
+  "clean_samples": 67,
+  "removed_samples": 83,
+  "removal_rate": 0.5533,
+  "mae_before": 0.5625,
+  "mae_before_deg": 19.69,
+  "mae_after": 0.0814,
+  "mae_after_deg": 2.85,
+  "labels_file": "data\\processed\\clean_v1\\labels.jsonl",
+  "bad_cases_file": "data\\processed\\clean_v1\\bad_cases.jsonl"
+}

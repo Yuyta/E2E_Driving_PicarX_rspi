@@ -1,0 +1,147 @@
+今回の `make build` エラー原因と解消策をまとめます。
+
+---
+
+## エラー原因
+
+### 発生したエラー
+
+```text
+process_begin: CreateProcess(NULL, dirname C:/Users/tacta/Dev/PiCarX/rust/build/, ...) failed.
+
+docker: invalid spec: :/workspace: empty section between colons
+```
+
+### 原因
+Makefile内で以下を実行していました。
+```make
+PARENT_DIR := $(shell dirname $(MAKEFILE_DIR))
+```
+`dirname` コマンドを使って、Makefileの親ディレクトリを取得しています。
+しかし、使用していた `make` が
+```
+C:\Program Files (x86)\GnuWin32\bin\make.exe
+```
+（GnuWin32版）でした。
+この環境では、
+* `dirname`
+* `sh`
+などのUnix系コマンドが存在しません。
+そのため、
+```
+dirname C:/Users/tacta/Dev/PiCarX/rust/build/
+```
+の実行に失敗しました。
+
+結果：
+```text
+PARENT_DIR=
+PROJECT_ROOT=
+```
+となり、
+Makefileの以下が空になりました。
+
+```make
+PROJECT_ROOT := $(PARENT_DIR)
+```
+
+その結果、Docker実行時に：
+```bash
+docker run \
+  -v "":/workspace
+```
+となり、
+```
+docker: invalid spec: :/workspace
+```
+が発生しました。
+
+---
+
+## 解消策
+### 1. MSYS2版makeを使用する
+GnuWin32版makeではなく、MSYS2版を使用しました。
+変更前：
+```
+C:\Program Files (x86)\GnuWin32\bin\make.exe
+```
+変更後：
+```
+C:\msys64\usr\bin\make.exe
+```
+
+---
+
+### 2. PATHを修正
+Windows環境変数 `Path` から削除：
+
+```
+C:\Program Files (x86)\GnuWin32\bin
+```
+
+追加：
+```
+C:\msys64\usr\bin
+```
+
+これにより、
+```powershell
+where.exe make
+```
+の結果が：
+```
+C:\msys64\usr\bin\make.exe
+```
+になりました。
+---
+
+## 解消後の状態
+
+MSYS2環境では以下が利用可能になります。
+
+```
+C:\msys64\usr\bin
+ ├── make.exe
+ ├── dirname.exe
+ ├── sh.exe
+ ├── bash.exe
+ └── その他Unixコマンド
+```
+
+そのためMakefileの
+
+```make
+PARENT_DIR := $(shell dirname $(MAKEFILE_DIR))
+```
+
+が正常に動作し、
+
+```text
+MAKEFILE_DIR=C:/Users/tacta/Dev/PiCarX/rust/build/
+PARENT_DIR=C:/Users/tacta/Dev/PiCarX/rust
+PROJECT_ROOT=C:/Users/tacta/Dev/PiCarX/rust
+```
+
+となりました。
+
+結果、
+
+```bash
+docker run -v "C:/Users/tacta/Dev/PiCarX/rust":/workspace
+```
+
+が生成され、`make build` が正常実行できるようになりました。
+
+---
+
+## 一言でまとめると
+
+**原因：**
+
+> Windows用GnuWin32版makeを使っていたため、Makefileが依存するUnixコマンド(dirname等)がなく、パス生成に失敗した。
+
+**解決：**
+
+> MSYS2版makeへ切り替え、PATHを修正してUnixコマンドが利用できる環境に変更した。
+
+今回のような **Rust + Docker + クロスコンパイル環境では、MSYS2/WSL/Git Bash系のmakeを使うのが適切**です。
