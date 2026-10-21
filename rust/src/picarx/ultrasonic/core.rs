@@ -1,6 +1,6 @@
-﻿use rppal::gpio::{Gpio, InputPin, OutputPin};
-use std::time::{Duration, Instant};
+use rppal::gpio::{Gpio, InputPin, OutputPin};
 use std::thread;
+use std::time::{Duration, Instant};
 
 // GPIOピン番号 (BCM)
 const PIN_MCU_RST: u8 = 5;
@@ -46,7 +46,10 @@ impl Ultrasonic {
                     thread::sleep(Duration::from_millis(MCU_RESET_HIGH_MS));
                 }
                 Err(e) => {
-                    eprintln!("⚠ MCU_RSTピン(BCM {})の取得に失敗（他で使用中の可能性）: {}", PIN_MCU_RST, e);
+                    eprintln!(
+                        "⚠ MCU_RSTピン(BCM {})の取得に失敗（他で使用中の可能性）: {}",
+                        PIN_MCU_RST, e
+                    );
                 }
             }
         }
@@ -118,4 +121,3 @@ impl Ultrasonic {
         if dist < 0.0 { None } else { Some(dist) }
     }
 }
-

@@ -1,0 +1,7 @@
+[profile.ci]
+fail-fast = false
+
+[profile.ci.junit]
+path = "junit.xml"
+report-name = "picar-x-rust-unit-tests"
+store-failure-output = true

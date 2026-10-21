@@ -1,6 +1,6 @@
-﻿use std::collections::HashMap;
-use eframe::egui;
 use crate::picarx::Picarx;
+use eframe::egui;
+use std::collections::HashMap;
 
 // 走行・ステアリング
 const MOVE_SPEED: i32 = 80;
@@ -98,18 +98,15 @@ impl RcController {
 
         // 3. カメラ角度の計算と命令送信
         // pan/tilt の現在値は Picarx 側を単一の真実の源とし、ここでは保持しない
-        let mut pan_angle = px.pan_angle;
-        let mut tilt_angle = px.tilt_angle;
-
-        if self.is_pressed(InputAction::CameraCenter) {
-            pan_angle = 0;
-            tilt_angle = 0;
-        } else {
-            if self.is_pressed(InputAction::CameraUp)    { tilt_angle = (tilt_angle - CAMERA_STEP_DEG).max(-CAMERA_ANGLE_LIMIT); }
-            if self.is_pressed(InputAction::CameraDown)  { tilt_angle = (tilt_angle + CAMERA_STEP_DEG).min( CAMERA_ANGLE_LIMIT); }
-            if self.is_pressed(InputAction::CameraRight) { pan_angle  = (pan_angle  - CAMERA_STEP_DEG).max(-CAMERA_ANGLE_LIMIT); }
-            if self.is_pressed(InputAction::CameraLeft)  { pan_angle  = (pan_angle  + CAMERA_STEP_DEG).min( CAMERA_ANGLE_LIMIT); }
-        }
+        let (pan_angle, tilt_angle) = calculate_camera_angles(
+            px.pan_angle,
+            px.tilt_angle,
+            self.is_pressed(InputAction::CameraCenter),
+            self.is_pressed(InputAction::CameraUp),
+            self.is_pressed(InputAction::CameraDown),
+            self.is_pressed(InputAction::CameraLeft),
+            self.is_pressed(InputAction::CameraRight),
+        );
 
         px.set_cam_pan_angle(pan_angle);
         px.set_cam_tilt_angle(tilt_angle);
@@ -126,3 +123,56 @@ impl RcController {
     }
 }
 
+fn calculate_camera_angles(
+    mut pan_angle: i32,
+    mut tilt_angle: i32,
+    center: bool,
+    up: bool,
+    down: bool,
+    left: bool,
+    right: bool,
+) -> (i32, i32) {
+    if center {
+        return (0, 0);
+    }
+
+    if up {
+        tilt_angle = (tilt_angle - CAMERA_STEP_DEG).max(-CAMERA_ANGLE_LIMIT);
+    }
+    if down {
+        tilt_angle = (tilt_angle + CAMERA_STEP_DEG).min(CAMERA_ANGLE_LIMIT);
+    }
+    if right {
+        pan_angle = (pan_angle - CAMERA_STEP_DEG).max(-CAMERA_ANGLE_LIMIT);
+    }
+    if left {
+        pan_angle = (pan_angle + CAMERA_STEP_DEG).min(CAMERA_ANGLE_LIMIT);
+    }
+
+    (pan_angle, tilt_angle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::calculate_camera_angles;
+
+    #[test]
+    fn camera_center_overrides_directional_input() {
+        assert_eq!(
+            calculate_camera_angles(20, -20, true, true, true, true, true),
+            (0, 0)
+        );
+    }
+
+    #[test]
+    fn camera_angles_are_changed_by_one_step_and_clamped() {
+        assert_eq!(
+            calculate_camera_angles(0, 0, false, true, false, true, false),
+            (2, -2)
+        );
+        assert_eq!(
+            calculate_camera_angles(45, -45, false, true, false, true, false),
+            (45, -45)
+        );
+    }
+}
