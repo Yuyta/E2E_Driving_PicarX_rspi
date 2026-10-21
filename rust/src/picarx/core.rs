@@ -1,30 +1,30 @@
-﻿use std::thread;
-use std::time::Duration;
+use crate::picarx::ultrasonic::Ultrasonic;
+use rodio::cpal::traits::HostTrait;
+use rodio::source::{SineWave, Source};
+use rodio::{Decoder, Device, DeviceSinkBuilder, DeviceTrait, MixerDeviceSink, Player};
+use rppal::gpio::{Gpio, OutputPin};
+use rppal::i2c::I2c;
 use std::collections::HashMap;
 use std::fs::File;
-use std::path::Path;
 use std::io::BufReader;
-use rppal::i2c::I2c;
-use rppal::gpio::{Gpio, OutputPin};
-use rodio::{DeviceSinkBuilder, MixerDeviceSink, Player, Decoder, Device, DeviceTrait};
-use rodio::source::{SineWave, Source};
-use rodio::cpal::traits::HostTrait;
-use crate::picarx::ultrasonic::Ultrasonic;
+use std::path::Path;
+use std::thread;
+use std::time::Duration;
 
 const HAT_ADDR: u16 = 0x14;
 
 // GrayScale
-const REG_ADC_BASE: u8 = 0x10;  // A0=0x10, A1=0x11, A2=0x12...
-const ADC_MASK: u16 = 0xFFF;    // 12bit ADC
+const REG_ADC_BASE: u8 = 0x10; // A0=0x10, A1=0x11, A2=0x12...
+const ADC_MASK: u16 = 0xFFF; // 12bit ADC
 
 // PWM channel register (for servo)
-const REG_PWM_CH0: u8 = 0x20;  // サーボ P0 (Pan)
-const REG_PWM_CH1: u8 = 0x21;  // サーボ P1 (Tilt)
-const REG_PWM_CH2: u8 = 0x22;  // サーボ P2 (Steering)
+const REG_PWM_CH0: u8 = 0x20; // サーボ P0 (Pan)
+const REG_PWM_CH1: u8 = 0x21; // サーボ P1 (Tilt)
+const REG_PWM_CH2: u8 = 0x22; // サーボ P2 (Steering)
 
 // [robothat v4: mode1] ドライブモーターの速度制御PWMレジスタ
-const REG_MOTOR1_PWM: u8 = 0x20 + 13;  // P13 (左モーター速度)
-const REG_MOTOR2_PWM: u8 = 0x20 + 12;  // P12 (右モーター速度)
+const REG_MOTOR1_PWM: u8 = 0x20 + 13; // P13 (左モーター速度)
+const REG_MOTOR2_PWM: u8 = 0x20 + 12; // P12 (右モーター速度)
 
 // GPIOピン番号 (BCM)
 const PIN_MCU_RST: u8 = 5;
@@ -41,7 +41,7 @@ const SERVO_POWEROFF_DELAY_MS: u64 = 100;
 // タイマー設定レジスタ
 const REG_PRESCALER_T0: u8 = 0x40;
 const REG_PERIOD_T0: u8 = 0x44;
-const TIMER_PERIOD: u16 = 4095;   // 50Hz出力用ARR
+const TIMER_PERIOD: u16 = 4095; // 50Hz出力用ARR
 const TIMER_PRESCALER: u16 = 351; // 50Hz出力用PSC
 
 // モーター速度 (-100 〜 100)
@@ -54,7 +54,7 @@ const SERVO_ANGLE_MIN: i32 = -90;
 const SERVO_ANGLE_MAX: i32 = 90;
 const SERVO_PULSE_MIN_US: f32 = 500.0;
 const SERVO_PULSE_RANGE_US: f32 = 2000.0; // 500us 〜 2500us の幅
-const PWM_PERIOD_US: f32 = 20000.0;       // 50Hz = 20ms周期
+const PWM_PERIOD_US: f32 = 20000.0; // 50Hz = 20ms周期
 
 // バッテリー電圧測定 (ADCは1/3分圧、リファレンス電圧3.3V)
 const ADC_REF_VOLTAGE: f64 = 3.3;
@@ -76,6 +76,9 @@ pub struct Picarx {
     pub dir_angle: i32,
     pub pan_angle: i32,
     pub tilt_angle: i32,
+    pub dir_offset: i32,
+    pub pan_offset: i32,
+    pub tilt_offset: i32,
 
     // ラズパイの物理GPIOから直接伸びている方向制御ピン (D4, D5)
     motor1_dir_pin: OutputPin, // 左モーター方向 (D4 -> BCM 23)
@@ -126,6 +129,8 @@ impl Picarx {
         let mut i2c = I2c::new()?;
         i2c.set_slave_address(HAT_ADDR)?;
 
+        let (dir_offset, pan_offset, tilt_offset) = Self::load_calibration_offsets();
+
         let mut s = Self {
             i2c,
             _servo_en: servo_en,
@@ -134,6 +139,9 @@ impl Picarx {
             dir_angle: 0,
             pan_angle: 0,
             tilt_angle: 0,
+            dir_offset,
+            pan_offset,
+            tilt_offset,
             motor1_dir_pin,
             motor2_dir_pin,
             // Pythonのデフォルト設定通り、右側だけを反転に
@@ -148,7 +156,11 @@ impl Picarx {
 
         // スピーカーをONにし、無音を鳴らす (ノイズクリア)
         s._speaker_en.set_high();
-        if let Err(e) = s.play_tone(WARMUP_TONE_FREQ_HZ, WARMUP_TONE_DURATION_MS, WARMUP_TONE_VOLUME) {
+        if let Err(e) = s.play_tone(
+            WARMUP_TONE_FREQ_HZ,
+            WARMUP_TONE_DURATION_MS,
+            WARMUP_TONE_VOLUME,
+        ) {
             eprintln!("⚠ 起動時のウォームアップトーン再生に失敗: {}", e);
         }
 
@@ -167,12 +179,11 @@ impl Picarx {
     fn find_audio_device() -> Result<Device, Box<dyn std::error::Error>> {
         let host = rodio::cpal::default_host();
 
-        let device = host.output_devices()?
+        let device = host
+            .output_devices()?
             .find(|d| {
                 d.description()
-                    .map(|desc| {
-                        desc.name() == "robothat"
-                    })
+                    .map(|desc| desc.name() == "robothat")
                     .unwrap_or(false)
             })
             .or_else(|| host.default_output_device());
@@ -190,7 +201,10 @@ impl Picarx {
         }
 
         thread::sleep(Duration::from_millis(50));
-        println!("✓ Timers initialized (50Hz: ARR={}, PSC={})", TIMER_PERIOD, TIMER_PRESCALER);
+        println!(
+            "✓ Timers initialized (50Hz: ARR={}, PSC={})",
+            TIMER_PERIOD, TIMER_PRESCALER
+        );
         Ok(())
     }
 
@@ -202,7 +216,7 @@ impl Picarx {
 
         let high_byte = ((value >> 8) & 0xFF) as u8;
         let low_byte = (value & 0xFF) as u8;
-        self.i2c.write(&[reg, high_byte, low_byte])?;  // big endian
+        self.i2c.write(&[reg, high_byte, low_byte])?; // big endian
         self.last_written.insert(reg, value);
         Ok(())
     }
@@ -226,7 +240,11 @@ impl Picarx {
         let mut clamped_speed = speed.clamp(MOTOR_SPEED_MIN, MOTOR_SPEED_MAX);
 
         let is_left = motor_idx == 0;
-        let is_reverse = if is_left { self.left_reverse } else { self.right_reverse };
+        let is_reverse = if is_left {
+            self.left_reverse
+        } else {
+            self.right_reverse
+        };
         if is_reverse {
             clamped_speed = -clamped_speed;
         }
@@ -235,25 +253,41 @@ impl Picarx {
 
         // ラズパイの物理GPIOへ「方向信号」を出力
         if is_left {
-            if dir_signal { self.motor1_dir_pin.set_high(); } else { self.motor1_dir_pin.set_low(); }
+            if dir_signal {
+                self.motor1_dir_pin.set_high();
+            } else {
+                self.motor1_dir_pin.set_low();
+            }
         } else {
-            if dir_signal { self.motor2_dir_pin.set_high(); } else { self.motor2_dir_pin.set_low(); }
+            if dir_signal {
+                self.motor2_dir_pin.set_high();
+            } else {
+                self.motor2_dir_pin.set_low();
+            }
         }
 
         // 速度を絶対値にしてI2CでPWM出力 (0 〜 4095)
         let abs_speed = clamped_speed.abs();
         let pwm_value = ((abs_speed as f32 / MOTOR_SPEED_MAX as f32) * PWM_MAX) as u16;
-        let reg_pwm = if is_left { REG_MOTOR1_PWM } else { REG_MOTOR2_PWM };
+        let reg_pwm = if is_left {
+            REG_MOTOR1_PWM
+        } else {
+            REG_MOTOR2_PWM
+        };
 
         if let Err(e) = self.write_word(reg_pwm, pwm_value) {
-            eprintln!("⚠ モーターPWM書き込み失敗 (reg=0x{:02X}, motor_idx={}): {}", reg_pwm, motor_idx, e);
+            eprintln!(
+                "⚠ モーターPWM書き込み失敗 (reg=0x{:02X}, motor_idx={}): {}",
+                reg_pwm, motor_idx, e
+            );
         }
     }
 
     fn set_servo_angle(&mut self, reg: u8, angle: i32) {
         let clamped_angle = angle.clamp(SERVO_ANGLE_MIN, SERVO_ANGLE_MAX);
         // 角度（-90〜90）をパルス幅（500〜2500μs）にマッピング
-        let ratio = (clamped_angle - SERVO_ANGLE_MIN) as f32 / (SERVO_ANGLE_MAX - SERVO_ANGLE_MIN) as f32;
+        let ratio =
+            (clamped_angle - SERVO_ANGLE_MIN) as f32 / (SERVO_ANGLE_MAX - SERVO_ANGLE_MIN) as f32;
         let pulse_us = SERVO_PULSE_MIN_US + (ratio * SERVO_PULSE_RANGE_US);
         // 周期20000μsに対する4095カウントの割合でDuty比を決定
         let pwm_value = (pulse_us * PWM_MAX) / PWM_PERIOD_US;
@@ -279,17 +313,107 @@ impl Picarx {
 
     pub fn set_dir_servo_angle(&mut self, angle: i32) {
         self.dir_angle = angle;
-        self.set_servo_angle(REG_PWM_CH2, angle);
+        self.set_servo_angle(REG_PWM_CH2, angle + self.dir_offset);
     }
 
     pub fn set_cam_pan_angle(&mut self, angle: i32) {
         self.pan_angle = angle;
-        self.set_servo_angle(REG_PWM_CH0, angle);
+        self.set_servo_angle(REG_PWM_CH0, angle + self.pan_offset);
     }
 
     pub fn set_cam_tilt_angle(&mut self, angle: i32) {
         self.tilt_angle = angle;
-        self.set_servo_angle(REG_PWM_CH1, angle);
+        self.set_servo_angle(REG_PWM_CH1, angle + self.tilt_offset);
+    }
+
+    fn load_calibration_offsets() -> (i32, i32, i32) {
+        let mut dir_offset = 0;
+        let mut pan_offset = 0;
+        let mut tilt_offset = 0;
+
+        let config_paths = ["/opt/picar-x/picar-x.conf", "/etc/picar-x/picar-x.conf"];
+
+        let mut loaded = false;
+        for path in &config_paths {
+            if let Ok(content) = std::fs::read_to_string(path) {
+                println!("✓ Calibration file found: {}", path);
+                Self::parse_calibration_content(
+                    &content,
+                    &mut dir_offset,
+                    &mut pan_offset,
+                    &mut tilt_offset,
+                );
+                loaded = true;
+                break;
+            }
+        }
+
+        if !loaded {
+            if let Ok(home) = std::env::var("HOME") {
+                let user_path = format!("{}/.config/picar-x/picar-x.conf", home);
+                if let Ok(content) = std::fs::read_to_string(&user_path) {
+                    println!("✓ User calibration file found: {}", user_path);
+                    Self::parse_calibration_content(
+                        &content,
+                        &mut dir_offset,
+                        &mut pan_offset,
+                        &mut tilt_offset,
+                    );
+                }
+            }
+        }
+
+        // 環境変数 (.env) からのオーバーライドに対応
+        if let Ok(val) = std::env::var("DIR_SERVO_OFFSET") {
+            if let Ok(num) = val.parse::<i32>() {
+                dir_offset = num;
+            }
+        }
+        if let Ok(val) = std::env::var("CAM_PAN_OFFSET") {
+            if let Ok(num) = val.parse::<i32>() {
+                pan_offset = num;
+            }
+        }
+        if let Ok(val) = std::env::var("CAM_TILT_OFFSET") {
+            if let Ok(num) = val.parse::<i32>() {
+                tilt_offset = num;
+            }
+        }
+
+        println!(
+            "✓ Servo offsets applied: Dir={}, Pan={}, Tilt={}",
+            dir_offset, pan_offset, tilt_offset
+        );
+
+        (dir_offset, pan_offset, tilt_offset)
+    }
+
+    fn parse_calibration_content(
+        content: &str,
+        dir_offset: &mut i32,
+        pan_offset: &mut i32,
+        tilt_offset: &mut i32,
+    ) {
+        for line in content.lines() {
+            let line = line.trim();
+            if line.starts_with('#') || line.starts_with('[') || line.is_empty() {
+                continue;
+            }
+            if let Some((k, v)) = line.split_once('=') {
+                let key = k.trim().to_lowercase();
+                let val_str = v.trim();
+                if let Ok(val) = val_str.parse::<f32>() {
+                    let rounded = val.round() as i32;
+                    if key.contains("cam_pan") || key.contains("pan_servo") {
+                        *pan_offset = rounded;
+                    } else if key.contains("cam_tilt") || key.contains("tilt_servo") {
+                        *tilt_offset = rounded;
+                    } else if key.contains("dir_servo") || key.contains("direction") {
+                        *dir_offset = rounded;
+                    }
+                }
+            }
+        }
     }
 
     pub fn get_grayscale_data(&mut self) -> Result<[u16; 3], Box<dyn std::error::Error>> {
@@ -336,7 +460,8 @@ impl Picarx {
             0
         } else {
             // 放電限界〜満充電の間で線形マッピング
-            ((voltage - BATTERY_VOLTAGE_EMPTY) / (BATTERY_VOLTAGE_FULL - BATTERY_VOLTAGE_EMPTY) * 100.0) as i32
+            ((voltage - BATTERY_VOLTAGE_EMPTY) / (BATTERY_VOLTAGE_FULL - BATTERY_VOLTAGE_EMPTY)
+                * 100.0) as i32
         };
 
         // (電圧, %) のタプルで返す
@@ -347,7 +472,12 @@ impl Picarx {
     ///
     /// 再生はrodioの内部ミキサースレッドで行われるため、この関数は音の再生完了を待たずに
     /// 即座に返る（メインループ/入力処理をブロックしない）。
-    pub fn play_tone(&mut self, frequency: f32, duration_ms: u64, volume: f32) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn play_tone(
+        &mut self,
+        frequency: f32,
+        duration_ms: u64,
+        volume: f32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let source = SineWave::new(frequency)
             .take_duration(Duration::from_millis(duration_ms))
             .amplify(volume);
@@ -362,12 +492,16 @@ impl Picarx {
     ///
     /// 再生はrodioの内部ミキサースレッドで行われるため、この関数は音の再生完了を待たずに
     /// 即座に返る（メインループ/入力処理をブロックしない）。
-    pub fn play_file<P: AsRef<Path>>(&mut self, file_path: P, volume: f32) -> Result<(), Box<dyn std::error::Error>> {
+    #[allow(dead_code)] // 公開ハードウェア機能。現行サンプルではトーン再生を使用。
+    pub fn play_file<P: AsRef<Path>>(
+        &mut self,
+        file_path: P,
+        volume: f32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let file = File::open(file_path)?;
         let reader = BufReader::new(file);
 
-        let source = Decoder::new(reader)?
-            .amplify(volume);
+        let source = Decoder::new(reader)?.amplify(volume);
 
         // 保持しているプレイヤーのキューに音源を追加する（非ブロッキング）
         self.audio_player.append(source);
@@ -391,4 +525,3 @@ impl Drop for Picarx {
         self._servo_en.set_low();
     }
 }
-

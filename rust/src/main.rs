@@ -1,8 +1,11 @@
-mod rpi_camera;
-mod picarx;
-mod sample;
+pub mod audio_input;
 mod llm_agent;
+pub mod memory;
+mod picarx;
+mod rpi_camera;
+mod sample;
 mod sensor_monitor;
+pub mod tts;
 
 fn main() {
     if let Err(e) = sample::picarx_sample::main() {
@@ -10,4 +13,3 @@ fn main() {
         std::process::exit(1);
     }
 }
-

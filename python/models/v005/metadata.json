@@ -1,0 +1,17 @@
+{
+  "model_version": "v005",
+  "epochs": 25,
+  "batch_size": 32,
+  "best_val_loss": 0.040017832070589066,
+  "input_shape": [
+    1,
+    3,
+    120,
+    160
+  ],
+  "output": "steering (-1.0 to 1.0)",
+  "sessions": [
+    "clean_v2"
+  ],
+  "total_samples": 146
+}

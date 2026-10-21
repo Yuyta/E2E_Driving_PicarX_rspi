@@ -1,0 +1,5 @@
+{
+  "total_samples": 150,
+  "steering_mae_normalized": 0.0922,
+  "steering_mae_degrees": 3.23
+}

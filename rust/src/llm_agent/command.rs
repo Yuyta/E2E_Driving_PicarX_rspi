@@ -1,7 +1,7 @@
-use std::time::Instant;
-use serde::Deserialize;
 use crate::picarx::Picarx;
 use crate::sensor_monitor::SensorSnapshot;
+use serde::Deserialize;
+use std::time::Instant;
 
 // 時間指定コマンドの最小継続時間。LLMが0msなどの退化値を返した場合の安全策
 const MIN_DURATION_MS: u64 = 100;
@@ -67,7 +67,10 @@ pub struct Condition {
 
 impl Condition {
     fn is_met(&self, s: &SensorSnapshot) -> bool {
-        self.sensor.read_from(s).map(|v| self.op.compare(v, self.value)).unwrap_or(false)
+        self.sensor
+            .read_from(s)
+            .map(|v| self.op.compare(v, self.value))
+            .unwrap_or(false)
     }
 }
 
@@ -77,11 +80,19 @@ impl Condition {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum ConditionExpr {
-    And { and: Vec<ConditionExpr> },
-    Or { or: Vec<ConditionExpr> },
+    And {
+        and: Vec<ConditionExpr>,
+    },
+    Or {
+        or: Vec<ConditionExpr>,
+    },
     /// 子要素のうちちょうど1つだけがtrueの場合にtrue
-    Xor { xor: Vec<ConditionExpr> },
-    Not { not: Box<ConditionExpr> },
+    Xor {
+        xor: Vec<ConditionExpr>,
+    },
+    Not {
+        not: Box<ConditionExpr>,
+    },
     Leaf(Condition),
 }
 
@@ -120,9 +131,33 @@ pub enum Command {
         #[serde(default)]
         until: Option<ConditionExpr>,
     },
+    Forward {
+        speed: i32,
+        duration_ms: u64,
+        angle: Option<i32>,
+        #[serde(default)]
+        until: Option<ConditionExpr>,
+    },
+    Backward {
+        speed: i32,
+        duration_ms: u64,
+        angle: Option<i32>,
+        #[serde(default)]
+        until: Option<ConditionExpr>,
+    },
+    Steer {
+        angle: i32,
+        duration_ms: u64,
+        #[serde(default)]
+        until: Option<ConditionExpr>,
+    },
     Stop,
-    SetCamPan { angle: i32 },
-    SetCamTilt { angle: i32 },
+    SetCamPan {
+        angle: i32,
+    },
+    SetCamTilt {
+        angle: i32,
+    },
     GetDistance,
     GetGrayscale,
     GetBatteryStatus,
@@ -135,6 +170,15 @@ impl Command {
             | Command::Backward { duration_ms, .. }
             | Command::Steer { duration_ms, .. } => (*duration_ms).max(MIN_DURATION_MS),
             _ => 0,
+        }
+    }
+
+    fn until(&self) -> Option<&ConditionExpr> {
+        match self {
+            Command::Forward { until, .. }
+            | Command::Backward { until, .. }
+            | Command::Steer { until, .. } => until.as_ref(),
+            _ => None,
         }
     }
 
@@ -182,11 +226,21 @@ impl CommandQueue {
         let until = current.until();
 
         let duration_elapsed = self
+        let current = &self.commands[self.current_index];
+        let duration_ms = current.duration_ms();
+        let until = current.until();
+
+        let duration_elapsed = self
             .current_started_at
             .map(|t| t.elapsed().as_millis() as u64 >= duration_ms)
             .unwrap_or(true);
         let condition_met = until.map(|c| c.is_met(&sensors)).unwrap_or(false);
+        let condition_met = until.map(|c| c.is_met(&sensors)).unwrap_or(false);
 
+        if duration_elapsed || condition_met {
+            if condition_met && !duration_elapsed {
+                println!("[LLM] センサー条件が成立したため中断します");
+            }
         if duration_elapsed || condition_met {
             if condition_met && !duration_elapsed {
                 println!("[LLM] センサー条件が成立したため中断します");
@@ -202,6 +256,18 @@ impl CommandQueue {
     fn start_current(&mut self, px: &mut Picarx) {
         self.current_started_at = Some(Instant::now());
         match &self.commands[self.current_index] {
+            Command::Forward { speed, angle, .. } => {
+                if let Some(angle) = angle {
+                    px.set_dir_servo_angle(*angle);
+                }
+                px.forward(*speed);
+            }
+            Command::Backward { speed, angle, .. } => {
+                if let Some(angle) = angle {
+                    px.set_dir_servo_angle(*angle);
+                }
+                px.backward(*speed);
+            }
             Command::Forward { speed, angle, .. } => {
                 if let Some(angle) = angle {
                     px.set_dir_servo_angle(*angle);
@@ -234,7 +300,9 @@ impl CommandQueue {
                 Err(e) => println!("[LLM] Failed to get grayscale data: {}", e),
             },
             Command::GetBatteryStatus => match px.get_battery_status() {
-                Ok((voltage, percent)) => println!("[LLM] Battery: {:.2} V ({}%)", voltage, percent),
+                Ok((voltage, percent)) => {
+                    println!("[LLM] Battery: {:.2} V ({}%)", voltage, percent)
+                }
                 Err(e) => println!("[LLM] Failed to get battery status: {}", e),
             },
         }
@@ -247,8 +315,133 @@ impl CommandQueue {
                 px.stop();
                 px.set_dir_servo_angle(0); // 曲がったタイヤをまっすぐに戻す
             }
+            Command::Forward { .. } | Command::Backward { .. } => {
+                px.stop();
+                px.set_dir_servo_angle(0); // 曲がったタイヤをまっすぐに戻す
+            }
             Command::Steer { .. } => px.set_dir_servo_angle(0),
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Command, Condition, ConditionExpr, Operator, SensorKind};
+    use crate::sensor_monitor::SensorSnapshot;
+
+    fn snapshot() -> SensorSnapshot {
+        SensorSnapshot {
+            distance_cm: Some(10.0),
+            grayscale: Some([100, 200, 300]),
+            battery: Some((7.4, 85)),
+        }
+    }
+
+    fn distance_condition(op: Operator, value: f64) -> ConditionExpr {
+        ConditionExpr::Leaf(Condition {
+            sensor: SensorKind::Distance,
+            op,
+            value,
+        })
+    }
+
+    #[test]
+    fn sensor_values_are_mapped_to_conditions() {
+        let sensors = snapshot();
+        assert!(
+            Condition {
+                sensor: SensorKind::GrayscaleCenter,
+                op: Operator::Eq,
+                value: 200.0,
+            }
+            .is_met(&sensors)
+        );
+        assert!(
+            Condition {
+                sensor: SensorKind::BatteryVoltage,
+                op: Operator::Gt,
+                value: 7.0,
+            }
+            .is_met(&sensors)
+        );
+        assert!(
+            !Condition {
+                sensor: SensorKind::Distance,
+                op: Operator::Lt,
+                value: 5.0,
+            }
+            .is_met(&sensors)
+        );
+    }
+
+    #[test]
+    fn equality_uses_tolerance_for_continuous_sensor_values() {
+        let sensors = snapshot();
+        assert!(
+            Condition {
+                sensor: SensorKind::Distance,
+                op: Operator::Eq,
+                value: 10.4,
+            }
+            .is_met(&sensors)
+        );
+        assert!(
+            !Condition {
+                sensor: SensorKind::Distance,
+                op: Operator::Eq,
+                value: 10.5,
+            }
+            .is_met(&sensors)
+        );
+        assert!(
+            Condition {
+                sensor: SensorKind::Distance,
+                op: Operator::Ne,
+                value: 10.5,
+            }
+            .is_met(&sensors)
+        );
+    }
+
+    #[test]
+    fn nested_condition_expression_evaluates_logical_operators() {
+        let expression = ConditionExpr::And {
+            and: vec![
+                distance_condition(Operator::Gte, 10.0),
+                ConditionExpr::Not {
+                    not: Box::new(distance_condition(Operator::Gt, 10.0)),
+                },
+            ],
+        };
+        assert!(expression.is_met(&snapshot()));
+
+        let xor = ConditionExpr::Xor {
+            xor: vec![
+                distance_condition(Operator::Gt, 5.0),
+                distance_condition(Operator::Lt, 5.0),
+            ],
+        };
+        assert!(xor.is_met(&snapshot()));
+    }
+
+    #[test]
+    fn missing_sensor_value_does_not_satisfy_condition() {
+        let sensors = SensorSnapshot::default();
+        assert!(!distance_condition(Operator::Gte, 0.0).is_met(&sensors));
+    }
+
+    #[test]
+    fn movement_duration_has_a_safe_minimum() {
+        assert_eq!(
+            Command::Steer {
+                angle: 0,
+                duration_ms: 0,
+                until: None,
+            }
+            .duration_ms(),
+            100
+        );
+        assert_eq!(Command::Stop.duration_ms(), 0);
     }
 }

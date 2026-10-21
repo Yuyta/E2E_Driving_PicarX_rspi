@@ -1,11 +1,12 @@
-﻿import sys
+import sys
+
 import cv2
-import numpy as np
 from picamera2 import Picamera2
+
 
 class PiCarCamera:
     """PiCar-Xのカメラ（Picamera2）を管理するクラス"""
-    
+
     def __init__(self, width=640, height=480, fmt="BGR888"):
         self.width = width
         self.height = height
@@ -35,7 +36,7 @@ class PiCarCamera:
     def set_low_light_mode(self, enable=True, exposure_time=80000, analogue_gain=8.0):
         """
         低照度（室内）用のマニュアル露出モードを設定する
-        
+
         Args:
             enable (bool): Trueで手動固定、Falseで自動露出(AE)に戻す
             exposure_time (int): シャッタースピード（マイクロ秒）
@@ -47,7 +48,10 @@ class PiCarCamera:
 
         try:
             if enable:
-                print(f"Setting Low-Light Manual Mode (Exposure: {exposure_time}μs, Gain: {analogue_gain})")
+                msg = (
+                    f"Setting Low-Light Manual Mode (Exp: {exposure_time}μs, Gain: {analogue_gain})"
+                )
+                print(msg)
                 self.picam2.set_controls({"AeEnable": False})
                 self.picam2.set_controls({"ExposureTime": exposure_time})
                 self.picam2.set_controls({"AnalogueGain": analogue_gain})
@@ -84,10 +88,10 @@ class PiCarCamera:
 def main():
     # インスタンスの生成
     camera = PiCarCamera(width=640, height=480)
-    
+
     # 開始
     camera.start()
-    
+
     # 先ほど成功した低照度設定を適用（必要に応じて数値を変えて呼べる）
     camera.set_low_light_mode(enable=True, exposure_time=80000, analogue_gain=8.0)
 
@@ -106,7 +110,7 @@ def main():
 
             cv2.imshow(window_name, frame)
 
-            if cv2.waitKey(1) & 0xFF == ord('q'):
+            if cv2.waitKey(1) & 0xFF == ord("q"):
                 break
 
     except KeyboardInterrupt:
@@ -116,6 +120,7 @@ def main():
         # どんな落ち方をしてもfinallyで確実にカメラをクローズする
         camera.close()
         cv2.destroyAllWindows()
+
 
 if __name__ == "__main__":
     main()

@@ -1,8 +1,8 @@
+use crate::picarx::Picarx;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
-use crate::picarx::Picarx;
 
 // センサーのポーリング間隔。距離計測は1回あたり最大でも数十ms程度に収まるよう
 // try_get_distance_once()を使うため、この間隔なら手動運転側のロック待ちも問題にならない。
@@ -47,15 +47,40 @@ impl SensorMonitor {
 
                     // 読み取りに失敗した項目は直前の値を保持する(表示のちらつき防止)
                     let mut snap = snapshot_clone.lock().unwrap();
-                    if let Some(d) = distance { snap.distance_cm = Some(d); }
-                    if let Some(g) = grayscale { snap.grayscale = Some(g); }
-                    if let Some(b) = battery { snap.battery = Some(b); }
+                    if let Some(d) = distance {
+                        snap.distance_cm = Some(d);
+                    }
+                    if let Some(g) = grayscale {
+                        snap.grayscale = Some(g);
+                    }
+                    if let Some(b) = battery {
+                        snap.battery = Some(b);
+                    }
                 }
                 thread::sleep(POLL_INTERVAL);
             }
         });
 
-        Self { snapshot, shutdown, handle: Some(handle) }
+        Self {
+            snapshot,
+            shutdown,
+            handle: Some(handle),
+        }
+    }
+
+    /// 複数回計測して中央値を採用することで、モーター動作時の電気的ノイズ等による
+    /// 単発の外れ値(実際より大きく外れた距離)の影響を軽減する。
+    fn read_distance_median(px: &mut Picarx) -> Option<f64> {
+        let mut samples = Vec::with_capacity(DISTANCE_SAMPLE_COUNT);
+        for i in 0..DISTANCE_SAMPLE_COUNT {
+            if let Some(d) = px.try_get_distance_once() {
+                samples.push(d);
+            }
+            if i + 1 < DISTANCE_SAMPLE_COUNT {
+                thread::sleep(Duration::from_millis(DISTANCE_SAMPLE_GAP_MS));
+            }
+        }
+        median_distance(&mut samples)
     }
 
     /// 複数回計測して中央値を採用することで、モーター動作時の電気的ノイズ等による
@@ -83,6 +108,14 @@ impl SensorMonitor {
     }
 }
 
+fn median_distance(samples: &mut [f64]) -> Option<f64> {
+    if samples.is_empty() {
+        return None;
+    }
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    Some(samples[samples.len() / 2])
+}
+
 impl Drop for SensorMonitor {
     fn drop(&mut self) {
         // ポーリングスレッドを止めてjoinすることで、Arc<Mutex<Picarx>>の最後の
@@ -92,5 +125,21 @@ impl Drop for SensorMonitor {
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::median_distance;
+
+    #[test]
+    fn median_distance_rejects_empty_samples() {
+        assert_eq!(median_distance(&mut []), None);
+    }
+
+    #[test]
+    fn median_distance_sorts_samples_before_selecting_middle() {
+        assert_eq!(median_distance(&mut [120.0, 10.0, 30.0]), Some(30.0));
+        assert_eq!(median_distance(&mut [40.0, 10.0, 30.0, 20.0]), Some(30.0));
     }
 }
