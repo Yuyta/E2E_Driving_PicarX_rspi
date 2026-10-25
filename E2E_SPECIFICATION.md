@@ -1,19 +1,38 @@
 # PiCar-X End-to-End (E2E) 自律走行 & MLOps システム仕様書
 
-本書は、SunFounder PiCar-X において実装された、**「軽量CNNによる画像入力からの直接舵角予測 (End-to-End)」** および **「データ収集・品質管理・モデル管理 (MLOps)」** の全体アーキテクチャと各サブシステムの詳細仕様を定義する。
+本書は、SunFounder PiCar-X において実装された、**「軽量CNNによる画像入力からの直接舵角予測 (End-to-End)」** および **「データ収集・品質管理・モデル管理 (MLOps)」** の全体アーキテクチャ・各サブシステム詳細仕様・開発ロードマップを一元的に定義する。
+
+> [!NOTE]
+> - 全体の開発ロードマップ・進捗状況については [ROADMAP.md](ROADMAP.md) を参照してください。
+> - ユーザー向けの操作手順については [python/src/e2e/README.md](python/src/e2e/README.md) を参照してください。
 
 ---
 
-## 1. システム概要 & アーキテクチャ
+## 1. 基本方針 & スコープ
 
 ### 1.1 基本思想
+- **家庭内フリースペース自律走行**: コース・白線・標識のない家庭内（部屋・廊下・家具の間）を縦横無尽に走行し、障害物や行き止まりを自律回避して開けた空間へナビゲートする。
 - **GPU完全不要 (CPU前提)**: PC・Raspberry PiともにCPUのみで高速動作する軽量設計。
 - **実機車載アーキテクチャ (Plan A Remote Control)**:
   - PC側: データ収集GUI、データクリーニング、PyTorch学習、ONNX Runtime推論、MLOpsレジストリを担当。
   - Raspberry Pi側: Rust/Axum HTTPサーバー経由でカメラ撮影、超音波センサー計測、モーター・サーボPWM制御を担当。
   - 両者間は標準 HTTP/JSON 通信（Base64 JPEG画像伝送）で疎結合に連携。
 
-### 1.2 全体構成図
+### 1.2 対象外 (スコープ外)
+- ❌ **巨大モデル（Vision Transformer / LLM制御）**: GPUを要し推論遅延が大きいため採用しない。
+- ❌ **重厚な3Dシミュレーター（Unreal Engine / CARLA）**: 独立GPUリソースを消費するため採用しない。
+- ❌ **大規模時系列ディープラーニング（LSTM/動画モデル）**: 計算コストとメモリ消費を抑えるため除外。
+
+### 1.3 注力分野
+- ⭕ **MLOps & 実験管理**: データセット・モデルのバージョン管理と定量評価の自動化。
+- ⭕ **継続学習（Human-in-the-loop）**: 失敗ケースの切り出しとデータリバランスによる実走性能向上。
+- ⭕ **車載安全系（Safety Layer）**: AI推論に依存しない多重センサーFail-Safeの構築。
+- ⭕ **エッジ完全自律化（Rust推論）**: Raspberry Pi単体で完結する超低遅延ONNX推論。
+- ⭕ **ツール前提**: Python環境操作は常に `uv`（`uv run` / `uv pip`）を使用する。
+
+---
+
+## 2. 全体構成図
 
 ```mermaid
 flowchart TD
@@ -58,9 +77,15 @@ flowchart TD
 
 ---
 
-## 2. 各サブシステム詳細仕様
+## 3. 開発ロードマップについて
 
-### 2.1 データ収集サブシステム (`gui_collector.py`)
+プロジェクト全体のフェーズ計画（Step 1〜4、Phase 1〜5）および最新の進捗状況は、[ROADMAP.md](ROADMAP.md) に集約・一元管理されています。
+
+---
+
+## 4. 各サブシステム詳細仕様
+
+### 4.1 データ収集サブシステム (`gui_collector.py`)
 PC上でカメラ映像をリアルタイム確認しながら手動操縦し、高品質な教師データを記録する。
 
 - **モジュールパス**: `python/src/e2e/gui_collector.py`
@@ -93,9 +118,9 @@ PC上でカメラ映像をリアルタイム確認しながら手動操縦し、
 
 ---
 
-### 2.2 データセット管理 & 自動クリーニング (`dataset.py`, `cleaner.py`)
+### 4.2 データセット管理 & 自動クリーニング (`dataset.py`, `cleaner.py`)
 
-#### 2.2.1 複数セッション統合データセット (`training/dataset.py`)
+#### 4.2.1 複数セッション統合データセット (`training/dataset.py`)
 - **モジュールパス**: `python/src/e2e/training/dataset.py`
 - **クラス**: `DrivingDataset(Dataset)`
 - **仕様**:
@@ -106,7 +131,7 @@ PC上でカメラ映像をリアルタイム確認しながら手動操縦し、
     2. Tensor 変換: `[0.0, 1.0]`
     3. 正規化: ImageNet 基準 (`mean=[0.485, 0.456, 0.406]`, `std=[0.229, 0.224, 0.225]`)
 
-#### 2.2.2 残差外れ値フィルタ（データクリーナー） (`dataset/cleaner.py`)
+#### 4.2.2 残差外れ値フィルタ（データクリーナー） (`dataset/cleaner.py`)
 - **モジュールパス**: `python/src/e2e/dataset/cleaner.py`
 - **クラス / エントリポイント**: `DatasetCleaner`, `clean_dataset()`
 - **検出アルゴリズム (Data-Centric AI)**:
@@ -125,9 +150,9 @@ PC上でカメラ映像をリアルタイム確認しながら手動操縦し、
 
 ---
 
-### 2.3 モデルアーキテクチャ & 学習 (`training/model.py`, `train.py`)
+### 4.3 モデルアーキテクチャ & 学習 (`training/model.py`, `train.py`)
 
-#### 2.3.1 モデル仕様 (`SmallDrivingCNN`)
+#### 4.3.1 モデル仕様 (`SmallDrivingCNN`)
 CPU推論時の超低遅延（数ミリ秒）と高い表現力を両立した4層CNN。
 
 - **入力**: `[Batch, 3, 120, 160]` (RGB画像)
@@ -149,7 +174,7 @@ CPU推論時の超低遅延（数ミリ秒）と高い表現力を両立した4�
     └── Linear(32 -> 1) + Tanh
   ```
 
-#### 2.3.2 学習仕様 (`training/train.py`)
+#### 4.3.2 学習仕様 (`training/train.py`)
 - **損失関数**: Mean Squared Error (MSE Loss)
 - **最適化**: Adam (`lr=1e-3`)
 - **データ分割**: Train 80% / Validation 20%
@@ -160,7 +185,7 @@ CPU推論時の超低遅延（数ミリ秒）と高い表現力を両立した4�
 
 ---
 
-### 2.4 オフライン評価 & MLOps レジストリ (`evaluation/`, `registry/`)
+### 4.4 オフライン評価 & MLOps レジストリ (`evaluation/`, `registry/`)
 
 - **オフライン評価 (`evaluate.py`)**:
   - 平均絶対誤差 (MAE) を正規化スケールおよび実角度（±◯度）で算出。
@@ -174,7 +199,7 @@ CPU推論時の超低遅延（数ミリ秒）と高い表現力を両立した4�
 
 ---
 
-### 2.5 自律操縦 & セーフティレイヤー (`autonomous_driver.py`)
+### 4.5 自律操縦 & セーフティレイヤー (`autonomous_driver.py`)
 
 - **推論ループ (約20Hz)**:
   1. `/api/camera/snapshot` からカメラ画像（Base64 JPEG）を受信
@@ -188,7 +213,7 @@ CPU推論時の超低遅延（数ミリ秒）と高い表現力を両立した4�
 
 ---
 
-### 2.6 ハードウェア校正自動補正レイヤー (`rust/src/picarx/core.rs`)
+### 4.6 ハードウェア校正自動補正レイヤー (`rust/src/picarx/core.rs`)
 
 PiCar-X実機のサーボモーターギア個体差（数度の傾き）を吸収する機構。
 
@@ -207,12 +232,65 @@ PiCar-X実機のサーボモーターギア個体差（数度の傾き）を吸�
 
 ---
 
-## 3. ディレクトリ構成
+## 5. 各フェーズ詳細設計（未実装含む）
+
+### Phase 1: 軽量 MLOps & モデルレジストリ ✅ 完了
+- **目的**: データとモデルのライフサイクルを可視化・定量比較できるようにする。
+- **実装内容**:
+  1. **Dataset Registry (`registry/dataset.py`)**: 各走行ログの統計情報（総フレーム数、走行時間、直進/左折/右折比率、平均舵角）を算出してメタデータ化。
+  2. **Model Registry (`registry/models.py`)**: `models/v001`, `models/v002` ... の学習設定、エポック数、検証損失、MAE、入力解像度を一元管理。
+  3. **Model Comparator CLI (`registry/compare.py`)**: `uv run python -m src.e2e.registry.compare` で登録済みモデルの性能をターミナル上に表形式で比較表示。
+- **計算負荷**: ゼロ（メタデータ管理・集計のみ）
+
+---
+
+### Phase 2: データフライホイール & 継続学習 🔧 一部完了
+- **目的**: 失敗した走行データから効率的にリカバリーを学習させ、実走性能を向上させる。
+- **実装内容**:
+  1. **Disengagement Logger (危険・介入検知)** ✅ 完了:
+     - 自動走行中の「手動緊急停止（Ctrl+C）」や「超音波センサー急接近（急ブレーキ作動）」の直前3秒間を自動抽出し、`bad_case` としてタグ付け。
+  2. **Dataset Merging & Balancing** ✅ 完了:
+     - 複数セッションの統合学習対応済み。残差データクリーナーによる品質向上も実装済み。
+  3. **Retraining Pipeline** ✅ 完了:
+     - 苦手箇所のデータを補強したデータセットで再学習し、`models/v002`〜`v004` を生成。`clean_v1`/`clean_v2` でクリーンデータセットも生成済み。
+- **計算負荷**: 非常に軽量（CPUで数分〜5分程度）
+
+---
+
+### Phase 3: ハイブリッド安全系（Safety Layer / Fail-Safe Controller）✅ 完了
+- **目的**: AI推論の誤判定や通信途絶が起きても家具・壁への衝突や段差・階段からの落下を防ぐ多重 Fail-Safe アーキテクチャの構築。
+- **実装内容**:
+  1. **Phase 3.1: 多重センサー防護 (Cliff Detection)** ✅ 完了:
+     - 底面赤外線グレースケールセンサーによる段差・階段落下防止 (src/e2e/safety/cliff_detector.py)。床面途切れ検知時の即時停止と左右方向性を持った自動後退退避。
+  2. **Phase 3.2: ダイナミック・スピードリミッター (Dynamic Speed Limiter)** ✅ 完了:
+     - 舵角および前方障害物接近距離に応じた動的減速制御 (src/e2e/safety/speed_limiter.py)。直進時は巡航速度、急旋回時や障害物接近時は最低速度までスムーズに自動減速。
+  3. **Phase 3.3: 通信監視・ウォッチドッグ (Communication Watchdog)** ✅ 完了:
+     - PC-Raspberry Pi 間のハートビート監視 (src/e2e/safety/watchdog.py)。Wi-Fi途絶やAPI連続エラー時に即座に強制停止し暴走を防止。
+  4. **Disengagement 自動記録連携**:
+     - 崖検知、超音波急接近、ウォッチドッグタイムアウト、手動停止 (Ctrl+C) の各事象発生時に、直前3秒間 (30フレーム) を ad_case として自動タグ付け保存。
+- **計算負荷**: ゼロ（ルールベースの高速判定）
+
+---
+
+### Phase 4: Raspberry Pi 実機スタンドアロン化（Rust推論移植）⬜ 未着手
+- **目的**: Wi-FiやPCを介さず、Raspberry Pi単体・完全自律で動作する「本物のロボット」へ昇華。
+- **実装内容**:
+  1. **Rust ONNX Runtime (`ort` crate) 組み込み**:
+     - PCで学習した `model.onnx` をRaspberry Piへデプロイ。
+     - Raspberry Pi上のRustプログラム内でカメラキャプチャからONNX推論、PWM出力までを直接実行。
+  2. **超低遅延化**:
+     - Wi-Fi通信オーバーヘッド（30〜50ms）がなくなり、20〜30FPSで遅延のない滑らかな自律走行を実現。
+  3. **PC側役割の分離**:
+     - PCは「走行ログの受信」「学習」「モデル配信」のみを担当し、リアルタイム制御ループから完全に外す。
+- **計算負荷**: Raspberry PiのCPUのみで余裕で動作（軽量CNNのため1推論あたり数ms〜十数ms）
+
+---
+
+## 6. ディレクトリ構成
 
 ```text
 PiCarX/
-├── E2E_ROADMAP.md                 # 開発ロードマップ (Phase 1〜4)
-├── E2E_SPECIFICATION.md           # 本仕様書
+├── E2E_SPECIFICATION.md           # 本仕様書 (ロードマップ統合)
 ├── python/
 │   ├── pyproject.toml             # uv / Python 依存関係定義 (e2e, dev)
 │   ├── data/
@@ -251,7 +329,7 @@ PiCarX/
 │   │           ├── dataset.py
 │   │           ├── model.py
 │   │           └── train.py
-│   └── tests/                     # ユニットテスト (全15件)
+│   └── tests/                     # ユニットテスト (全30件)
 │       ├── test_e2e_cleaner.py
 │       └── test_e2e_dataset.py
 └── rust/
@@ -262,7 +340,7 @@ PiCarX/
 
 ---
 
-## 4. 実行コマンド集 (uv前提)
+## 7. 実行コマンド集 (uv前提)
 
 | 目的 | コマンド (PowerShell) |
 |---|---|
@@ -273,5 +351,19 @@ PiCarX/
 | **モデルオフライン評価** | `uv run python -m src.e2e.evaluation.evaluate --data_dir data/raw --model_path models/v004/best_model.pth` |
 | **MLOps レジストリ確認** | `uv run python -m src.e2e.registry.compare` |
 | **実機自律走行** | `uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --speed 35` |
+| **介入イベント一覧確認** | `uv run python -m src.e2e.dataset.disengagement_manager --list` |
+| **Rustクロスコンパイル** | `cd rust/build; make build MODEL=4b` (ローカルPC Docker上) |
+| **Rustラズパイ送信** | `cd rust/build; make deploy RPI_HOST=pi@<IP> RPI_DIR=/home/pi/` |
 | **CI 静的解析** | `uv run ruff check --config pyproject.toml src tests` |
 | **CI テスト実行** | `uv run pytest tests` |
+
+---
+
+## 8. 開発プロセス & 品質ルール
+
+- **Python実行ルール**: 常に `uv` を前提とする（`uv run python -m ...`、`uv pip install ...`）。
+- **Rustビルド & デプロイルール**: 実機でのコンパイルは行わず、常にローカルPC上でDockerクロスコンパイル（`rust/build/Makefile`）を行い、`scp`（`make deploy`）でRaspberry Piへバイナリを送信する。
+- **コード品質**:
+  - リンター/フォーマッタ: `uv run ruff check --config pyproject.toml src tests`
+  - ユニットテスト: `uv run pytest tests`
+  - 新機能追加時も常にCIテスト全件合格を維持する。

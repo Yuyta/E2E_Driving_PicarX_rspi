@@ -123,6 +123,12 @@ class PicarxClient:
             data = UltrasonicResponse.model_validate(resp.json())
             return data.distance_cm
 
+    def get_grayscale_sync(self) -> List[int]:
+        with httpx.Client(timeout=self.timeout) as client:
+            resp = client.get(f"{self.base_url}/api/sensor/grayscale")
+            data = GrayscaleResponse.model_validate(resp.json())
+            return [data.left, data.middle, data.right]
+
     def get_camera_snapshot_sync(
         self, width: int = 320, quality: int = 70
     ) -> CameraSnapshotResponse:

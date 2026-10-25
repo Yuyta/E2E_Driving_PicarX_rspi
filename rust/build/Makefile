@@ -7,7 +7,7 @@ PARENT_DIR   := $(shell dirname $(MAKEFILE_DIR))
 
 # Architecture
 ## 3bplus/zero2w/4b/5
-MODEL          := 
+MODEL          ?= 5
 CPU_FOR_3bplus := cortex-a53
 CPU_FOR_zero2w := cortex-a53
 CPU_FOR_4b     := cortex-a72
@@ -17,12 +17,12 @@ TARGET_CPU      = $(CPU_FOR_$(MODEL))
 # build
 IMAGE_NAME   := picar-builder
 TARGET       := aarch64-unknown-linux-gnu
-PROJECT_ROOT := $(PARENT_DIR)
+PROJECT_ROOT := $(shell which cygpath > /dev/null 2>&1 && cygpath -w $(PARENT_DIR) || echo "$(PARENT_DIR)")
 APP_NAME     := picar-x-rust
 
 # deploy
-RPI_HOST   :=  
-RPI_DIR    := 
+RPI_HOST   ?= pi@raspberrypi.local
+RPI_DIR    ?= /home/pi/
 
 # ==============================================================================
 # Commands
@@ -50,30 +50,21 @@ fmt:
 	cargo fmt --all -- --check
 
 lint:
-	@echo "Running Rust Clippy for $(TARGET)..."
-	docker run --rm \
-		-v "$(PROJECT_ROOT)":/workspace \
-		-v cargo-cache:/usr/local/cargo/registry \
-		-v cargo-git:/usr/local/cargo/git \
-		-e RUSTFLAGS="-C target-cpu=$(TARGET_CPU)" \
-		$(IMAGE_NAME) \
-		cargo clippy --target $(TARGET) --release -- -D warnings
+	@echo "Linting Rust code..."
+	cargo clippy --target $(TARGET) --all-targets --all-features -- -D warnings
 
 test:
-	@echo "Compiling Rust unit tests for $(TARGET)..."
-	docker run --rm \
-		-v "$(PROJECT_ROOT)":/workspace \
-		-v cargo-cache:/usr/local/cargo/registry \
-		-v cargo-git:/usr/local/cargo/git \
-		-e RUSTFLAGS="-C target-cpu=$(TARGET_CPU)" \
-		$(IMAGE_NAME) \
-		cargo test --target $(TARGET) --release --no-run
+	@echo "Running Rust tests..."
+	cargo test --target $(TARGET)
 
 deploy:
-	@echo "Sending $(APP_NAME) to Raspberry Pi ($(RPI_HOST))..."
-	scp $(PROJECT_ROOT)/target/$(TARGET)/release/$(APP_NAME) $(RPI_HOST):$(RPI_DIR)/
-	@echo "Deployment complete! Run './$(APP_NAME)' on your Raspberry Pi."
+	@if [ -z "$(RPI_HOST)" ]; then \
+		echo "Error: RPI_HOST is not set. Example: make deploy RPI_HOST=pi@raspberrypi.local"; \
+		exit 1; \
+	fi
+	@echo "Deploying $(APP_NAME) to $(RPI_HOST):$(RPI_DIR)..."
+	scp ../target/$(TARGET)/release/$(APP_NAME) $(RPI_HOST):$(RPI_DIR)
 
 clean:
-	@echo "Cleaning up target directory..."
+	@echo "Cleaning build artifacts..."
 	cargo clean

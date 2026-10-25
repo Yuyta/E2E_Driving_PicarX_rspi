@@ -7,6 +7,26 @@
 
 ---
 
+## 前提条件: Raspberry Pi側の準備 (Rustサーバーのビルド & 転送)
+
+> [!IMPORTANT]
+> **Raspberry Pi 実機上でのコンパイルは非推奨**です。
+> Rustプログラムの変更時は、**ローカルPCのDocker上でクロスコンパイルし、`make deploy` でRaspberry Piへ送信**してください。
+
+```bash
+# ローカルPC (Docker環境) でクロスコンパイル
+cd rust/build
+make build MODEL=4b     # お使いの機種 (4b, zero2w, 3bplus, 5)
+
+# Raspberry Pi へ実行バイナリを転送
+make deploy RPI_HOST=pi@<ラズパイIP> RPI_DIR=/home/pi/
+
+# Raspberry Pi 上で起動 (SSH接続先)
+./picar-x-rust
+```
+
+---
+
 ## 全体アーキテクチャ
 
 ```text
@@ -47,9 +67,9 @@ uv run python -m src.e2e.gui_collector
 | **`R`** | 録画切替 | **● 録画開始 / ⏸ 一時停止** をトグルします |
 
 ### 収集のコツ
-1. 車体をコースのスタート位置に置きます。
+1. 車体を走行させたい部屋の開けたスペースに置きます。
 2. **`R` キーを押して録画を開始**します（画面に「● Pause Recording」と表示され、フレーム数カウントが進みます）。
-3. コースの中央をキープするようにスムーズに1〜2周（1,000〜2,000フレーム程度）走らせます。
+3. 壁や家具を避けながらスムーズに室内を巡回走行（1,000〜2,000フレーム程度）させます。
 4. 走り終わったら **`R` キーで録画を停止**し、ウィンドウを閉じます。
 
 ### 保存されるデータ
@@ -168,24 +188,46 @@ v001           | 15     | 32    | 0.0946    | 0.2586     | ±9.1°      | PTH+ON
    - Raspberry Piの電源を入れ、Rust APIサーバーを起動します（通常通りポート `8080` で待機）。
 2. **Wi-Fi / 疎通の確認**:
    - PCとRaspberry Piが同一Wi-Fiネットワークに接続されていることを確認します（`.env` に記載の `ROBOT_BASE_URL`）。
-3. **コースへの配置**:
+3. **走行エリアへの配置**:
    - 車両をコースのスタート地点に置き、進行方向に向けておきます。
 
 ### 2. 実行コマンド (PCのPowerShell)
 ```powershell
-uv run python -m src.e2e.autonomous_driver --model models/v001/model.onnx --speed 35 --safe_dist 15.0
+# 通常起動 (多重安全層: 前方停止 + 段差ガード + 動的カーブ減速 + 通信ウォッチドッグ有効)
+uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --speed 35 --min_speed 20
+
+# カーブ旋回時・障害物接近時の減速チューニング (最低速度を25、減速開始距離を50cmに変更)
+uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --speed 40 --min_speed 25 --slowdown_dist 50.0
+
+# 段差検知の閾値を調整する場合 (床の材質に合わせて変更、デフォルト: 150)
+uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --cliff_threshold 200
+
+# 通信ウォッチドッグのタイムアウト時間を調整 (デフォルト: 0.6秒)
+uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --watchdog_timeout 1.0
 ```
 
 #### オプション説明:
 - `--model` : 推論に使用するONNXモデルのパス（デフォルト: `models/v001/model.onnx`）
-- `--speed` : 走行スピード（`0` 〜 `100`、デフォルト: `35`）
-- `--safe_dist` : 強制停止する前方障害物までの距離（cm、デフォルト: `15.0`）
+- `--speed` : 基本巡航スピード（`0` 〜 `100`、デフォルト: `35`）
+- `--min_speed` : カーブ旋回時・障害物接近時の最低減速スピード（デフォルト: `20`）
+- `--curve_factor` : 旋回減速感度係数（デフォルト: `1.0`）
+- `--safe_dist` : 緊急停止する前方障害物までの限界距離（cm、デフォルト: `15.0`）
+- `--slowdown_dist` : 障害物接近に伴い動的減速を開始する距離（cm、デフォルト: `40.0`）
+- `--cliff_threshold` : 段差・階段落下検知のADC閾値（デフォルト: `150`。これを下回ると崖判定）
+- `--disable_cliff` : 段差検知ガードを無効化するフラグ
+- `--watchdog_timeout` : 通信監視タイムアウト秒数（デフォルト: `0.6` 秒）
+- `--max_errors` : 通信停止とみなす連続エラー許容回数（デフォルト: `3` 回）
 
-### 3. 走行中の動作と挙動
-- **推論ループ (約20Hz)**:
-  - PCがRustサーバーからカメラ映像（JPEG）をリアルタイム取得します。
-  - ONNXモデルが現在のステアリング角度を推論し、Rustサーバー経由で車輪を自動操舵しながら前進します。
-- **Safety Guard (安全機構)**:
-  - 超音波センサーが指定距離（デフォルト15cm以内）の障害物を検知した場合、推論値に関わらず**モーターを強制停止**します。
-- **緊急停止**:
-  - 走行を止めたいときは、ターミナルで **`Ctrl + C`** を押すと、ステアリングが中央（0度）に戻りモーターが完全停止します。
+### 3. 多重セーフティレイヤー (Phase 3 ハイブリッド安全機構)
+- **Phase 3.1 段差・階段落下防止ガード (Cliff Guard)**:
+  - 底面赤外線センサーが床の途切れを検知すると、即時停止したのち安全な方向へ自動後退して退避。
+- **Phase 3.2 ダイナミック・スピードリミッター (Dynamic Speed Limiter)**:
+  - 急旋回時や家具・壁への接近時に、AIの要求に関わらず安全な車速（`min_speed`）まで自動減速。スリップや旋回半径膨らみ、衝突衝撃を防止。
+- **Phase 3.3 通信ウォッチドッグ (Communication Watchdog)**:
+  - Wi-Fi通信断やRust APIサーバーの応答遅延（0.6秒以上）を常時監視。通信途絶時に自動で車両を即時緊急停止し、暴走を防止。通信復帰時は自動再開。
+- **前方障害物ガード (超音波)**:
+  - 前方指定距離（デフォルト15cm）以内に家具・壁を検知すると、AIの推論に関わらずモーターを完全強制停止。
+- **Disengagement ロギング (直前3秒間の自動記録)**:
+  - 急ブレーキ・段差回避・通信断・手動介入 (`Ctrl+C`) の直前3秒間を `data/disengagements/` へ自動保存。
+- **手動緊急停止**:
+  - ターミナルで **`Ctrl + C`** を押すと、即座にステアリングが0度（中立）に戻りモーターが完全停止。
