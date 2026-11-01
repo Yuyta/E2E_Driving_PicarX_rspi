@@ -3,16 +3,18 @@ Autonomous Driving Script using ONNX Runtime for PiCar-X (Plan A: Remote Mode)
 PC上でONNXモデルを実行し、Raspberry Pi (Rust APIサーバー) を介して
 家庭内フリースペース自律走行を行うスクリプト。
 Phase 2.1: Disengagement Logger (直前3秒間の自動タグ付け & 介入記録)
-Phase 3: ハイブリッド安全系 (Safety Layer)
-  - 3.1: Cliff Detection (底面グレースケールによる段差・階段落下防止 & 自動後退退避)
+Phase 3: ハイブリッド安全系 & 空間マッピング基盤 (Safety Layer)
+  - 3.1: Cliff Detection (底面グレースケールによる段差・階段落下防止)
   - 3.2: Dynamic Speed Limiter (急旋回・障害物接近時の自動車速制御)
   - 3.3: Communication Watchdog (Wi-Fi通信断・ハートビート監視・タイムアウト停止)
+  - 3.4: Breadcrumb Safety (直前走行軌跡の逆再生による十分な距離の安全後退・回避ターン)
 """
 
 import argparse
 import base64
 import time
 from pathlib import Path
+from typing import Optional, Tuple
 
 import cv2
 import numpy as np
@@ -25,11 +27,13 @@ try:
     from .dataset.disengagement_manager import DisengagementBuffer
     from .safety.cliff_detector import CliffDetector
     from .safety.speed_limiter import SpeedLimiter
+    from .safety.trajectory_tracker import TrajectoryTracker
     from .safety.watchdog import CommunicationWatchdog
 except ImportError:
     from src.e2e.dataset.disengagement_manager import DisengagementBuffer
     from src.e2e.safety.cliff_detector import CliffDetector
     from src.e2e.safety.speed_limiter import SpeedLimiter
+    from src.e2e.safety.trajectory_tracker import TrajectoryTracker
     from src.e2e.safety.watchdog import CommunicationWatchdog
 
 
@@ -46,6 +50,7 @@ class RemoteAutonomousDriver:
         enable_cliff=True,
         watchdog_timeout=0.6,
         max_consecutive_errors=3,
+        reverse_duration_ms=1200,
         log_dir="data/disengagements",
         buffer_frames=30,
     ):
@@ -55,6 +60,7 @@ class RemoteAutonomousDriver:
         self.max_steering_angle = 35.0
         self.log_dir = Path(log_dir)
         self.enable_cliff = enable_cliff
+        self.reverse_duration_ms = reverse_duration_ms
 
         print(f"Loading ONNX Model from: {model_path}")
         self.session = ort.InferenceSession(model_path)
@@ -87,6 +93,13 @@ class RemoteAutonomousDriver:
             max_consecutive_errors=max_consecutive_errors,
         )
 
+        # Phase 3.4: 直前軌跡メモリ & 安全後退シーケンサ
+        self.trajectory_tracker = TrajectoryTracker(
+            max_history_points=100,
+            default_reverse_duration_ms=reverse_duration_ms,
+            reverse_speed=min_speed,
+        )
+
     def preprocess(self, bgr_img):
         """BGR画像 -> (1, 3, 120, 160) の正規化Tensor"""
         resized = cv2.resize(bgr_img, (160, 120))
@@ -102,6 +115,68 @@ class RemoteAutonomousDriver:
         img = np.transpose(img, (2, 0, 1))
         img = np.expand_dims(img, axis=0)
         return img
+
+    def execute_breadcrumb_reverse(
+        self,
+        target_duration_ms: Optional[int] = None,
+        last_cliff_sensors: Optional[Tuple[bool, bool, bool]] = None,
+    ) -> None:
+        """
+        直前に通ってきた安全な軌跡を逆再生して十分な距離を後退し、
+        さらに車首を安全な方向へ振って脱出する。
+        """
+        dur_ms = target_duration_ms or self.reverse_duration_ms
+        try:
+            self.client.stop_sync()
+        except Exception:
+            pass
+        time.sleep(0.05)
+
+        sequence = self.trajectory_tracker.get_reverse_sequence(dur_ms)
+        print(
+            f"\n[BREADCRUMB REVERSE] Executing safe reverse along history "
+            f"({len(sequence)} steps, total {dur_ms}ms)..."
+        )
+
+        for steer, spd, step_dur in sequence:
+            try:
+                self.client.steer_sync(steer)
+                self.client.move_sync(
+                    DriveDirection.BACKWARD, speed=spd, duration_ms=step_dur
+                )
+                time.sleep(step_dur / 1000.0)
+            except Exception:
+                self.watchdog.record_error()
+                break
+
+        try:
+            self.client.stop_sync()
+        except Exception:
+            pass
+        time.sleep(0.05)
+
+        # 後退後の方向転換 (Turn Away)
+        turn_steer, turn_spd, turn_dur = self.trajectory_tracker.get_escape_turn(
+            last_cliff_sensors
+        )
+        print(
+            f"[ESCAPE TURN] Turning away from hazard (Steer: {turn_steer:+02d}°, {turn_dur}ms)..."
+        )
+        try:
+            self.client.steer_sync(turn_steer)
+            self.client.move_sync(
+                DriveDirection.FORWARD, speed=turn_spd, duration_ms=turn_dur
+            )
+            time.sleep(turn_dur / 1000.0)
+            self.client.stop_sync()
+            self.client.steer_sync(0)
+            self.watchdog.heartbeat()
+        except Exception:
+            self.watchdog.record_error()
+
+        # 脱出完了後に軌跡履歴をリセット
+        self.trajectory_tracker.clear()
+        print("[ESCAPE COMPLETED] Resuming autonomous driving.")
 
     def run(self):
         print("\n=== PiCar-X Remote Autonomous Driving Started (Indoor Home) ===")
@@ -121,6 +196,9 @@ class RemoteAutonomousDriver:
             f"Watchdog Guard: ACTIVE (Timeout: {self.watchdog.timeout_sec}s, "
             f"Max Errors: {self.watchdog.max_consecutive_errors})"
         )
+        print(
+            f"Breadcrumb Reverse: ACTIVE (Target Distance/Duration: {self.reverse_duration_ms}ms)"
+        )
         print("Disengagement Logging: ACTIVE (auto-records pre-event 3s)")
         print("Press Ctrl+C to emergency stop.\n")
 
@@ -138,6 +216,7 @@ class RemoteAutonomousDriver:
         last_frame_bgr = None
         last_steer_norm = 0.0
         last_steer_angle = 0
+        obstacle_encounter_count = 0
 
         try:
             while True:
@@ -182,7 +261,7 @@ class RemoteAutonomousDriver:
                         self.watchdog.record_error()
                     continue
 
-                # 1-2. 段差・階段落下防止ガード (Phase 3.1 Cliff Detection)
+                # 1-2. 段差・階段落下防止ガード (Phase 3.1 & 3.4 Breadcrumb Reverse)
                 if self.enable_cliff:
                     try:
                         gs = self.client.get_grayscale_sync()
@@ -192,8 +271,7 @@ class RemoteAutonomousDriver:
                         gs = [999, 999, 999]
 
                     if self.cliff_detector.is_cliff(gs):
-                        steer, escape_spd, dur_ms = self.cliff_detector.get_escape_action(gs)
-                        msg = f"\r[CLIFF GUARD] Drop-off Detected! {gs} -> STOPPING & ESCAPING"
+                        msg = f"\r[CLIFF GUARD] Drop-off Detected! {gs} -> STOPPING & RETREATING"
                         print(msg, end="", flush=True)
                         try:
                             self.client.stop_sync()
@@ -212,24 +290,17 @@ class RemoteAutonomousDriver:
                                 print(f"\n[DISENGAGEMENT LOGGED] Saved to: {saved_path}")
                             self.is_cliff_stopped = True
 
-                        # 安全エリアへ自動後退（エスケープ）
-                        try:
-                            self.client.steer_sync(steer)
-                            self.client.move_sync(
-                                DriveDirection.BACKWARD,
-                                speed=abs(escape_spd),
-                                duration_ms=dur_ms,
-                            )
-                            time.sleep(dur_ms / 1000.0)
-                            self.client.stop_sync()
-                            self.client.steer_sync(0)
-                        except Exception:
-                            self.watchdog.record_error()
+                        # 直前軌跡（パンくずリスト）を逆再生して安全に後退 ＋ 回避旋回
+                        cliff_status = self.cliff_detector.get_cliff_status(gs)
+                        self.execute_breadcrumb_reverse(
+                            target_duration_ms=self.reverse_duration_ms,
+                            last_cliff_sensors=cliff_status,
+                        )
                         continue
 
                 self.is_cliff_stopped = False
 
-                # 1-3. 前方障害物チェック (超音波センサー)
+                # 1-3. 前方障害物チェック (超音波センサー & 行き止まり脱出)
                 try:
                     distance = self.client.get_ultrasonic_sync()
                     self.watchdog.heartbeat()
@@ -238,6 +309,7 @@ class RemoteAutonomousDriver:
                     distance = 999.0
 
                 if 0 < distance < self.safe_distance:
+                    obstacle_encounter_count += 1
                     msg = f"\r[SAFETY GUARD] Obstacle Close: {distance:.1f}cm! STOPPING."
                     print(msg, end="", flush=True)
                     try:
@@ -257,11 +329,23 @@ class RemoteAutonomousDriver:
                             print(f"\n[DISENGAGEMENT LOGGED] Saved to: {saved_path}")
                         self.is_obstacle_stopped = True
 
-                    time.sleep(0.1)
+                    # 壁や家具の前で行き止まりになった場合は、直前軌跡を逆走して脱出
+                    if obstacle_encounter_count >= 2:
+                        print(
+                            "\n[OBSTACLE DEAD-END] In front of obstacle "
+                            "-> Executing reverse escape."
+                        )
+                        self.execute_breadcrumb_reverse(
+                            target_duration_ms=self.reverse_duration_ms
+                        )
+                        obstacle_encounter_count = 0
+                    else:
+                        time.sleep(0.1)
                     continue
 
                 # 障害物を脱したらフラグリセット
                 self.is_obstacle_stopped = False
+                obstacle_encounter_count = 0
 
                 # ----------------------------------------------------
                 # 2. カメラ画像取得
@@ -299,19 +383,27 @@ class RemoteAutonomousDriver:
                 )
 
                 # ----------------------------------------------------
-                # 5. 実機制御 (Rust APIへ送信)
+                # 5. 実機制御 & 軌跡記録 (Phase 3.4 Breadcrumb Tracker)
                 # ----------------------------------------------------
                 steer_angle = int(steering_norm * self.max_steering_angle)
                 last_steer_norm = steering_norm
                 last_steer_angle = steer_angle
 
-                # リングバッファに常時蓄積 (直前3秒分)
+                # 直前3秒リングバッファに保存
                 self.buffer.append(
                     frame_bgr=last_frame_bgr,
                     steering_norm=last_steer_norm,
                     steer_angle=last_steer_angle,
                     ultrasonic_dist=distance,
                     speed=dynamic_speed,
+                )
+
+                # Phase 3.4: 安全走行軌跡に記録
+                self.trajectory_tracker.record(
+                    speed=dynamic_speed,
+                    steer_angle=steer_angle,
+                    duration_ms=400,
+                    timestamp=time.time(),
                 )
 
                 try:
@@ -387,6 +479,12 @@ def main():
         help="Disable cliff/drop-off safety guard",
     )
     parser.add_argument(
+        "--reverse_duration_ms",
+        type=int,
+        default=1200,
+        help="Target duration in ms to reverse along safe trajectory during escape",
+    )
+    parser.add_argument(
         "--watchdog_timeout",
         type=float,
         default=0.6,
@@ -423,6 +521,7 @@ def main():
         enable_cliff=not args.disable_cliff,
         watchdog_timeout=args.watchdog_timeout,
         max_consecutive_errors=args.max_errors,
+        reverse_duration_ms=args.reverse_duration_ms,
         log_dir=args.log_dir,
         buffer_frames=args.buffer_frames,
     )
