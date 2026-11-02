@@ -204,6 +204,9 @@ uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --clif
 
 # 通信ウォッチドッグのタイムアウト時間を調整 (デフォルト: 0.6秒)
 uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --watchdog_timeout 1.0
+
+# スタック検知感度を調整 (閾値を3.0、検知継続フレームを20フレームに変更)
+uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --stuck_threshold 3.0 --stuck_frames 20
 ```
 
 #### オプション説明:
@@ -216,6 +219,9 @@ uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --watc
 - `--cliff_threshold` : 段差・階段落下検知のADC閾値（デフォルト: `150`。これを下回ると崖判定）
 - `--disable_cliff` : 段差検知ガードを無効化するフラグ
 - `--reverse_duration_ms` : 安全後退の目標実行時間（ミリ秒、デフォルト: `1200` = 1.2秒）
+- `--stuck_threshold` : スタック判定の視覚変化量閾値（デフォルト: `4.0`）
+- `--stuck_frames` : スタック確定までの連続フレーム数（デフォルト: `15` = 約0.8秒〜1秒）
+- `--disable_stuck` : スタック検知・自動脱出ガードを無効化するフラグ
 - `--watchdog_timeout` : 通信監視タイムアウト秒数（デフォルト: `0.6` 秒）
 - `--max_errors` : 通信停止とみなす連続エラー許容回数（デフォルト: `3` 回）
 
@@ -228,6 +234,9 @@ uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --watc
   - Wi-Fi通信断やRust APIサーバーの応答遅延（0.6秒以上）を常時監視。通信途絶時に自動で車両を即時緊急停止し、暴走を防止。通信復帰時は自動再開。
 - **Phase 3.4 前方行き止まり自動脱出 (Dead-End Escape)**:
   - 壁や家具の前で2回連続で安全停止した場合、同様に通ってきたルートを逆走して後退・旋回し、自力で脱出。
+- **Phase 3.6 スタック検知 & 自動脱出ビヘイビア (Stuck & Wiggle Recovery)**:
+  - 車輪が空転したりラグや家具の脚に引っかかって「前進しているはずなのに景色が動いていない」状態をカメラ画像の変化量から総合検知。
+  - バック（直前軌跡巻き戻し） ＋ 左右の車体振り（Wiggle） ＋ 迂回前進の複合動作を自動実行し、引っかかりを振りほどいて自力脱出。
 - **前方障害物ガード (超音波)**:
   - 前方指定距離（デフォルト15cm）以内に家具・壁を検知すると、AIの推論に関わらずモーターを完全強制停止。
 - **Disengagement ロギング (直前3秒間の自動記録)**:

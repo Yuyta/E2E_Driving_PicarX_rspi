@@ -8,6 +8,7 @@ Phase 3: ハイブリッド安全系 & 空間マッピング基盤 (Safety Layer
   - 3.2: Dynamic Speed Limiter (急旋回・障害物接近時の自動車速制御)
   - 3.3: Communication Watchdog (Wi-Fi通信断・ハートビート監視・タイムアウト停止)
   - 3.4: Breadcrumb Safety (直前走行軌跡の逆再生による十分な距離の安全後退・回避ターン)
+  - 3.6: Stuck Detector (カメラ視覚変化量による引っかかり・空転検知 & 複合脱出ビヘイビア)
 """
 
 import argparse
@@ -27,12 +28,14 @@ try:
     from .dataset.disengagement_manager import DisengagementBuffer
     from .safety.cliff_detector import CliffDetector
     from .safety.speed_limiter import SpeedLimiter
+    from .safety.stuck_detector import StuckDetector
     from .safety.trajectory_tracker import TrajectoryTracker
     from .safety.watchdog import CommunicationWatchdog
 except ImportError:
     from src.e2e.dataset.disengagement_manager import DisengagementBuffer
     from src.e2e.safety.cliff_detector import CliffDetector
     from src.e2e.safety.speed_limiter import SpeedLimiter
+    from src.e2e.safety.stuck_detector import StuckDetector
     from src.e2e.safety.trajectory_tracker import TrajectoryTracker
     from src.e2e.safety.watchdog import CommunicationWatchdog
 
@@ -51,6 +54,9 @@ class RemoteAutonomousDriver:
         watchdog_timeout=0.6,
         max_consecutive_errors=3,
         reverse_duration_ms=1200,
+        stuck_motion_threshold=4.0,
+        stuck_duration_frames=15,
+        enable_stuck_detection=True,
         log_dir="data/disengagements",
         buffer_frames=30,
     ):
@@ -61,6 +67,7 @@ class RemoteAutonomousDriver:
         self.log_dir = Path(log_dir)
         self.enable_cliff = enable_cliff
         self.reverse_duration_ms = reverse_duration_ms
+        self.enable_stuck_detection = enable_stuck_detection
 
         print(f"Loading ONNX Model from: {model_path}")
         self.session = ort.InferenceSession(model_path)
@@ -98,6 +105,14 @@ class RemoteAutonomousDriver:
             max_history_points=100,
             default_reverse_duration_ms=reverse_duration_ms,
             reverse_speed=min_speed,
+        )
+
+        # Phase 3.6: スタック（引っかかり・車輪空転）検知モジュール
+        self.stuck_detector = StuckDetector(
+            history_frames=8,
+            min_motion_threshold=stuck_motion_threshold,
+            stuck_duration_frames=stuck_duration_frames,
+            min_moving_speed=min_speed,
         )
 
     def preprocess(self, bgr_img):
@@ -174,9 +189,73 @@ class RemoteAutonomousDriver:
         except Exception:
             self.watchdog.record_error()
 
-        # 脱出完了後に軌跡履歴をリセット
+        # 脱出完了後に軌跡履歴とスタック検知をリセット
         self.trajectory_tracker.clear()
+        self.stuck_detector.reset()
         print("[ESCAPE COMPLETED] Resuming autonomous driving.")
+
+    def execute_unstuck(self) -> None:
+        """
+        引っかかり・車輪空転状態からの自動脱出（バック ＋ 左右車体振り ＋ 迂回前進）
+        """
+        print(
+            f"\n[STUCK DETECTED] Vehicle trapped/spinning wheels "
+            f"(motion: {self.stuck_detector.last_motion_value:.2f}) -> Executing Unstuck Action!"
+        )
+        try:
+            self.client.stop_sync()
+        except Exception:
+            pass
+
+        # Disengagement ロギング
+        saved_path = self.buffer.save_event(
+            trigger="stuck_detected",
+            output_base_dir=self.log_dir,
+            model_name=self.model_path,
+            note=(
+                f"Vehicle stuck/wheels spinning: visual motion dropped "
+                f"to {self.stuck_detector.last_motion_value:.2f}"
+            ),
+        )
+        if saved_path:
+            print(f"[DISENGAGEMENT LOGGED] Saved to: {saved_path}")
+
+        # Step 1: まず直前軌跡を逆再生してしっかり後退 (1000ms)
+        print("[UNSTUCK: STEP 1] Reversing along trajectory away from trap...")
+        self.execute_breadcrumb_reverse(target_duration_ms=1000)
+
+        # Step 2: 左右の車体振り (Wiggle) でタイヤの引っかかり・乗り上げを解消
+        print("[UNSTUCK: STEP 2] Wiggling chassis left and right...")
+        wiggle_actions = [
+            (-35, self.speed_limiter.min_speed, 350),  # 左切り前進
+            (35, self.speed_limiter.min_speed, 350),   # 右切り前進
+            (0, self.speed_limiter.min_speed, 400),    # まっすぐ少し後退
+            (35, self.speed_limiter.min_speed, 450),   # 迂回前進
+        ]
+        for steer, spd, dur in wiggle_actions:
+            try:
+                self.client.steer_sync(steer)
+                if steer == 0:
+                    self.client.move_sync(
+                        DriveDirection.BACKWARD, speed=spd, duration_ms=dur
+                    )
+                else:
+                    self.client.move_sync(
+                        DriveDirection.FORWARD, speed=spd, duration_ms=dur
+                    )
+                time.sleep(dur / 1000.0)
+            except Exception:
+                break
+
+        try:
+            self.client.stop_sync()
+            self.client.steer_sync(0)
+        except Exception:
+            pass
+
+        self.stuck_detector.reset()
+        self.trajectory_tracker.clear()
+        print("[UNSTUCK COMPLETED] Free from trap! Resuming autonomous driving.\n")
 
     def run(self):
         print("\n=== PiCar-X Remote Autonomous Driving Started (Indoor Home) ===")
@@ -199,6 +278,12 @@ class RemoteAutonomousDriver:
         print(
             f"Breadcrumb Reverse: ACTIVE (Target Distance/Duration: {self.reverse_duration_ms}ms)"
         )
+        stuck_status = (
+            f"ACTIVE (Threshold: {self.stuck_detector.min_motion_threshold})"
+            if self.enable_stuck_detection
+            else "DISABLED"
+        )
+        print(f"Stuck Auto-Recovery Guard: {stuck_status}")
         print("Disengagement Logging: ACTIVE (auto-records pre-event 3s)")
         print("Press Ctrl+C to emergency stop.\n")
 
@@ -368,14 +453,24 @@ class RemoteAutonomousDriver:
                     continue
 
                 # ----------------------------------------------------
-                # 3. 前処理 & ONNX推論
+                # 3. Phase 3.6: スタック（引っかかり・空転）検知 & 自動脱出
+                # ----------------------------------------------------
+                if self.enable_stuck_detection:
+                    if self.stuck_detector.update(
+                        frame, motor_speed=self.speed_limiter.min_speed
+                    ):
+                        self.execute_unstuck()
+                        continue
+
+                # ----------------------------------------------------
+                # 4. 前処理 & ONNX推論
                 # ----------------------------------------------------
                 input_tensor = self.preprocess(frame)
                 outputs = self.session.run(None, {self.input_name: input_tensor})
                 steering_norm = float(outputs[0][0][0])  # -1.0 ~ 1.0
 
                 # ----------------------------------------------------
-                # 4. Phase 3.2: 動的車速制御 (Speed Limiter)
+                # 5. Phase 3.2: 動的車速制御 (Speed Limiter)
                 # ----------------------------------------------------
                 dynamic_speed = self.speed_limiter.calculate(
                     steering_norm=steering_norm,
@@ -383,7 +478,7 @@ class RemoteAutonomousDriver:
                 )
 
                 # ----------------------------------------------------
-                # 5. 実機制御 & 軌跡記録 (Phase 3.4 Breadcrumb Tracker)
+                # 6. 実機制御 & 軌跡記録 (Phase 3.4 Breadcrumb Tracker)
                 # ----------------------------------------------------
                 steer_angle = int(steering_norm * self.max_steering_angle)
                 last_steer_norm = steering_norm
@@ -415,9 +510,10 @@ class RemoteAutonomousDriver:
                 except Exception:
                     self.watchdog.record_error()
 
+                motion_val = self.stuck_detector.last_motion_value
                 status = (
                     f"\rSteer: {steering_norm:+.2f} | Angle: {steer_angle:+02d}° | "
-                    f"Spd: {dynamic_speed:02d} | Dist: {distance:.1f}cm"
+                    f"Spd: {dynamic_speed:02d} | Flow: {motion_val:04.1f} | Dist: {distance:.1f}cm"
                 )
                 print(status, end="", flush=True)
                 time.sleep(0.05)
@@ -485,6 +581,23 @@ def main():
         help="Target duration in ms to reverse along safe trajectory during escape",
     )
     parser.add_argument(
+        "--stuck_threshold",
+        type=float,
+        default=4.0,
+        help="Visual motion threshold below which vehicle is considered visually static",
+    )
+    parser.add_argument(
+        "--stuck_frames",
+        type=int,
+        default=15,
+        help="Consecutive static frames before triggering auto-unstuck behavior",
+    )
+    parser.add_argument(
+        "--disable_stuck",
+        action="store_true",
+        help="Disable visual stuck detection and auto-recovery",
+    )
+    parser.add_argument(
         "--watchdog_timeout",
         type=float,
         default=0.6,
@@ -522,6 +635,9 @@ def main():
         watchdog_timeout=args.watchdog_timeout,
         max_consecutive_errors=args.max_errors,
         reverse_duration_ms=args.reverse_duration_ms,
+        stuck_motion_threshold=args.stuck_threshold,
+        stuck_duration_frames=args.stuck_frames,
+        enable_stuck_detection=not args.disable_stuck,
         log_dir=args.log_dir,
         buffer_frames=args.buffer_frames,
     )
