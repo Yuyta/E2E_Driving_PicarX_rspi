@@ -186,6 +186,15 @@ class RemoteAutonomousDriver:
                     self.grid_map.update_odometry(
                         speed=-spd, steer_angle_deg=steer, duration_ms=step_dur
                     )
+                if self.visualizer:
+                    canvas = self.visualizer.render(
+                        camera_frame_bgr=None,
+                        speed=-spd,
+                        steer_angle=steer,
+                        status_text="BREADCRUMB REVERSE",
+                        status_color=(0, 140, 255),
+                    )
+                    self.visualizer.show(canvas, wait_ms=1)
                 time.sleep(step_dur / 1000.0)
             except Exception:
                 self.watchdog.record_error()
@@ -213,6 +222,15 @@ class RemoteAutonomousDriver:
                 self.grid_map.update_odometry(
                     speed=turn_spd, steer_angle_deg=turn_steer, duration_ms=turn_dur
                 )
+            if self.visualizer:
+                canvas = self.visualizer.render(
+                    camera_frame_bgr=None,
+                    speed=turn_spd,
+                    steer_angle=turn_steer,
+                    status_text="HAZARD ESCAPE TURN",
+                    status_color=(0, 215, 255),
+                )
+                self.visualizer.show(canvas, wait_ms=1)
             time.sleep(turn_dur / 1000.0)
             self.client.stop_sync()
             self.client.steer_sync(0)
@@ -278,6 +296,15 @@ class RemoteAutonomousDriver:
                     )
                     if self.grid_map:
                         self.grid_map.update_odometry(spd, steer, dur)
+                if self.visualizer:
+                    canvas = self.visualizer.render(
+                        camera_frame_bgr=None,
+                        speed=spd,
+                        steer_angle=steer,
+                        status_text="UNSTUCK WIGGLE ACTION",
+                        status_color=(0, 215, 255),
+                    )
+                    self.visualizer.show(canvas, wait_ms=1)
                 time.sleep(dur / 1000.0)
             except Exception:
                 break
@@ -345,9 +372,15 @@ class RemoteAutonomousDriver:
         last_steer_angle = 0
         obstacle_encounter_count = 0
         step_counter = 0
+        last_loop_time = time.time()
 
         try:
             while True:
+                now = time.time()
+                # 実際のループ経過時間 (10ms〜200msの範囲に制限)
+                loop_dt_ms = max(10, min(200, int((now - last_loop_time) * 1000)))
+                last_loop_time = now
+
                 step_counter += 1
                 status_badge = "NORMAL DRIVING"
                 badge_color = (0, 220, 0)
@@ -554,18 +587,20 @@ class RemoteAutonomousDriver:
                     speed=dynamic_speed,
                 )
 
-                # Phase 3.4: 安全走行軌跡に記録
+                # Phase 3.4: 安全走行軌跡に記録 (実経過時間を記録)
                 self.trajectory_tracker.record(
                     speed=dynamic_speed,
                     steer_angle=steer_angle,
-                    duration_ms=400,
-                    timestamp=time.time(),
+                    duration_ms=loop_dt_ms,
+                    timestamp=now,
                 )
 
-                # Phase 3.5: オドメトリ更新 (50ms分の移動を積算)
+                # Phase 3.5: オドメトリ更新 (実経過時間の移動量を積算)
                 if self.grid_map:
                     self.grid_map.update_odometry(
-                        speed=dynamic_speed, steer_angle_deg=steer_angle, duration_ms=50
+                        speed=dynamic_speed,
+                        steer_angle_deg=steer_angle,
+                        duration_ms=loop_dt_ms,
                     )
 
                 try:
