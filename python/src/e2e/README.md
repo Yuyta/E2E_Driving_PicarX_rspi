@@ -193,8 +193,11 @@ v001           | 15     | 32    | 0.0946    | 0.2586     | ±9.1°      | PTH+ON
 
 ### 2. 実行コマンド (PCのPowerShell)
 ```powershell
-# 通常起動 (多重安全層: 前方停止 + 段差ガード + 動的カーブ減速 + 通信ウォッチドッグ有効)
+# 通常起動 (2D動的オキュパンシーグリッド地図 ＋ リアルタイムGUIダッシュボード起動)
 uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --speed 35 --min_speed 20
+
+# GUIウィンドウを表示せずヘッドレスで走行する場合
+uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --no_gui
 
 # カーブ旋回時・障害物接近時の減速チューニング (最低速度を25、減速開始距離を50cmに変更)
 uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --speed 40 --min_speed 25 --slowdown_dist 50.0
@@ -222,6 +225,9 @@ uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --stuc
 - `--stuck_threshold` : スタック判定の視覚変化量閾値（デフォルト: `4.0`）
 - `--stuck_frames` : スタック確定までの連続フレーム数（デフォルト: `15` = 約0.8秒〜1秒）
 - `--disable_stuck` : スタック検知・自動脱出ガードを無効化するフラグ
+- `--no_gui` : 2Dマップウィンドウを表示せずヘッドレスで実行するフラグ
+- `--grid_size` : グリッドマップのセル数（デフォルト: `200` = 10m x 10m）
+- `--cell_size` : 1セルの解像度（メートル、デフォルト: `0.05` = 5cm）
 - `--watchdog_timeout` : 通信監視タイムアウト秒数（デフォルト: `0.6` 秒）
 - `--max_errors` : 通信停止とみなす連続エラー許容回数（デフォルト: `3` 回）
 
@@ -234,6 +240,10 @@ uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --stuc
   - Wi-Fi通信断やRust APIサーバーの応答遅延（0.6秒以上）を常時監視。通信途絶時に自動で車両を即時緊急停止し、暴走を防止。通信復帰時は自動再開。
 - **Phase 3.4 前方行き止まり自動脱出 (Dead-End Escape)**:
   - 壁や家具の前で2回連続で安全停止した場合、同様に通ってきたルートを逆走して後退・旋回し、自力で脱出。
+- **Phase 3.5 動的オキュパンシーグリッド & リアルタイムUI (Dynamic Mapping & HUD)**:
+  - 走行軌跡と前方超音波距離から 2D 確率格子地図（Occupancy Grid）を構築。自車位置、走ったルート、壁・家具の位置をリアルタイムにPC画面へ描画。
+  - 時間経過による「忘却機能（Decay）」を備え、家具の配置変更やドアの開閉にも自動適応。
+  - キー操作: `[C]` で地図クリア、`[S]` で現在の地図画像（`data/maps/map_xxx.png`）を保存、`[Q]` で安全停止して終了。
 - **Phase 3.6 スタック検知 & 自動脱出ビヘイビア (Stuck & Wiggle Recovery)**:
   - 車輪が空転したりラグや家具の脚に引っかかって「前進しているはずなのに景色が動いていない」状態をカメラ画像の変化量から総合検知。
   - バック（直前軌跡巻き戻し） ＋ 左右の車体振り（Wiggle） ＋ 迂回前進の複合動作を自動実行し、引っかかりを振りほどいて自力脱出。

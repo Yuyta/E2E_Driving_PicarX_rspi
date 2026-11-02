@@ -3,11 +3,12 @@ Autonomous Driving Script using ONNX Runtime for PiCar-X (Plan A: Remote Mode)
 PC上でONNXモデルを実行し、Raspberry Pi (Rust APIサーバー) を介して
 家庭内フリースペース自律走行を行うスクリプト。
 Phase 2.1: Disengagement Logger (直前3秒間の自動タグ付け & 介入記録)
-Phase 3: ハイブリッド安全系 & 空間マッピング基盤 (Safety Layer)
+Phase 3: ハイブリッド安全系 & 空間マッピング基盤 (Safety Layer & Spatial Intelligence)
   - 3.1: Cliff Detection (底面グレースケールによる段差・階段落下防止)
   - 3.2: Dynamic Speed Limiter (急旋回・障害物接近時の自動車速制御)
   - 3.3: Communication Watchdog (Wi-Fi通信断・ハートビート監視・タイムアウト停止)
   - 3.4: Breadcrumb Safety (直前走行軌跡の逆再生による十分な距離の安全後退・回避ターン)
+  - 3.5: Dynamic Occupancy Grid (2D確率格子地図構築 & PC画面リアルタイム可視化UI)
   - 3.6: Stuck Detector (カメラ視覚変化量による引っかかり・空転検知 & 複合脱出ビヘイビア)
 """
 
@@ -26,6 +27,8 @@ from src.picarx_client.client import PicarxClient
 
 try:
     from .dataset.disengagement_manager import DisengagementBuffer
+    from .mapping.occupancy_grid import OccupancyGridMap
+    from .mapping.visualizer import MapVisualizer
     from .safety.cliff_detector import CliffDetector
     from .safety.speed_limiter import SpeedLimiter
     from .safety.stuck_detector import StuckDetector
@@ -33,6 +36,8 @@ try:
     from .safety.watchdog import CommunicationWatchdog
 except ImportError:
     from src.e2e.dataset.disengagement_manager import DisengagementBuffer
+    from src.e2e.mapping.occupancy_grid import OccupancyGridMap
+    from src.e2e.mapping.visualizer import MapVisualizer
     from src.e2e.safety.cliff_detector import CliffDetector
     from src.e2e.safety.speed_limiter import SpeedLimiter
     from src.e2e.safety.stuck_detector import StuckDetector
@@ -57,6 +62,10 @@ class RemoteAutonomousDriver:
         stuck_motion_threshold=4.0,
         stuck_duration_frames=15,
         enable_stuck_detection=True,
+        enable_mapping=True,
+        grid_size=200,
+        cell_size_m=0.05,
+        decay_rate=0.001,
         log_dir="data/disengagements",
         buffer_frames=30,
     ):
@@ -68,6 +77,7 @@ class RemoteAutonomousDriver:
         self.enable_cliff = enable_cliff
         self.reverse_duration_ms = reverse_duration_ms
         self.enable_stuck_detection = enable_stuck_detection
+        self.enable_mapping = enable_mapping
 
         print(f"Loading ONNX Model from: {model_path}")
         self.session = ort.InferenceSession(model_path)
@@ -115,6 +125,18 @@ class RemoteAutonomousDriver:
             min_moving_speed=min_speed,
         )
 
+        # Phase 3.5: 動的オキュパンシーグリッド地図 & 可視化ダッシュボード
+        self.grid_map: Optional[OccupancyGridMap] = None
+        self.visualizer: Optional[MapVisualizer] = None
+        if self.enable_mapping:
+            self.grid_map = OccupancyGridMap(
+                grid_width=grid_size,
+                grid_height=grid_size,
+                cell_size_m=cell_size_m,
+                decay_rate=decay_rate,
+            )
+            self.visualizer = MapVisualizer(self.grid_map, display_scale=3)
+
     def preprocess(self, bgr_img):
         """BGR画像 -> (1, 3, 120, 160) の正規化Tensor"""
         resized = cv2.resize(bgr_img, (160, 120))
@@ -159,6 +181,11 @@ class RemoteAutonomousDriver:
                 self.client.move_sync(
                     DriveDirection.BACKWARD, speed=spd, duration_ms=step_dur
                 )
+                if self.grid_map:
+                    # 後退時は負の速度でオドメトリ更新
+                    self.grid_map.update_odometry(
+                        speed=-spd, steer_angle_deg=steer, duration_ms=step_dur
+                    )
                 time.sleep(step_dur / 1000.0)
             except Exception:
                 self.watchdog.record_error()
@@ -182,6 +209,10 @@ class RemoteAutonomousDriver:
             self.client.move_sync(
                 DriveDirection.FORWARD, speed=turn_spd, duration_ms=turn_dur
             )
+            if self.grid_map:
+                self.grid_map.update_odometry(
+                    speed=turn_spd, steer_angle_deg=turn_steer, duration_ms=turn_dur
+                )
             time.sleep(turn_dur / 1000.0)
             self.client.stop_sync()
             self.client.steer_sync(0)
@@ -239,10 +270,14 @@ class RemoteAutonomousDriver:
                     self.client.move_sync(
                         DriveDirection.BACKWARD, speed=spd, duration_ms=dur
                     )
+                    if self.grid_map:
+                        self.grid_map.update_odometry(-spd, steer, dur)
                 else:
                     self.client.move_sync(
                         DriveDirection.FORWARD, speed=spd, duration_ms=dur
                     )
+                    if self.grid_map:
+                        self.grid_map.update_odometry(spd, steer, dur)
                 time.sleep(dur / 1000.0)
             except Exception:
                 break
@@ -284,8 +319,15 @@ class RemoteAutonomousDriver:
             else "DISABLED"
         )
         print(f"Stuck Auto-Recovery Guard: {stuck_status}")
+        map_status = (
+            f"ACTIVE (Grid: {self.grid_map.width}x{self.grid_map.height}, "
+            f"Resolution: {self.grid_map.cell_size * 100:.0f}cm)"
+            if self.enable_mapping and self.grid_map
+            else "DISABLED"
+        )
+        print(f"Dynamic Occupancy Mapping UI: {map_status}")
         print("Disengagement Logging: ACTIVE (auto-records pre-event 3s)")
-        print("Press Ctrl+C to emergency stop.\n")
+        print("Press Ctrl+C or 'Q' in Map Window to emergency stop.\n")
 
         # 前進開始
         try:
@@ -302,15 +344,22 @@ class RemoteAutonomousDriver:
         last_steer_norm = 0.0
         last_steer_angle = 0
         obstacle_encounter_count = 0
+        step_counter = 0
 
         try:
             while True:
+                step_counter += 1
+                status_badge = "NORMAL DRIVING"
+                badge_color = (0, 220, 0)
+
                 # ----------------------------------------------------
                 # 1. 多重安全チェック (Phase 3 Safety Layer)
                 # ----------------------------------------------------
 
                 # 1-1. 通信ウォッチドッグ確認 (Phase 3.3 Watchdog)
                 if self.watchdog.should_stop:
+                    status_badge = "WATCHDOG TIMEOUT"
+                    badge_color = (0, 0, 220)
                     msg = (
                         f"\r[WATCHDOG STOP] Comm timeout or errors "
                         f"({self.watchdog.consecutive_errors})! STOPPING."
@@ -356,6 +405,8 @@ class RemoteAutonomousDriver:
                         gs = [999, 999, 999]
 
                     if self.cliff_detector.is_cliff(gs):
+                        status_badge = "CLIFF DROP-OFF DETECTED"
+                        badge_color = (0, 0, 255)
                         msg = f"\r[CLIFF GUARD] Drop-off Detected! {gs} -> STOPPING & RETREATING"
                         print(msg, end="", flush=True)
                         try:
@@ -393,7 +444,15 @@ class RemoteAutonomousDriver:
                     self.watchdog.record_error()
                     distance = 999.0
 
+                # 障害物距離をマップに反映
+                if self.grid_map:
+                    self.grid_map.update_sensor_ultrasonic(distance)
+                    if step_counter % 5 == 0:
+                        self.grid_map.decay()
+
                 if 0 < distance < self.safe_distance:
+                    status_badge = "OBSTACLE STOP"
+                    badge_color = (0, 140, 255)
                     obstacle_encounter_count += 1
                     msg = f"\r[SAFETY GUARD] Obstacle Close: {distance:.1f}cm! STOPPING."
                     print(msg, end="", flush=True)
@@ -459,6 +518,8 @@ class RemoteAutonomousDriver:
                     if self.stuck_detector.update(
                         frame, motor_speed=self.speed_limiter.min_speed
                     ):
+                        status_badge = "UNSTUCK ACTION"
+                        badge_color = (0, 215, 255)
                         self.execute_unstuck()
                         continue
 
@@ -501,6 +562,12 @@ class RemoteAutonomousDriver:
                     timestamp=time.time(),
                 )
 
+                # Phase 3.5: オドメトリ更新 (50ms分の移動を積算)
+                if self.grid_map:
+                    self.grid_map.update_odometry(
+                        speed=dynamic_speed, steer_angle_deg=steer_angle, duration_ms=50
+                    )
+
                 try:
                     self.client.steer_sync(steer_angle)
                     self.client.move_sync(
@@ -509,6 +576,24 @@ class RemoteAutonomousDriver:
                     self.watchdog.heartbeat()
                 except Exception:
                     self.watchdog.record_error()
+
+                # ----------------------------------------------------
+                # 7. Phase 3.5: マッピングUI リアルタイム描画
+                # ----------------------------------------------------
+                if self.visualizer:
+                    canvas = self.visualizer.render(
+                        camera_frame_bgr=last_frame_bgr,
+                        speed=dynamic_speed,
+                        steer_angle=steer_angle,
+                        ultrasonic_dist=distance,
+                        motion_value=self.stuck_detector.last_motion_value,
+                        status_text=status_badge,
+                        status_color=badge_color,
+                    )
+                    key = self.visualizer.show(canvas, wait_ms=1)
+                    if key == ord("q") or key == ord("Q"):
+                        print("\n[STOP] User pressed 'Q' in Map Window.")
+                        break
 
                 motion_val = self.stuck_detector.last_motion_value
                 status = (
@@ -529,6 +614,8 @@ class RemoteAutonomousDriver:
             if saved_path:
                 print(f"[DISENGAGEMENT LOGGED] Pre-event frames saved to: {saved_path}")
         finally:
+            if self.visualizer:
+                self.visualizer.close()
             try:
                 self.client.steer_sync(0)
                 self.client.stop_sync()
@@ -598,6 +685,23 @@ def main():
         help="Disable visual stuck detection and auto-recovery",
     )
     parser.add_argument(
+        "--no_gui",
+        action="store_true",
+        help="Disable real-time 2D map visualizer window (headless mode)",
+    )
+    parser.add_argument(
+        "--grid_size",
+        type=int,
+        default=200,
+        help="Map grid dimensions in cells (default: 200 = 10m x 10m)",
+    )
+    parser.add_argument(
+        "--cell_size",
+        type=float,
+        default=0.05,
+        help="Map cell resolution in meters (default: 0.05 = 5cm)",
+    )
+    parser.add_argument(
         "--watchdog_timeout",
         type=float,
         default=0.6,
@@ -638,6 +742,9 @@ def main():
         stuck_motion_threshold=args.stuck_threshold,
         stuck_duration_frames=args.stuck_frames,
         enable_stuck_detection=not args.disable_stuck,
+        enable_mapping=not args.no_gui,
+        grid_size=args.grid_size,
+        cell_size_m=args.cell_size,
         log_dir=args.log_dir,
         buffer_frames=args.buffer_frames,
     )
