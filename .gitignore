@@ -1,0 +1,7 @@
+# Secrets
+.env
+.env.*
+
+# Captured images and driving data (may show the inside of the home)
+/data/
+/python/data/
