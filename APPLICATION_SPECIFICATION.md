@@ -100,7 +100,7 @@ flowchart TD
 | API サーバー（既定） | `./picar-x-rust` | Python GUI と E2E が接続する。Python 側の LLM を使用 |
 | 旧 Rust GUI | `./picar-x-rust --gui` | Pi 上の GUI。Rust 内の LLM クライアント、会話メモリ（§13）、押して話す録音を使用 |
 
-ハードウェアの初期化に失敗すると、API サーバーは警告を出してモックで起動する。この場合、走行 API は実機を動かさずに成功を返す。
+ハードウェアの初期化に失敗すると、API サーバーはエラーで終了する。開発用にモックで起動する場合は `PICARX_ALLOW_MOCK=1` を明示する。
 
 ## 3. GUI仕様
 
@@ -235,12 +235,12 @@ GUIから以下の操作を実行できる。
 | 左操舵 | `POST /api/drive/steer` | -30度 |
 | 右操舵 | `POST /api/drive/steer` | 30度 |
 | 中央復帰 | `POST /api/drive/steer` | 0度 |
-| 緊急停止 | `POST /api/drive/stop` | 即時停止 |
+| 緊急停止 | `POST /api/drive/emergency_stop` | 即時停止。解除するまで走行を拒否 |
+| 緊急停止の解除 | `POST /api/drive/emergency_stop/reset` | 車両は動かさない |
 
 前進時はRust側の安全ガードが、命令の受信時に超音波距離を確認する。危険距離の場合、前進命令を拒否する。走行中の監視は行わない。
 
-> [!WARNING]
-> GUI の非同期処理は UI スレッドで実行されるため、LLM の応答待ちなどの間は緊急停止ボタンを含む操作が反応しない。また、緊急停止の後でも次の前進命令で走行できる。
+通信は背景スレッドのイベントループで実行するので、LLM の応答待ち中も GUI は操作できる。緊急停止はこのループとも別の専用スレッドから送信する。
 
 ## 7. Raspberry Pi API仕様
 
@@ -248,16 +248,18 @@ GUIから以下の操作を実行できる。
 
 | Method | Endpoint | 機能 |
 |---|---|---|
-| POST | `/api/drive/move` | 前進・後退・停止 |
+| POST | `/api/drive/move` | 前進・後退・停止。`speed` は 0〜100、`duration_ms` は 50〜5000（範囲外は 400）。緊急停止中の前進・後退は 409 |
 | POST | `/api/drive/steer` | ステアリング角度変更 |
-| POST | `/api/drive/stop` | 緊急停止 |
+| POST | `/api/drive/stop` | 通常停止。以後の走行は拒否しない |
+| POST | `/api/drive/emergency_stop` | 緊急停止。解除するまで走行を拒否する |
+| POST | `/api/drive/emergency_stop/reset` | 緊急停止の解除 |
 | GET | `/api/sensor/ultrasonic` | 超音波距離取得 |
 | GET | `/api/sensor/grayscale` | グレースケール取得 |
 | POST | `/api/audio/speak` | TTS生成・スピーカー再生 |
 | GET | `/api/audio/listen` | **スタブ**。常に固定文字列を返す |
 | GET | `/api/camera/snapshot` | JPEG Base64画像取得（320×240 固定。クライアントの `width` と `quality` は無視される） |
 
-全エンドポイントが認証なしで、全インターフェースで待ち受ける。CORS も全許可である。電池の値は内部で取得しているが、API では公開していない。
+全エンドポイントで `Authorization: Bearer <トークン>` が必須で、不正な場合は 401 を返す。CORS は許可しない。通信は暗号化していないので、信頼できる LAN 内でのみ使用する。電池の値は内部で取得しているが、API では公開していない。
 
 ## 8. TTS仕様
 
@@ -370,9 +372,24 @@ Python側の主な環境変数:
 |---|---|---|
 | `GEMINI_API_KEY` | Gemini使用時必須 | 空文字 |
 | `ROBOT_BASE_URL` | 任意 | `http://raspberrypi.local:8080` |
+| `ROBOT_API_TOKEN` | 必須 | 空文字。Pi 側の `PICARX_API_TOKEN` と同じ値 |
 | `OLLAMA_BASE_URL` | Ollama使用時 | `http://localhost:11434` |
 
 PC側のHTTPタイムアウトは5秒。
+
+Raspberry Pi側の環境変数（実行時のカレントディレクトリの `.env` からも読み込む）:
+
+| 変数 | 必須 | 内容 |
+|---|---|---|
+| `PICARX_API_TOKEN` | 必須 | API トークン。未設定ならサーバーは起動しない |
+| `PICARX_ALLOW_MOCK` | 任意 | `1` の時のみ、ハード初期化失敗時にモックで起動する |
+| `PORT` | 任意 | 待受ポート。既定は `8080` |
+
+トークンは次のように生成し、PC の `python/.env` と Pi の `.env` の両方に設定する。
+
+```powershell
+uv run python -c "import secrets; print(secrets.token_urlsafe(32))"
+```
 
 `.env` は git に追加しない（`.gitignore` で除外）。
 
@@ -421,8 +438,9 @@ uv run python -m src.gui.app
 ### 10.3 接続確認
 
 ```bash
-curl http://127.0.0.1:8080/api/sensor/ultrasonic
+curl -H "Authorization: Bearer $PICARX_API_TOKEN" http://127.0.0.1:8080/api/sensor/ultrasonic
 curl -X POST http://127.0.0.1:8080/api/audio/speak \
+  -H "Authorization: Bearer $PICARX_API_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{"text":"こんにちは"}'
 ```

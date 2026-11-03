@@ -200,6 +200,10 @@ class E2ECollectorWindow(QMainWindow):
         stop_btn.clicked.connect(self._emergency_stop)
         right_layout.addWidget(stop_btn)
 
+        reset_btn = QPushButton("Reset Emergency Stop")
+        reset_btn.clicked.connect(self._reset_emergency_stop)
+        right_layout.addWidget(reset_btn)
+
         main_layout.addLayout(right_layout, stretch=2)
 
     def _on_speed_changed(self, val):
@@ -223,8 +227,17 @@ class E2ECollectorWindow(QMainWindow):
         self.current_steering = 0
         self.lbl_speed.setText("0")
         self.lbl_steer.setText("0° (0.00)")
-        self.client.stop_sync()
-        self.client.steer_sync(0)
+        try:
+            self.client.emergency_stop_sync()
+            self.client.steer_sync(0)
+        except Exception as exc:
+            self.lbl_dist.setText(f"E-STOP FAILED: {exc}")
+
+    def _reset_emergency_stop(self):
+        try:
+            self.client.reset_emergency_stop_sync()
+        except Exception as exc:
+            self.lbl_dist.setText(f"E-STOP RESET FAILED: {exc}")
 
     @Slot(bytes, float)
     def _on_frame_received(self, img_bytes: bytes, distance: float):

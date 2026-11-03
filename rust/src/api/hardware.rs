@@ -26,29 +26,26 @@ impl PiCarHardware {
 
 impl RobotHardware for PiCarHardware {
     fn drive(&self, direction: DriveDirection, speed: i32, duration_ms: u64) -> Result<(), String> {
-        let px = Arc::clone(&self.px);
-        thread::spawn(move || {
-            let mut car = match px.lock() {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("Failed to lock car: {}", e);
-                    return;
-                }
-            };
+        // モーターへの指令は呼び出し中に完了させる。別スレッドで遅れて走り出すと、
+        // 直後の緊急停止を追い越してしまうため。
+        {
+            let mut car = self.px.lock().map_err(|e| e.to_string())?;
             match direction {
                 DriveDirection::Forward => car.forward(speed),
                 DriveDirection::Backward => car.backward(speed),
                 DriveDirection::Stop => car.stop(),
             }
-            drop(car);
+        }
 
-            if duration_ms > 0 && direction != DriveDirection::Stop {
+        if duration_ms > 0 && direction != DriveDirection::Stop {
+            let px = Arc::clone(&self.px);
+            thread::spawn(move || {
                 thread::sleep(Duration::from_millis(duration_ms));
                 if let Ok(mut car) = px.lock() {
                     car.stop();
                 }
-            }
-        });
+            });
+        }
 
         Ok(())
     }

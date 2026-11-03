@@ -1,9 +1,10 @@
 import asyncio
 import base64
 import sys
+import threading
 
 from langchain_core.messages import AIMessage, HumanMessage
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -21,12 +22,16 @@ from PySide6.QtWidgets import (
 )
 
 from src.config import ModelPreset, settings
+from src.gui.async_runner import AsyncRunner
 from src.models import DriveDirection
 from src.picarx_client.client import PicarxClient
 
 
 class PicarxMainWindow(QMainWindow):
     """PiCar-X ローカルPC管理GUI（デスクトップアプリ）"""
+
+    # 背景スレッドからUIスレッドへ処理を渡すためのシグナル
+    _ui_call = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -39,6 +44,10 @@ class PicarxMainWindow(QMainWindow):
         self._agent_model = None
         self._chat_messages = []
         self._camera_request_active = False
+        self._emergency_active = False
+
+        self._runner = AsyncRunner()
+        self._ui_call.connect(self._run_on_ui, Qt.QueuedConnection)
 
         self._init_ui()
         self._init_timer()
@@ -119,7 +128,10 @@ class PicarxMainWindow(QMainWindow):
         btn_stop.setStyleSheet(
             "background-color: #d9534f; color: white; font-weight: bold; padding: 10px;"
         )
-        btn_stop.clicked.connect(lambda: self._async_call(self.client.stop()))
+        btn_stop.clicked.connect(self._on_emergency_stop)
+
+        btn_reset = QPushButton("Reset Emergency Stop")
+        btn_reset.clicked.connect(self._on_emergency_reset)
 
         grid.addWidget(btn_forward, 0, 1)
         grid.addWidget(btn_left, 1, 0)
@@ -127,6 +139,7 @@ class PicarxMainWindow(QMainWindow):
         grid.addWidget(btn_right, 1, 2)
         grid.addWidget(btn_backward, 2, 1)
         grid.addWidget(btn_stop, 3, 0, 1, 3)
+        grid.addWidget(btn_reset, 4, 0, 1, 3)
         left_layout.addWidget(control_group)
 
         main_layout.addLayout(left_layout, 1)
@@ -190,17 +203,57 @@ class PicarxMainWindow(QMainWindow):
         async def task():
             try:
                 dist = await self.client.get_ultrasonic()
-                self.lbl_distance.setText(f"{dist:.1f} cm")
-                if dist < 15.0:
-                    self.lbl_safety.setText("ALERT: Obstacle Close!")
-                    self.lbl_safety.setStyleSheet("color: red; font-weight: bold;")
-                else:
-                    self.lbl_safety.setText("SAFE (Limiter Active)")
-                    self.lbl_safety.setStyleSheet("color: green; font-weight: bold;")
+                self._ui(lambda: self._show_distance(dist))
             except Exception:
-                self.lbl_distance.setText("Disconnected")
+                self._ui(lambda: self.lbl_distance.setText("Disconnected"))
 
         self._async_call(task())
+
+    def _show_distance(self, dist: float) -> None:
+        self.lbl_distance.setText(f"{dist:.1f} cm")
+        if self._emergency_active:
+            return
+        if dist < 15.0:
+            self.lbl_safety.setText("ALERT: Obstacle Close!")
+            self.lbl_safety.setStyleSheet("color: red; font-weight: bold;")
+        else:
+            self.lbl_safety.setText("SAFE (Limiter Active)")
+            self.lbl_safety.setStyleSheet("color: green; font-weight: bold;")
+
+    def _on_emergency_stop(self):
+        # LLMの処理や共有イベントループの状態に左右されないよう、専用スレッドで送信する
+        threading.Thread(target=self._send_emergency_stop, daemon=True).start()
+
+    def _send_emergency_stop(self):
+        try:
+            self.client.emergency_stop_sync()
+        except Exception as exc:
+            error = exc
+            self._ui(lambda: self._append_chat(f"<b>[Error]</b> 緊急停止に失敗しました: {error}"))
+        else:
+            self._ui(self._show_emergency_active)
+
+    def _show_emergency_active(self):
+        self._emergency_active = True
+        self.lbl_safety.setText("EMERGENCY STOP (Reset Required)")
+        self.lbl_safety.setStyleSheet("color: red; font-weight: bold;")
+
+    def _on_emergency_reset(self):
+        async def task():
+            try:
+                await self.client.reset_emergency_stop()
+            except Exception as exc:
+                error = exc
+                self._ui(lambda: self._append_chat(f"<b>[Error]</b> 解除に失敗しました: {error}"))
+            else:
+                self._ui(self._show_emergency_cleared)
+
+        self._async_call(task())
+
+    def _show_emergency_cleared(self):
+        self._emergency_active = False
+        self.lbl_safety.setText("SAFE (Limiter Active)")
+        self.lbl_safety.setStyleSheet("color: green; font-weight: bold;")
 
     def _on_snapshot_clicked(self):
         if self._camera_request_active:
@@ -213,9 +266,10 @@ class PicarxMainWindow(QMainWindow):
                 image = QImage.fromData(base64.b64decode(data.image_base64), "JPEG")
                 if image.isNull():
                     raise ValueError("Pi側から有効なJPEG画像が返されませんでした")
-                self.camera_label.setPixmap(QPixmap.fromImage(image))
+                self._ui(lambda: self.camera_label.setPixmap(QPixmap.fromImage(image)))
             except Exception as e:
-                self.camera_label.setText(f"Camera Error: {e}")
+                message = f"Camera Error: {e}"
+                self._ui(lambda: self.camera_label.setText(message))
             finally:
                 self._camera_request_active = False
 
@@ -235,7 +289,7 @@ class PicarxMainWindow(QMainWindow):
                 if speech_text is not None:
                     await self.client.speak(speech_text)
                     self._remove_pending_user_message(text)
-                    self.chat_history.append("<b>Assistant:</b> 発話しました。")
+                    self._append_chat("<b>Assistant:</b> 発話しました。")
                     return
 
                 from src.agents.graph import create_agent_graph
@@ -257,17 +311,17 @@ class PicarxMainWindow(QMainWindow):
                 )
                 response = self._extract_response_text(response)
                 self._chat_messages.extend(messages[len(self._chat_messages) :])
-                self.chat_history.append(f"<b>Assistant:</b> {response}")
+                self._append_chat(f"<b>Assistant:</b> {response}")
                 try:
                     await self.client.speak(response)
                 except Exception as tts_error:
-                    self.chat_history.append(f"<b>[TTS Error]</b> {tts_error}")
+                    self._append_chat(f"<b>[TTS Error]</b> {tts_error}")
             except asyncio.TimeoutError:
                 self._remove_pending_user_message(text)
-                self.chat_history.append("<b>[Error]</b> AI応答がタイムアウトしました。")
+                self._append_chat("<b>[Error]</b> AI応答がタイムアウトしました。")
             except Exception as exc:
                 self._remove_pending_user_message(text)
-                self.chat_history.append(f"<b>[Error]</b> {exc}")
+                self._append_chat(f"<b>[Error]</b> {exc}")
 
         self._async_call(task())
 
@@ -290,7 +344,7 @@ class PicarxMainWindow(QMainWindow):
             if not self._is_transient_model_error(error):
                 raise
 
-            self.chat_history.append("<i>[System] Geminiが混雑しています。再試行しています...</i>")
+            self._append_chat("<i>[System] Geminiが混雑しています。再試行しています...</i>")
             await asyncio.sleep(3.0)
             try:
                 return await asyncio.wait_for(
@@ -300,9 +354,7 @@ class PicarxMainWindow(QMainWindow):
                 fallback = ModelPreset.GEMINI_FLASH_LITE
                 if self.current_model == fallback:
                     raise
-                self.chat_history.append(
-                    "<i>[System] Flash-Liteへ切り替えて再試行しています...</i>"
-                )
+                self._append_chat("<i>[System] Flash-Liteへ切り替えて再試行しています...</i>")
                 self._agent_graph = self._create_agent_graph(fallback)
                 return await asyncio.wait_for(
                     self._agent_graph.ainvoke(state, config=config), timeout=60.0
@@ -355,13 +407,25 @@ class PicarxMainWindow(QMainWindow):
         return str(content)
 
     def _async_call(self, coro):
-        """非同期コルーチンをイベントループで実行"""
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            asyncio.run(coro)
-        else:
-            loop.create_task(coro)
+        """コルーチンを背景のイベントループで実行し、すぐに戻る"""
+        return self._runner.submit(coro)
+
+    def _ui(self, callback) -> None:
+        """背景スレッドからUIスレッドで処理を実行する"""
+        self._ui_call.emit(callback)
+
+    @staticmethod
+    def _run_on_ui(callback) -> None:
+        callback()
+
+    def _append_chat(self, html: str) -> None:
+        self._ui(lambda: self.chat_history.append(html))
+
+    def closeEvent(self, event):
+        self.poll_timer.stop()
+        self.camera_timer.stop()
+        self._runner.close()
+        super().closeEvent(event)
 
 
 def main():

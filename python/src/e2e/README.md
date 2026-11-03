@@ -25,6 +25,8 @@ make deploy RPI_HOST=pi@<ラズパイIP> RPI_DIR=/home/pi/
 ./picar-x-rust
 ```
 
+サーバーの起動には API トークンが必要です。同じ値を Pi の `.env`（実行ファイルと同じディレクトリ）に `PICARX_API_TOKEN=<値>`、PC の `python/.env` に `ROBOT_API_TOKEN=<値>` として設定してください。値の生成方法は [APPLICATION_SPECIFICATION.md §9](../../../APPLICATION_SPECIFICATION.md) を参照してください。
+
 ---
 
 ## 全体アーキテクチャ

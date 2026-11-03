@@ -32,6 +32,7 @@ class Settings(BaseModel):
     robot_base_url: str = Field(
         default_factory=lambda: os.getenv("ROBOT_BASE_URL", "http://raspberrypi.local:8080")
     )
+    robot_api_token: str = Field(default_factory=lambda: os.getenv("ROBOT_API_TOKEN", ""))
     request_timeout_sec: float = Field(default=5.0)
 
     # トークン節約設定
