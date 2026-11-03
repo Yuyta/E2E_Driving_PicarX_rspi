@@ -12,15 +12,18 @@
 - カメラ画像の自動取得とGUI表示
 - Raspberry Pi側のローカルTTSによる音声再生
 
+音声入力、永続的な会話記憶（Python GUI）、電池などの状態を踏まえた会話は未実装である。目標の仕様は [§14](#14-会話-agent-の目標仕様未実装) に記載する。
+
 > [!NOTE]
 > - プロジェクト全体の開発ロードマップ・進捗状況は [ROADMAP.md](ROADMAP.md) を参照してください。
 > - End-to-End (E2E) 自律走行および MLOps パイプラインの仕様については、[E2E_SPECIFICATION.md](E2E_SPECIFICATION.md) を参照してください。
+> - 未修正の課題は [REVIEW_FINDINGS.md](REVIEW_FINDINGS.md) を参照してください。
 
 ## 2. システム構成
 
 ```mermaid
 flowchart TD
-    subgraph PC["ローカルPC (Python 3.13 / uv)"]
+    subgraph PC["ローカルPC (Python 3.11以上 / uv)"]
         UI["GUI (PySide6 / app.py)"]
         Graph["LangGraph Agent (graph.py)"]
         Tools["Tools<br>(Drive / Sensor / Camera / Voice)"]
@@ -35,9 +38,8 @@ flowchart TD
 
     subgraph Pi["Raspberry Pi (Rust / Axum Server :8080)"]
         API["Axum HTTP API (/api/*)"]
-        Safety["安全ガード<br>(超音波リミッター / 前進拒否)"]
+        Safety["安全ガード<br>(発進時の超音波チェック / 前進拒否)"]
         TTS["TTS モジュール (tts.rs)<br>(Open JTalk / eSpeak / Piper Plus)"]
-        Memory[("会話メモリ DB<br>picarx_memory.db (SQLite)")]
         Cam["カメラ (rpicam-still)"]
         HW["PiCar-X 実機ハードウェア<br>(モーター / サーボ / センサー / スピーカー)"]
     end
@@ -57,12 +59,11 @@ flowchart TD
     Safety --> HW
     API --> TTS --> HW
     API --> Cam
-    API -. "永続化" .-> Memory
 ```
 
 ### 2.1 PC側
 
-- 実装言語: Python 3.11以上
+- 実装言語: Python 3.11以上（開発環境の固定は `.python-version` の 3.13）
 - GUI: PySide6
 - LLM制御: LangChain / LangGraph
 - HTTPクライアント: HTTPX
@@ -91,6 +92,15 @@ flowchart TD
 - `rust/src/api/handlers.rs`
 - `rust/src/api/hardware.rs`
 - `rust/src/tts.rs`
+
+動作モードは次の2つ。
+
+| モード | 起動 | 内容 |
+|---|---|---|
+| API サーバー（既定） | `./picar-x-rust` | Python GUI と E2E が接続する。Python 側の LLM を使用 |
+| 旧 Rust GUI | `./picar-x-rust --gui` | Pi 上の GUI。Rust 内の LLM クライアント、会話メモリ（§13）、押して話す録音を使用 |
+
+ハードウェアの初期化に失敗すると、API サーバーは警告を出してモックで起動する。この場合、走行 API は実機を動かさずに成功を返す。
 
 ## 3. GUI仕様
 
@@ -126,6 +136,8 @@ flowchart TD
 
 モデル変更時はLangGraphを再生成する。
 
+既定モデルは Gemini で、チャット内容は Gemini API へ送信される（意図した利用。ROADMAP の D-3）。
+
 Gemini APIが503 `UNAVAILABLE` となった場合は、以下の順で復旧を試みる。
 
 1. LangChainの内部再試行
@@ -144,6 +156,8 @@ Gemini APIが503 `UNAVAILABLE` となった場合は、以下の順で復旧を�
 4. 最新のAIメッセージからテキストを抽出
 5. GUIにAssistant返信を表示
 6. Assistant返信をPi側TTS APIへ送信
+
+会話履歴はプロセス内のリストのみで、アプリを終了すると消える。
 
 Gemini 3.xの応答がテキストブロック配列の場合は、`type == "text"` の要素だけを抽出して表示する。署名やメタデータは表示しない。
 
@@ -223,7 +237,10 @@ GUIから以下の操作を実行できる。
 | 中央復帰 | `POST /api/drive/steer` | 0度 |
 | 緊急停止 | `POST /api/drive/stop` | 即時停止 |
 
-前進時はRust側の安全ガードが超音波距離を確認する。危険距離の場合、前進命令を拒否する。
+前進時はRust側の安全ガードが、命令の受信時に超音波距離を確認する。危険距離の場合、前進命令を拒否する。走行中の監視は行わない。
+
+> [!WARNING]
+> GUI の非同期処理は UI スレッドで実行されるため、LLM の応答待ちなどの間は緊急停止ボタンを含む操作が反応しない。また、緊急停止の後でも次の前進命令で走行できる。
 
 ## 7. Raspberry Pi API仕様
 
@@ -237,8 +254,10 @@ GUIから以下の操作を実行できる。
 | GET | `/api/sensor/ultrasonic` | 超音波距離取得 |
 | GET | `/api/sensor/grayscale` | グレースケール取得 |
 | POST | `/api/audio/speak` | TTS生成・スピーカー再生 |
-| GET | `/api/audio/listen` | 音声認識結果取得 |
-| GET | `/api/camera/snapshot` | JPEG Base64画像取得 |
+| GET | `/api/audio/listen` | **スタブ**。常に固定文字列を返す |
+| GET | `/api/camera/snapshot` | JPEG Base64画像取得（320×240 固定。クライアントの `width` と `quality` は無視される） |
+
+全エンドポイントが認証なしで、全インターフェースで待ち受ける。CORS も全許可である。電池の値は内部で取得しているが、API では公開していない。
 
 ## 8. TTS仕様
 
@@ -261,7 +280,7 @@ PC GUI
   -> Rust detect_language()
   -> Rust generate_tts_file()
   -> open_jtalk または espeak-ng (Default エンジン固定)
-  -> PiCar-X の play_file()
+  -> PiCar-X の play_file()（再生キューへ追加し、完了を待たずに返る）
   -> スピーカー
 ```
 
@@ -273,7 +292,7 @@ LLM返答受信
     -> detect_language() で ja / en 判定
     -> generate_tts_file() で /tmp/picarx_tts_<nanoseconds>.wav 生成
        [Default]  : open_jtalk (ja) または espeak-ng (en)
-       [PiperPlus]: piper-plus --model tsukuyomi --noise-scale 0.5 (stdin経由)
+       [PiperPlus]: piper-plus --model <tsukuyomi.onnx> --text <本文> (§8.3)
     -> play_file() でブロッキング再生
     -> 一時ファイル削除
 ```
@@ -294,9 +313,10 @@ pub fn detect_language(text: &str) -> &'static str;
 
 pub fn generate_tts_file(text: &str, lang: &str, engine: TtsEngine)
     -> Result<PathBuf, Box<dyn Error + Send + Sync>>;
-// PiperPlus の場合: /usr/local/share/piper-plus/bin/piper-plus
-//   --model tsukuyomi --noise-scale 0.5 --output_file <path>
-//   テキストは stdin 経由で渡す
+// PiperPlus の場合: /usr/local/share/piper-plus/ 配下の実行ファイルを探索
+//   --model models/tsukuyomi.onnx --config models/config.json
+//   --text <本文> --language ja-en-zh-es-fr-pt --speaker 0
+//   --noise-scale 0.667 --length-scale 1.5 --output_file <path>
 // 一時ファイルパス: /tmp/picarx_tts_<nanoseconds>.wav
 ```
 
@@ -334,7 +354,7 @@ sudo curl -L -o config.json \
   https://huggingface.co/ayousanz/piper-plus-tsukuyomi-chan/resolve/main/config.json
 ```
 
-`--noise-scale 0.5` は WavLM discriminator で学習された高品質モデル向けの公式推奨設定。
+現行コードは `--noise-scale 0.667` と `--length-scale 1.5` を固定で渡す。旧版の本書はモデル向けの推奨値を `0.5` としていたが、現行値との整合は未確認である。
 
 ### 8.5 TTSエラー
 
@@ -354,6 +374,8 @@ Python側の主な環境変数:
 
 PC側のHTTPタイムアウトは5秒。
 
+`.env` は git に追加しない（`.gitignore` で除外）。
+
 ## 10. 起動・デプロイ手順
 
 ### 10.1 Raspberry Pi 側プログラムのビルド & デプロイ
@@ -366,8 +388,9 @@ PC側のHTTPタイムアウトは5秒。
 ```bash
 cd rust/build
 
-# お使いのラズパイのモデル (4b, zero2w, 3bplus, 5) を指定してビルド
-make build MODEL=4b
+# お使いのラズパイのモデル (3bplus, zero2w, 4b, 5) を指定してビルド
+# 基準機種は Pi 5（ROADMAP の D-1）。CI は現在 3bplus でビルドする（M1 で変更予定）
+make build MODEL=5
 ```
 ※ 初回のみ `make image` でビルド用Dockerイメージを作成してください。
 
@@ -406,7 +429,7 @@ curl -X POST http://127.0.0.1:8080/api/audio/speak \
 
 ## 11. テスト・品質保証
 
-Python CIでは以下を実行する。
+Python はローカルで以下を実行する。CI は未整備である（ROADMAP の M1 で追加）。
 
 ```bash
 uv run ruff format --check .
@@ -414,7 +437,7 @@ uv run ruff check .
 uv run pytest tests/ -v
 ```
 
-Rust CIでは以下を実行する。
+Rust は `.github/workflows/rust-ci.yml` で以下を実行する（Raspberry Pi 3B+ 向けのクロスビルドを含む）。
 
 ```bash
 cargo fmt --all -- --check
@@ -430,11 +453,19 @@ cargo nextest run --locked --release --profile ci
 - Gemini無料枠の429 `RESOURCE_EXHAUSTED` はアプリケーションでは解決できない。
 - Rust APIサーバーはPi上のカメラコマンド、TTSエンジン、PiCar-Xハードウェアに依存する。
 - TTSエンジン切り替えUIは旧Rust GUIには存在するが、Python GUIからは現在選択できない。
-- 将来的にはPi側にMJPEGまたはH.264ストリームAPIを追加し、Python GUIで動画ストリームを表示する。
+- 将来的にはPi側にカメラの常時配信を追加する（ROADMAP の M1）。
+- `/api/audio/listen` はスタブであり、音声入力は API から利用できない。
+- 発話を途中で止める API がない。
+- `take_snapshot` ツールは画像のメタデータのみを返すため、LLM は画像を見ていない。
+- Drive、Vision、Voice のサブエージェントノードはグラフに登録されているが、エッジがなく実行されない。実際には `router` ノードと `tools` ノードのみが動作する。
+- Agent は電池、現在地、走行状態、学習状況を参照できない。
 
-## 13. 会話メモリ機能 (フェーズ4: 長期記憶)
+## 13. 会話メモリ機能（旧 Rust GUI のみ）
 
-本機能は Gemini プロバイダーのみに適用。Ollama は単発リクエストのまま。
+> [!IMPORTANT]
+> 本機能が動作するのは **旧 Rust GUI（`--gui`）の Gemini プロバイダーのみ** である。Python GUI と API サーバーからは使用しない。Ollama は単発リクエストのまま。
+
+Brain 側への一本化を計画している（§14.4、ROADMAP の M2）。
 
 ### 13.1 概要
 
@@ -552,62 +583,67 @@ Memory and Personalization Rules:
 - アプリ起動ごとに新しい `conversation_id` を UUID で生成。
 - 長期記憶 (`memories` テーブル) は会話をまたいで永続化。
 
-## 14. 今後の開発予定（未着手・検討中）
+## 14. 会話 Agent の目標仕様（未実装）
 
 > [!NOTE]
-> 全体ロードマップ上の「Phase 5: Agent × E2E 統合」に対応する項目です。
-> 全体計画と進捗サマリーは [ROADMAP.md](ROADMAP.md) を参照してください。
-> 以下は方向性のみ定義済みで、詳細仕様は今後別途検討します。
+> 実施順序と完了条件は [ROADMAP.md](ROADMAP.md)、全体構成は [agentic_ai_architecture_policy.md](agentic_ai_architecture_policy.md) を参照する。
 
-### 14.1 Raspberry Pi へのローカルLLM配置
+### 14.1 目的
 
-**概要**: 現行の Gemini API 依存をなくし、Raspberry Pi 上でローカルLLMを動作させる。
+走行判断とは別の会話 Agent が、自分の状況、学習状況、会話の内容と履歴を総合して応答する。
 
-- **現行**: PC から Gemini API（クラウド）へリクエスト → レスポンスを Pi へ転送
-- **目標**: Pi 上でローカルLLMを直接実行し、ネットワーク不要・プライバシー保護・遅延ゼロ化
-- **Gemini API オプション維持**: ローカルLLM が主系、Gemini API はオプション（設定で切替可能）とする
-- **検討事項**:
-  - Pi 上で動作可能なモデルサイズ・量子化方式の選定（例: `qwen2.5:1.8b`, `llama3.2:1b` など）
-  - 推論エンジンの選定（例: Ollama on Pi / llama.cpp / candle）
-  - Pi のメモリ・CPU 制約でのレスポンス速度の許容ライン
+### 14.2 Agent が参照する情報
 
----
+| 情報 | 取得元 | 現状 | 計画 |
+|---|---|---|---|
+| 電池 | `/api/status` | Pi 内部で取得、API なし | M1 |
+| センサー、走行モード、安全イベント | `/api/status`, `/api/events` | センサーは個別 API のみ | M1 |
+| 周囲の様子 | カメラ画像（方式は評価後に確認） | LLM へ渡していない | M2 で評価 |
+| いま言われたこと | 音声認識 | 未実装 | M2（PC のマイク）、M6（車載） |
+| 過去の会話、人物の事実 | 記憶 DB | Python 側になし | M2 |
+| 今いる場所 | 場所グラフ | なし | M4 |
+| 使用中のモデル、介入率、上達度 | レジストリ、走行記録 | 実走の指標なし | M3、M5 |
 
-### 14.2 ローカルLLM の性能向上策
+### 14.3 応答の組み立て
 
-**概要**: モデルが小さいことによる性能低下を補い、Gemini API に近い品質を実現するための工夫。
+1. 発話を受け取り、すぐに短い相づちを返す
+2. 状態ストアから現在の状態を短いテキストにする
+3. 記憶を検索し、関連する事実と会話を取得する
+4. ペルソナ、状態、記憶、直近の会話を予算内で組み立てて LLM へ渡す
+5. 応答を文単位で音声合成して再生する
+6. 会話、抽出した事実、発生したイベントを記憶へ保存する
 
-- **検討事項**:
-  - プロンプトエンジニアリング（システムプロンプトの最適化、Few-shot 例の挿入）
-  - Function Calling / Structured Output 対応方式（モデルごとの JSON 生成能力差の吸収方法）
-  - RAG（Retrieval-Augmented Generation）によるコンテキスト補強
-  - モデル量子化レベル（Q4 / Q5 / Q8）とタスク精度のトレードオフ調査
-  - 応答フォーマットの簡略化（小モデル向けに JSON スキーマを最小化）
+現在の状態はツール呼び出しに頼らず毎ターン注入する。不明な値や古い値は「不明」と伝え、推測で答えない。
 
----
+### 14.4 記憶
 
-### 14.3 GUI の Agent × E2E 統合と連携
+- **保存先**: Brain 側の SQLite に一本化する。§13 のスキーマを出発点とする
+- **検索**: FTS5（日本語はトリグラムを想定、要検証）と新しさで検索する
+- **要約**: 夜間などの空き時間に行う
+- **人物の事実**: 出所と日時を持ち、ユーザーが確認と削除をできるようにする
 
-**概要**: 現在 **別々に存在する「Agentic AI 制御 GUI (Python)」と「E2E 自律走行」を統合**し、さらに Agent と E2E が協調動作するアーキテクチャを構築する。
+### 14.5 安全境界
 
-#### GUI 統合
+- LLM の出力は意図（`go_to`、`explore`、`return`、`look`、`stop`、`say`）に限定する
+- 速度や時間を LLM に直接指定させない
+- Body は意図を拒否でき、拒否の理由を Agent に返す
+- 「止まって」などの停止指示は LLM を介さずに即時処理する
 
-- **現行**:
-  - `python -m src.gui.app` — Agentic AI チャット GUI
-  - `uv run python -m src.e2e.gui_collector` — E2E データ収集 GUI
-  - `uv run python -m src.e2e.autonomous_driver` — E2E 自律走行（CLI）
-- **目標**: 上記を1つの統合 GUI から操作できるようにする（モード切替 or タブ構成）
+### 14.6 対話の進め方
 
-#### Agent × E2E 協調動作
+- 最初は停止して聞く方式か押して話す方式を使う（モーター音と自声への対策）
+- ロボットの発話中に話しかけられた場合は発話を止める
+- 脳へ接続できない時は、定型の応答で状況を伝える
 
-- **検討イメージ**:
-  - ONNX（E2E 推論） と ローカルLLM（または Gemini API）が連携して走行判断を行う
-  - E2E モデルは「瞬時の操舵反射」、LLM は「状況理解・指示解釈・上位計画」を担当する役割分担
-  - 例: LLM が「障害物を迂回して右の通路へ進め」と判断 → E2E モデルが低レイテンシで操舵実行
-- **検討事項**:
-  - どのレイヤーで両者が信号を交換するか（カメラ画像共有 / 操舵指令の優先度 / 安全ガードの管轄）
-  - 衝突・矛盾が発生した場合のフォールバック戦略
-  - データ収集フェーズと自律走行フェーズの GUI 上の状態遷移設計
+### 14.7 LLM
 
-> [!IMPORTANT]
-> §14.3 は E2E システム（[E2E_SPECIFICATION.md](E2E_SPECIFICATION.md) Phase 5）とも密接に関連する。
+- Gemini を既定とし、通信断やクォータ超過の時は PC のローカル LLM で応答する
+- PC は GPU なしの Core i7-1255U、メモリ 16GB。ローカルのモデルと量子化レベルは応答時間の実測で選ぶ
+- 小さなモデルに対応するため、応答形式は最小限にする
+- 応答を文単位で音声合成し、待ち時間を短く感じさせる
+
+### 14.8 プライバシー
+
+- 室内画像、音声、会話、記憶 DB は git に追加しない
+- 画像や音声など、新しい種類のデータをクラウドへ送る機能は、追加前に確認する（ROADMAP の D-3）
+- 車載マイクの装着前に API の認証を実装する

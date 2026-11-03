@@ -5,3 +5,31 @@
 # Captured images and driving data (may show the inside of the home)
 /data/
 /python/data/
+
+# Personal data: audio, video, images, conversation and memory databases, logs.
+# Anything that must be published (e.g. an article figure) needs `git add -f`
+# after checking that it contains nothing personal.
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.m4a
+*.mp4
+*.mov
+*.avi
+*.h264
+*.jpg
+*.jpeg
+*.png
+*.heic
+*.log
+
+# Local-only documents (articles and temporary build notes)
+/articles/
+/rust/build/error_result_temp.txt
