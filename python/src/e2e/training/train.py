@@ -14,12 +14,14 @@ from torch.utils.data import DataLoader, random_split
 try:
     from .dataset import DrivingDataset
     from .model import SmallDrivingCNN
+    from .onnx_utils import strip_export_debug_info
 except ImportError:
     from src.e2e.training.dataset import DrivingDataset
     from src.e2e.training.model import SmallDrivingCNN
+    from src.e2e.training.onnx_utils import strip_export_debug_info
 
 
-def train(data_dir, output_model_dir="models/v001", epochs=15, batch_size=32, lr=1e-3):
+def train(data_dir, output_model_dir, epochs=15, batch_size=32, lr=1e-3):
     output_dir = Path(output_model_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -108,6 +110,7 @@ def train(data_dir, output_model_dir="models/v001", epochs=15, batch_size=32, lr
         output_names=["steering"],
         dynamic_axes={"input": {0: "batch_size"}, "steering": {0: "batch_size"}},
     )
+    strip_export_debug_info(onnx_path)
     print(f"✓ ONNX model saved at: {onnx_path}")
 
     # メタデータ保存
@@ -137,7 +140,7 @@ if __name__ == "__main__":
         help="Path(s) to dataset (single session, parent folder like data/raw, or multiple paths)",
     )
     parser.add_argument(
-        "--output_dir", type=str, default="models/v001", help="Output directory for trained model"
+        "--output_dir", type=str, required=True, help="Output directory for trained model"
     )
     parser.add_argument("--epochs", type=int, default=15, help="Number of training epochs")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")

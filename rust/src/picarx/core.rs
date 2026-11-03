@@ -348,36 +348,34 @@ impl Picarx {
             }
         }
 
-        if !loaded {
-            if let Ok(home) = std::env::var("HOME") {
-                let user_path = format!("{}/.config/picar-x/picar-x.conf", home);
-                if let Ok(content) = std::fs::read_to_string(&user_path) {
-                    println!("✓ User calibration file found: {}", user_path);
-                    Self::parse_calibration_content(
-                        &content,
-                        &mut dir_offset,
-                        &mut pan_offset,
-                        &mut tilt_offset,
-                    );
-                }
+        if !loaded && let Ok(home) = std::env::var("HOME") {
+            let user_path = format!("{}/.config/picar-x/picar-x.conf", home);
+            if let Ok(content) = std::fs::read_to_string(&user_path) {
+                println!("✓ User calibration file found: {}", user_path);
+                Self::parse_calibration_content(
+                    &content,
+                    &mut dir_offset,
+                    &mut pan_offset,
+                    &mut tilt_offset,
+                );
             }
         }
 
         // 環境変数 (.env) からのオーバーライドに対応
-        if let Ok(val) = std::env::var("DIR_SERVO_OFFSET") {
-            if let Ok(num) = val.parse::<i32>() {
-                dir_offset = num;
-            }
+        if let Ok(val) = std::env::var("DIR_SERVO_OFFSET")
+            && let Ok(num) = val.parse::<i32>()
+        {
+            dir_offset = num;
         }
-        if let Ok(val) = std::env::var("CAM_PAN_OFFSET") {
-            if let Ok(num) = val.parse::<i32>() {
-                pan_offset = num;
-            }
+        if let Ok(val) = std::env::var("CAM_PAN_OFFSET")
+            && let Ok(num) = val.parse::<i32>()
+        {
+            pan_offset = num;
         }
-        if let Ok(val) = std::env::var("CAM_TILT_OFFSET") {
-            if let Ok(num) = val.parse::<i32>() {
-                tilt_offset = num;
-            }
+        if let Ok(val) = std::env::var("CAM_TILT_OFFSET")
+            && let Ok(num) = val.parse::<i32>()
+        {
+            tilt_offset = num;
         }
 
         println!(

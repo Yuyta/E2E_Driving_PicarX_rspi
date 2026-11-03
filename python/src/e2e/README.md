@@ -7,6 +7,28 @@
 
 ---
 
+## 前提条件: Raspberry Pi側の準備 (Rustサーバーのビルド & 転送)
+
+> [!IMPORTANT]
+> **Raspberry Pi 実機上でのコンパイルは非推奨**です。
+> Rustプログラムの変更時は、**ローカルPCのDocker上でクロスコンパイルし、`make deploy` でRaspberry Piへ送信**してください。
+
+```bash
+# ローカルPC (Docker環境) でクロスコンパイル
+cd rust/build
+make build MODEL=5      # 基準機種は Pi 5
+
+# Raspberry Pi へ実行バイナリを転送
+make deploy RPI_HOST=pi@<ラズパイIP> RPI_DIR=/home/pi/
+
+# Raspberry Pi 上で起動 (SSH接続先)
+./picar-x-rust
+```
+
+サーバーの起動には API トークンが必要です。同じ値を Pi の `.env`（実行ファイルと同じディレクトリ）に `PICARX_API_TOKEN=<値>`、PC の `python/.env` に `ROBOT_API_TOKEN=<値>` として設定してください。値の生成方法は [APPLICATION_SPECIFICATION.md §9](../../../APPLICATION_SPECIFICATION.md) を参照してください。
+
+---
+
 ## 全体アーキテクチャ
 
 ```text
@@ -21,8 +43,8 @@
 [ 3. オフライン評価 (PC) ]
     検証データに対するステアリング平均絶対誤差 (MAE, ±◯度) を算出
            ↓
-[ 4. 実機自動走行 (Raspberry Pi) ]
-    ONNX Runtimeによる自律操縦 + 超音波センサー安全ガード (Safety Layer)
+[ 4. 実機自動走行 (PC で推論し、Raspberry Pi へ指令) ]
+    ONNX Runtimeによる自律操縦 + 安全機能 (Safety Layer)
 ```
 
 ---
@@ -47,9 +69,9 @@ uv run python -m src.e2e.gui_collector
 | **`R`** | 録画切替 | **● 録画開始 / ⏸ 一時停止** をトグルします |
 
 ### 収集のコツ
-1. 車体をコースのスタート位置に置きます。
+1. 車体を走行させたい部屋の開けたスペースに置きます。
 2. **`R` キーを押して録画を開始**します（画面に「● Pause Recording」と表示され、フレーム数カウントが進みます）。
-3. コースの中央をキープするようにスムーズに1〜2周（1,000〜2,000フレーム程度）走らせます。
+3. 壁や家具を避けながらスムーズに室内を巡回走行（1,000〜2,000フレーム程度）させます。
 4. 走り終わったら **`R` キーで録画を停止**し、ウィンドウを閉じます。
 
 ### 保存されるデータ
@@ -73,7 +95,7 @@ uv run python -m src.e2e.training.train --data_dir data/raw --output_dir models/
 
 #### 特定のセッションのみを学習する場合
 ```powershell
-uv run python -m src.e2e.training.train --data_dir data/raw/<session_id> --output_dir models/v001 --epochs 15
+uv run python -m src.e2e.training.train --data_dir data/raw/<session_id> --output_dir models/<version> --epochs 15
 ```
 ※ 複数フォルダを指定したい場合は `--data_dir data/raw/session1 data/raw/session2` のようにスペース区切りで複数指定できます。
 
@@ -115,7 +137,7 @@ uv run python -m src.e2e.training.train --data_dir data/processed/clean_v1 --out
 
 ### 実行コマンド (PowerShell)
 ```powershell
-uv run python -m src.e2e.evaluation.evaluate --data_dir data/raw/<session_id> --model_path models/v001/best_model.pth
+uv run python -m src.e2e.evaluation.evaluate --data_dir data/raw/<session_id> --model_path models/<version>/best_model.pth
 ```
 
 ### 結果表示例
@@ -126,7 +148,7 @@ Steering MAE  : 0.0821 (Normalized -1.0 to 1.0)
 Steering MAE  : ±2.87° (Degrees)
 --------------------------
 ```
-※ 平均誤差が数度（±2〜3度以内）に収まっていれば良好です。
+※ MAE は学習データとの一致度を示す目安で、実走の性能は保証しません。
 評価結果は自動的に各モデルの `models/<version>/eval_metrics.json` に記録されます。
 
 ---
@@ -158,9 +180,9 @@ v001           | 15     | 32    | 0.0946    | 0.2586     | ±9.1°      | PTH+ON
 =====================================================================================
 ```
 
-## ステップ 4: 自動走行 (Raspberry Pi 実機での走行)
+## ステップ 4: 自動走行 (PC から実機を操縦)
 
-ステップ 2 で生成された `models/v001/model.onnx` を使い、実機で自動運転を実行します。
+ステップ 2 で生成された `models/<version>/model.onnx` を使い、実機で自動運転を実行します。
 （データ収集時と同様、PC側で推論を実行し、Raspberry PiのRust APIサーバーへ操縦指示を送信する方式です）
 
 ### 1. 事前準備
@@ -168,24 +190,72 @@ v001           | 15     | 32    | 0.0946    | 0.2586     | ±9.1°      | PTH+ON
    - Raspberry Piの電源を入れ、Rust APIサーバーを起動します（通常通りポート `8080` で待機）。
 2. **Wi-Fi / 疎通の確認**:
    - PCとRaspberry Piが同一Wi-Fiネットワークに接続されていることを確認します（`.env` に記載の `ROBOT_BASE_URL`）。
-3. **コースへの配置**:
+3. **走行エリアへの配置**:
    - 車両をコースのスタート地点に置き、進行方向に向けておきます。
 
 ### 2. 実行コマンド (PCのPowerShell)
 ```powershell
-uv run python -m src.e2e.autonomous_driver --model models/v001/model.onnx --speed 35 --safe_dist 15.0
+# 通常起動 (2D動的オキュパンシーグリッド地図 ＋ リアルタイムGUIダッシュボード起動)
+uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --speed 35 --min_speed 20
+
+# GUIウィンドウを表示せずヘッドレスで走行する場合
+uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --no_gui
+
+# カーブ旋回時・障害物接近時の減速チューニング (最低速度を25、減速開始距離を50cmに変更)
+uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --speed 40 --min_speed 25 --slowdown_dist 50.0
+
+# 段差検知の閾値を調整する場合 (床の材質に合わせて変更、デフォルト: 150)
+uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --cliff_threshold 200
+
+# 通信ウォッチドッグのタイムアウト時間を調整 (デフォルト: 0.6秒)
+uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --watchdog_timeout 1.0
+
+# スタック検知感度を調整 (閾値を3.0、検知継続フレームを20フレームに変更)
+uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --stuck_threshold 3.0 --stuck_frames 20
 ```
 
 #### オプション説明:
-- `--model` : 推論に使用するONNXモデルのパス（デフォルト: `models/v001/model.onnx`）
-- `--speed` : 走行スピード（`0` 〜 `100`、デフォルト: `35`）
-- `--safe_dist` : 強制停止する前方障害物までの距離（cm、デフォルト: `15.0`）
+- `--model` : 推論に使用するONNXモデルのパス（必須）
+- `--speed` : 基本巡航スピード（`0` 〜 `100`、デフォルト: `35`）
+- `--min_speed` : カーブ旋回時・障害物接近時の最低減速スピード（デフォルト: `20`）
+- `--curve_factor` : 旋回減速感度係数（デフォルト: `1.0`）
+- `--safe_dist` : 緊急停止する前方障害物までの限界距離（cm、デフォルト: `15.0`）
+- `--slowdown_dist` : 障害物接近に伴い動的減速を開始する距離（cm、デフォルト: `40.0`）
+- `--cliff_threshold` : 段差・階段落下検知のADC閾値（デフォルト: `150`。これを下回ると崖判定）
+- `--disable_cliff` : 段差検知ガードを無効化するフラグ
+- `--reverse_duration_ms` : 安全後退の目標実行時間（ミリ秒、デフォルト: `1200` = 1.2秒）
+- `--stuck_threshold` : スタック判定の視覚変化量閾値（デフォルト: `4.0`）
+- `--stuck_frames` : スタック確定までの連続フレーム数（デフォルト: `15`。現行の約1Hzでは約15秒、さらに比較用の8フレームが必要）
+- `--disable_stuck` : スタック検知・自動脱出ガードを無効化するフラグ
+- `--no_gui` : 2Dマップウィンドウを表示せずヘッドレスで実行するフラグ
+- `--grid_size` : グリッドマップのセル数（デフォルト: `200` = 10m x 10m）
+- `--cell_size` : 1セルの解像度（メートル、デフォルト: `0.05` = 5cm）
+- `--watchdog_timeout` : 通信監視タイムアウト秒数（デフォルト: `0.6` 秒）
+- `--max_errors` : 通信停止とみなす連続エラー許容回数（デフォルト: `3` 回）
 
-### 3. 走行中の動作と挙動
-- **推論ループ (約20Hz)**:
-  - PCがRustサーバーからカメラ映像（JPEG）をリアルタイム取得します。
-  - ONNXモデルが現在のステアリング角度を推論し、Rustサーバー経由で車輪を自動操舵しながら前進します。
-- **Safety Guard (安全機構)**:
-  - 超音波センサーが指定距離（デフォルト15cm以内）の障害物を検知した場合、推論値に関わらず**モーターを強制停止**します。
-- **緊急停止**:
-  - 走行を止めたいときは、ターミナルで **`Ctrl + C`** を押すと、ステアリングが中央（0度）に戻りモーターが完全停止します。
+### 3. 多重セーフティレイヤー (Phase 3 ハイブリッド安全機構)
+
+> [!WARNING]
+> 以下の機能の多くは PC 側で約1Hz（2026-11-03 のログ解析）で動作し、走行中の監視は行いません。段差からの落下や衝突を保証するものではないので、階段や段差の近くでは走行させず、すぐ停止できる状態で使用してください。詳細は [E2E_SPECIFICATION.md §4.5](../../../E2E_SPECIFICATION.md) を参照してください。
+
+- **Phase 3.1 & 3.4 段差・階段落下防止 & 直前軌跡安全後退 (Breadcrumb Safety)**:
+  - 底面赤外線センサーが床の途切れを検知した際、直前に通ってきた安全な走行軌跡（パンくずリスト）を逆順に再生しながら十分な距離（約1.2秒間）後退し、さらに安全な方向へ車首を振って完全脱出。
+- **Phase 3.2 ダイナミック・スピードリミッター (Dynamic Speed Limiter)**:
+  - 急旋回時や家具・壁への接近時に、AIの要求に関わらず安全な車速（`min_speed`）まで自動減速。スリップや旋回半径膨らみ、衝突衝撃を防止。
+- **Phase 3.3 通信ウォッチドッグ (Communication Watchdog)**:
+  - ループの先頭で、前回の正常通信からの経過時間（0.6秒）と連続エラー数を確認し、超えていれば停止を指令して通信復帰時に再開します。HTTP 要求の処理中は確認しません。
+- **Phase 3.4 前方行き止まり自動脱出 (Dead-End Escape)**:
+  - 壁や家具の前で2回連続で安全停止した場合、同様に通ってきたルートを逆走して後退・旋回し、自力で脱出。
+- **Phase 3.5 動的オキュパンシーグリッド & リアルタイムUI (Dynamic Mapping & HUD)**:
+  - 走行軌跡と前方超音波距離から 2D 確率格子地図（Occupancy Grid）を構築。自車位置、走ったルート、壁・家具の位置をリアルタイムにPC画面へ描画。
+  - 時間経過による「忘却機能（Decay）」を備え、家具の配置変更やドアの開閉にも自動適応。
+  - キー操作: `[C]` で地図クリア、`[S]` で現在の地図画像（`data/maps/map_xxx.png`）を保存、`[Q]` で安全停止して終了。
+- **Phase 3.6 スタック検知 & 自動脱出ビヘイビア (Stuck & Wiggle Recovery)**:
+  - 車輪が空転したりラグや家具の脚に引っかかって「前進しているはずなのに景色が動いていない」状態をカメラ画像の変化量から総合検知。
+  - バック（直前軌跡巻き戻し） ＋ 左右の車体振り（Wiggle） ＋ 迂回前進の複合動作を自動実行し、引っかかりを振りほどいて自力脱出。
+- **前方障害物ガード (超音波)**:
+  - 前方指定距離（デフォルト15cm）以内に家具・壁を検知すると、AIの推論に関わらずモーターを完全強制停止。
+- **Disengagement ロギング (直前30フレームの自動記録)**:
+  - 急ブレーキ・段差回避・通信断・手動介入 (`Ctrl+C`) の直前30フレームを `data/disengagements/` へ自動保存します。現行の周期では約30秒以上に相当します。
+- **手動緊急停止**:
+  - ターミナルで **`Ctrl + C`** を押すと、即座にステアリングが0度（中立）に戻りモーターが完全停止。

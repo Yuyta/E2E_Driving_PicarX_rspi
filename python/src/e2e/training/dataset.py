@@ -60,11 +60,17 @@ class DrivingDataset(Dataset):
     収集された画像とステアリング角のデータセット (複数セッション統合対応)
     """
 
-    def __init__(self, data_dir: Union[str, Path, Sequence[Union[str, Path]]], transform=None):
+    def __init__(
+        self,
+        data_dir: Union[str, Path, Sequence[Union[str, Path]]],
+        transform=None,
+        include_excluded: bool = False,
+    ):
         """
         Args:
             data_dir: 単一セッションフォルダ、親フォルダ (data/raw)、またはそのリスト
             transform: torchvision 変換パイプライン
+            include_excluded: False の場合、exclude: true のデータ（未承認の介入データ等）を除外
         """
         self.session_dirs = resolve_session_dirs(data_dir)
         self.samples: List[Dict[str, Any]] = []
@@ -79,6 +85,14 @@ class DrivingDataset(Dataset):
                     if not line_str:
                         continue
                     record = json.loads(line_str)
+
+                    # 学習除外フラグの確認 (未承認の介入データや外れ値データをスキップ)
+                    if not include_excluded and (
+                        record.get("exclude", False)
+                        or record.get("exclude_from_training", False)
+                    ):
+                        continue
+
                     frame_name = record.get("frame", "")
 
                     # 画像ファイルパスの解決
