@@ -95,7 +95,7 @@ uv run python -m src.e2e.training.train --data_dir data/raw --output_dir models/
 
 #### 特定のセッションのみを学習する場合
 ```powershell
-uv run python -m src.e2e.training.train --data_dir data/raw/<session_id> --output_dir models/v001 --epochs 15
+uv run python -m src.e2e.training.train --data_dir data/raw/<session_id> --output_dir models/<version> --epochs 15
 ```
 ※ 複数フォルダを指定したい場合は `--data_dir data/raw/session1 data/raw/session2` のようにスペース区切りで複数指定できます。
 
@@ -137,7 +137,7 @@ uv run python -m src.e2e.training.train --data_dir data/processed/clean_v1 --out
 
 ### 実行コマンド (PowerShell)
 ```powershell
-uv run python -m src.e2e.evaluation.evaluate --data_dir data/raw/<session_id> --model_path models/v001/best_model.pth
+uv run python -m src.e2e.evaluation.evaluate --data_dir data/raw/<session_id> --model_path models/<version>/best_model.pth
 ```
 
 ### 結果表示例
@@ -182,7 +182,7 @@ v001           | 15     | 32    | 0.0946    | 0.2586     | ±9.1°      | PTH+ON
 
 ## ステップ 4: 自動走行 (PC から実機を操縦)
 
-ステップ 2 で生成された `models/v001/model.onnx` を使い、実機で自動運転を実行します。
+ステップ 2 で生成された `models/<version>/model.onnx` を使い、実機で自動運転を実行します。
 （データ収集時と同様、PC側で推論を実行し、Raspberry PiのRust APIサーバーへ操縦指示を送信する方式です）
 
 ### 1. 事前準備
@@ -215,7 +215,7 @@ uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --stuc
 ```
 
 #### オプション説明:
-- `--model` : 推論に使用するONNXモデルのパス（デフォルト: `models/v001/model.onnx`）
+- `--model` : 推論に使用するONNXモデルのパス（必須）
 - `--speed` : 基本巡航スピード（`0` 〜 `100`、デフォルト: `35`）
 - `--min_speed` : カーブ旋回時・障害物接近時の最低減速スピード（デフォルト: `20`）
 - `--curve_factor` : 旋回減速感度係数（デフォルト: `1.0`）

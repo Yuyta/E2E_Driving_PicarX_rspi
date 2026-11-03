@@ -48,7 +48,7 @@ except ImportError:
 class RemoteAutonomousDriver:
     def __init__(
         self,
-        model_path="models/v001/model.onnx",
+        model_path,
         speed=35,
         min_speed=20,
         curve_factor=1.0,
@@ -664,7 +664,7 @@ def main():
         description="Autonomous Driving with ONNX via Rust API (Indoor Home Free-Space)"
     )
     parser.add_argument(
-        "--model", type=str, default="models/v001/model.onnx", help="Path to ONNX model"
+        "--model", type=str, required=True, help="Path to ONNX model"
     )
     parser.add_argument("--speed", type=int, default=35, help="Base driving speed (0-100)")
     parser.add_argument(

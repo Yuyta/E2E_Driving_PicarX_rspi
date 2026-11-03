@@ -33,3 +33,6 @@
 # Local-only documents (articles and temporary build notes)
 /articles/
 /rust/build/error_result_temp.txt
+
+# Contains absolute local paths in its exporter metadata
+/python/models/v001/
