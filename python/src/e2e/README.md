@@ -204,9 +204,6 @@ uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --no_g
 # カーブ旋回時・障害物接近時の減速チューニング (最低速度を25、減速開始距離を50cmに変更)
 uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --speed 40 --min_speed 25 --slowdown_dist 50.0
 
-# 段差検知の閾値を調整する場合 (床の材質に合わせて変更、デフォルト: 150)
-uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --cliff_threshold 200
-
 # 通信ウォッチドッグのタイムアウト時間を調整 (デフォルト: 0.6秒)
 uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --watchdog_timeout 1.0
 
@@ -219,17 +216,16 @@ uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --stuc
 - `--speed` : 基本巡航スピード（`0` 〜 `100`、デフォルト: `35`）
 - `--min_speed` : カーブ旋回時・障害物接近時の最低減速スピード（デフォルト: `20`）
 - `--curve_factor` : 旋回減速感度係数（デフォルト: `1.0`）
-- `--safe_dist` : 緊急停止する前方障害物までの限界距離（cm、デフォルト: `15.0`）
+- `--safe_dist` : 減速の計算に使う距離（cm、デフォルト: `15.0`）。停止は Pi が 15cm で行う
 - `--slowdown_dist` : 障害物接近に伴い動的減速を開始する距離（cm、デフォルト: `40.0`）
-- `--cliff_threshold` : 段差・階段落下検知のADC閾値（デフォルト: `150`。これを下回ると崖判定）
-- `--disable_cliff` : 段差検知ガードを無効化するフラグ
 - `--reverse_duration_ms` : 安全後退の目標実行時間（ミリ秒、デフォルト: `1200` = 1.2秒）
 - `--stuck_threshold` : スタック判定の視覚変化量閾値（デフォルト: `4.0`）
-- `--stuck_frames` : スタック確定までの連続フレーム数（デフォルト: `15`。現行の約1Hzでは約15秒、さらに比較用の8フレームが必要）
+- `--stuck_frames` : スタック確定までの連続フレーム数（デフォルト: `15`。さらに比較用の8フレームが必要で、10fps なら計約2秒）
 - `--disable_stuck` : スタック検知・自動脱出ガードを無効化するフラグ
 - `--no_gui` : 2Dマップウィンドウを表示せずヘッドレスで実行するフラグ
 - `--grid_size` : グリッドマップのセル数（デフォルト: `200` = 10m x 10m）
 - `--cell_size` : 1セルの解像度（メートル、デフォルト: `0.05` = 5cm）
+- 段差検知は Pi が行い、走行開始時に今いる床で校正する（`--cliff_threshold` と `--disable_cliff` は廃止）。試験で無効にする時は Pi 側で `PICARX_DISABLE_CLIFF_GUARD=1` を設定する
 - `--watchdog_timeout` : 通信監視タイムアウト秒数（デフォルト: `0.6` 秒）
 - `--max_errors` : 通信停止とみなす連続エラー許容回数（デフォルト: `3` 回）
 

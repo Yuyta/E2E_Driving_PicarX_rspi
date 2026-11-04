@@ -133,6 +133,10 @@ class PicarxMainWindow(QMainWindow):
         btn_reset = QPushButton("Reset Emergency Stop")
         btn_reset.clicked.connect(self._on_emergency_reset)
 
+        btn_calibrate = QPushButton("Calibrate Floor")
+        btn_calibrate.setToolTip("車体を床に置いた状態で、段差検知の基準を測ります")
+        btn_calibrate.clicked.connect(self._on_calibrate_floor)
+
         grid.addWidget(btn_forward, 0, 1)
         grid.addWidget(btn_left, 1, 0)
         grid.addWidget(btn_center, 1, 1)
@@ -140,6 +144,7 @@ class PicarxMainWindow(QMainWindow):
         grid.addWidget(btn_backward, 2, 1)
         grid.addWidget(btn_stop, 3, 0, 1, 3)
         grid.addWidget(btn_reset, 4, 0, 1, 3)
+        grid.addWidget(btn_calibrate, 5, 0, 1, 3)
         left_layout.addWidget(control_group)
 
         main_layout.addLayout(left_layout, 1)
@@ -250,6 +255,18 @@ class PicarxMainWindow(QMainWindow):
 
         self._async_call(task())
 
+    def _on_calibrate_floor(self):
+        async def task():
+            try:
+                await self.client.calibrate_floor()
+            except Exception as exc:
+                error = exc
+                self._ui(lambda: self._append_chat(f"<b>[Error]</b> 床の校正に失敗: {error}"))
+            else:
+                self._ui(lambda: self._append_chat("<b>[System]</b> 床を校正しました"))
+
+        self._async_call(task())
+
     def _show_emergency_cleared(self):
         self._emergency_active = False
         self.lbl_safety.setText("SAFE (Limiter Active)")
@@ -262,7 +279,7 @@ class PicarxMainWindow(QMainWindow):
 
         async def task():
             try:
-                data = await self.client.get_camera_snapshot(width=320, quality=70)
+                data = await self.client.get_camera_snapshot()
                 image = QImage.fromData(base64.b64decode(data.image_base64), "JPEG")
                 if image.isNull():
                     raise ValueError("Pi側から有効なJPEG画像が返されませんでした")

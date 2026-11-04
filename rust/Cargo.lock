@@ -2756,6 +2756,7 @@ dependencies = [
  "chrono",
  "dotenvy",
  "eframe",
+ "futures-util",
  "ndarray",
  "rodio",
  "rppal",

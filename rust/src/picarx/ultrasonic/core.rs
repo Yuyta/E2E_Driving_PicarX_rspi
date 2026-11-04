@@ -25,6 +25,31 @@ const SOUND_SPEED_M_S: f64 = 343.3;
 const RETRY_COUNT: u32 = 10;
 const RETRY_DELAY_MS: u64 = 5;
 
+/// `ECHO_TIMEOUT_MS` の間に音が往復できる距離。これより遠い物は測れない
+pub const FAR_DISTANCE_CM: f64 = 343.0;
+
+/// 1回の測定の結果
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum EchoReading {
+    Distance(f64),
+    /// 信号は始まったが、時間内に反射が戻らなかった。前が空いているか、音を吸う物がある
+    TooFar,
+    /// 信号が始まらない、または前回の信号が残っている。距離は不明
+    Failed,
+}
+
+impl EchoReading {
+    /// 距離へ変換する。不明な時は `None`。
+    pub fn to_cm(self) -> Option<f64> {
+        match self {
+            // 0以下は物理的にありえないので「不明」として扱う
+            Self::Distance(cm) if cm > 0.0 => Some(cm),
+            Self::Distance(_) | Self::Failed => None,
+            Self::TooFar => Some(FAR_DISTANCE_CM),
+        }
+    }
+}
+
 pub struct Ultrasonic {
     trig: OutputPin,
     echo: InputPin,
@@ -66,7 +91,12 @@ impl Ultrasonic {
         })
     }
 
-    fn read_once(&mut self) -> f64 {
+    fn read_once(&mut self) -> EchoReading {
+        // 前回のエコーが残っていると、その残りを今回の応答と誤認する
+        if self.echo.is_high() {
+            return EchoReading::Failed;
+        }
+
         // パルス送信
         self.trig.set_low();
         thread::sleep(Duration::from_millis(TRIG_SETTLE_MS));
@@ -82,7 +112,7 @@ impl Ultrasonic {
         while self.echo.is_low() {
             pulse_start = Instant::now();
             if timeout_start.elapsed() > self.timeout {
-                return -1.0;
+                return EchoReading::Failed;
             }
         }
 
@@ -90,21 +120,20 @@ impl Ultrasonic {
         while self.echo.is_high() {
             pulse_end = Instant::now();
             if timeout_start.elapsed() > self.timeout {
-                return -1.0;
+                return EchoReading::TooFar;
             }
         }
 
         let during = pulse_end.duration_since(pulse_start).as_secs_f64();
         let cm = (during * SOUND_SPEED_M_S / 2.0) * 100.0;
 
-        (cm * 100.0).round() / 100.0
+        EchoReading::Distance((cm * 100.0).round() / 100.0)
     }
 
     pub fn read_distance(&mut self) -> f64 {
         // リトライし、成功したらその値を返す
         for _ in 0..RETRY_COUNT {
-            let dist = self.read_once();
-            if dist != -1.0 {
+            if let EchoReading::Distance(dist) = self.read_once() {
                 return dist;
             }
             // 少しだけ休む（次のパルスとの混信を防ぐため）
@@ -114,10 +143,21 @@ impl Ultrasonic {
     }
 
     /// リトライなしで1回だけ計測する(最大でもECHO_TIMEOUT_MS程度しかブロックしない)。
-    /// バックグラウンドでの継続的なポーリング用途で、Picarxを共有するMutexの
-    /// ロック保持時間を短く抑えるために使う。
+    /// バックグラウンドでの継続的なポーリング用途。反射が戻らない時は `FAR_DISTANCE_CM` を返す。
     pub fn try_read_distance_once(&mut self) -> Option<f64> {
-        let dist = self.read_once();
-        if dist < 0.0 { None } else { Some(dist) }
+        self.read_once().to_cm()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EchoReading, FAR_DISTANCE_CM};
+
+    #[test]
+    fn a_failed_sensor_stays_unknown_but_no_echo_means_far() {
+        assert_eq!(EchoReading::Distance(25.0).to_cm(), Some(25.0));
+        assert_eq!(EchoReading::TooFar.to_cm(), Some(FAR_DISTANCE_CM));
+        assert_eq!(EchoReading::Failed.to_cm(), None);
+        assert_eq!(EchoReading::Distance(0.0).to_cm(), None);
     }
 }

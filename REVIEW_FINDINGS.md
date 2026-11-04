@@ -39,16 +39,6 @@
 
 | ID | 重要度 | 内容 | 根拠 | 対応案 | M |
 |---|---|---|---|---|---|
-| SAF-2 | S1 | Pi 側の通信タイムアウト判定 `is_timed_out` が未使用 | `rust/src/safety/mod.rs:45` | TTL 付き走行コマンドと反射ループで置き換える | M1 |
-| SAF-4 | S1 | Rust 側に段差検知がない。距離チェックは発進時の1回のみ | `rust/src/api/handlers.rs:34-45` | Pi 内の反射ループ（20Hz以上）で走行中も常時監視 | M1 |
-| SAF-5 | S1 | 400ms 移動（未校正の係数で約11cm）の間は PC 側で監視しない | `python/src/e2e/autonomous_driver.py:609` | 同上 | M1 |
-| SAF-6 | S1 | 脱出動作の穴。脱出後に軌跡を消去し、続けて発動すると根拠のない直進後退になる。旋回やウィグル中は段差を確認しない | `autonomous_driver.py:216-220,242,284-296`, `python/src/e2e/safety/trajectory_tracker.py:84-85` | 反射層での常時監視を前提に作り直す。軌跡切れの後退は拒否する | M1 |
-| SAF-7 | S1 | 読み取り失敗時に前回値を保持し、時刻がない | `rust/src/sensor_monitor/core.rs:49-52` | 全センサー値に時刻を付け、古い値は安全側に倒す | M1 |
-| SAF-8 | S1 | 通信失敗を安全扱い（距離 `999`、床 `[999,999,999]`）。距離 `0` も障害物なし扱い | `autonomous_driver.py:438,478,486` | 「不明」を型で表し、不明なら走らない | M1 |
-| SAF-12 | S2 | 段差閾値の校正が未使用で150固定。`[8,13,11]` のような値が記録されており、床色による誤検知の可能性あり（推定） | `python/src/e2e/safety/cliff_detector.py:32` | 起動時に校正し、Pi 側で保持 | M1 |
-| SAF-13 | S2 | 古い `stop` スレッドが新しい移動を止める。ループを高速化すると顕在化する | `rust/src/api/hardware.rs:30-51` | スレッド方式をやめ、期限管理に統一 | M1 |
-| SAF-14 | S2 | ウォッチドッグがループ先頭でしか評価されず、HTTP タイムアウト5秒の間は動かない。誤発火の原因は未特定 | `autonomous_driver.py:393`, `python/src/config.py:35` | Pi 側へ移管。PC 側は表示用途に縮小 | M1 |
-| SAF-15 | S2 | センサーのポーリングが 300ms 間隔で、1回の測定中に共有 Mutex を保持する | `rust/src/sensor_monitor/core.rs:9,42-46` | ポーリングを短縮し、モーターとセンサーのロックを分離 | M1 |
 
 ## 3. 地図と自己位置
 
@@ -84,7 +74,6 @@
 | ID | 重要度 | 内容 | 根拠 | 対応案 | M |
 |---|---|---|---|---|---|
 | AGT-1 | S2 | 音声入力がない。`listen` は固定文字列を正常応答で返す | `rust/src/api/hardware.rs:98-101` | 音声入力を実装。未実装の間はエラーを返す | M2 |
-| AGT-2 | S2 | 電池値を読んでいるが API がない | `rust/src/sensor_monitor/core.rs:45`, `rust/src/api/mod.rs:19-27` | `/api/status` を追加 | M1 |
 | AGT-3 | S2 | LLM は画像を見ていない。ツールは解像度と文字数だけを返す | `python/src/tools/camera_tool.py:15-19` | 画像認識の方式を評価する。Gemini へ画像を送る場合は事前に確認する（D-3） | M2 |
 | AGT-4 | S2 | Python 側に永続記憶がない。Rust の記憶は旧 GUI 専用 | `python/src/gui/app.py:40`, `rust/src/sample/picarx_sample.rs:100-103` | 記憶を Brain 側へ一本化 | M2 |
 | AGT-5 | S2 | Agent の状態フィールドが常に空 | `python/src/agents/state.py:11-13`, `python/src/gui/app.py:277-279` | 状態ストアから毎ターン注入 | M2 |
@@ -101,12 +90,7 @@
 
 | ID | 重要度 | 内容 | 根拠 | 対応案 | M |
 |---|---|---|---|---|---|
-| OPS-1 | S3 | Python の CI がない（`rust-ci.yml` のみ） | `.github/workflows/` | ruff と pytest の CI を追加 | M1 |
-| OPS-2 | S3 | ruff が1件検出（import 順） | `python/tests/test_e2e_integrated_safety.py:7` | `ruff check --fix` | M1 |
-| OPS-3 | S3 | カメラ API がクライアントの `width` と `quality` を無視する | `python/src/picarx_client/client.py:93`, `rust/src/api/handlers.rs:145` | 実装するか引数を削除 | M1 |
-| OPS-4 | S3 | 不要な残骸がある | 空ディレクトリ `rust;C`、ルートの `models/` | 不要なら削除 | M1 |
 | OPS-5 | S3 | `main` に `ROADMAP.md` がなく、ブランチ間で文書が異なる | `git ls-tree main` | 本ブランチのマージで解消 | M0 |
-| OPS-7 | S3 | CI のビルド対象が Pi 3B+ で、実機の Pi 5 と異なる | `.github/workflows/rust-ci.yml:137-149` | `MODEL=5` へ変更 | M1 |
 | OPS-8 | S3 | コミットの作者情報に第三者のものを含むメールアドレスがある | `git log --format=%ae` | 本人に確認して判断する | 未定 |
 
 ## 7. 文書の修正記録
@@ -141,3 +125,26 @@ SAF-1、SAF-9、SAF-10 は 2026-11-04 に実機で確認した。その他はテ
 | SAF-11 | 黙ってモックで起動する | 明示フラグ `PICARX_ALLOW_MOCK=1` がある時だけモックで起動 |
 | OPS-6 | 既定モデルが古い `v001` | `--model` と `--output_dir` を必須にした |
 | OPS-9 | `v001/model.onnx` にローカルのユーザー名 | 全履歴から除去し追跡対象外にした。ONNX 出力時にスタックトレース情報を除去 |
+
+### 解決済み（M1、実機確認待ち）
+
+以下はコードとテストで修正した。実機の確認は [ROADMAP の M1](ROADMAP.md#m1-体の再構築--実装済み実機確認待ち) の手順で行う。
+
+| ID | 内容 | 修正 |
+|---|---|---|
+| SAF-2 | `is_timed_out` が未使用 | 廃止し、走行コマンドの TTL を反射ループが監視する |
+| SAF-4 | 走行中に距離と段差を監視しない | Pi の反射ループ（目標 40Hz）で常時監視する |
+| SAF-5 | 移動中は PC 側で監視しない | 同上。`ttl_ms` の上限を 1000ms にした |
+| SAF-6 | 根拠のない後退、脱出中の段差未確認 | 記録のない範囲へは後退しない。実行した分だけ履歴から除く。段差と障害物は脱出中も Pi が監視する |
+| SAF-7 | 読み取り失敗時に前回値を時刻なしで保持 | 全センサー値に時刻を付け、古い値は不明として扱う |
+| SAF-8 | 通信失敗や距離 `0` を安全扱い | 不明は `null` または 503 で返し、走行を拒否する。距離 `0` は無効な測定として捨てる |
+| SAF-12 | 段差閾値が 150 固定 | `/api/safety/calibrate` と起動時に、床の値からセンサーごとに校正する。定数は実機で要確認 |
+| SAF-13 | 古い `stop` スレッドが新しい移動を止める | スレッドを廃止し、期限管理に統一した |
+| SAF-14 | ウォッチドッグがループ先頭でのみ評価 | 停止は Pi の TTL へ移した。PC 側は通信失敗時の記録のみ行う |
+| SAF-15 | センサーのポーリングが遅く、測定中にロックを持つ | I2C は 20ms、超音波は 40ms 周期にし、超音波の測定中はモーターのロックを持たない |
+| AGT-2 | 電池値の API がない | `/api/status` を追加した |
+| OPS-1 | Python の CI がない | `python-ci.yml` を追加した（ruff check と pytest） |
+| OPS-2 | ruff が検出 | `ruff check --fix` を適用した |
+| OPS-3 | カメラ API が `width` と `quality` を無視 | 引数を削除した |
+| OPS-4 | 不要な残骸 | 空ディレクトリ `rust;C` とルートの `models/` を削除した |
+| OPS-7 | CI のビルド対象が Pi 3B+ | `MODEL=5` へ変更した |

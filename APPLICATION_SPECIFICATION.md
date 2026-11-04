@@ -248,18 +248,24 @@ GUIから以下の操作を実行できる。
 
 | Method | Endpoint | 機能 |
 |---|---|---|
-| POST | `/api/drive/move` | 前進・後退・停止。`speed` は 0〜100、`duration_ms` は 50〜5000（範囲外は 400）。緊急停止中の前進・後退は 409 |
+| POST | `/api/drive/move` | 前進・後退・停止。`speed` は 0〜100、`ttl_ms` は 50〜1000（範囲外は 400）。`ttl_ms` 以内に次の指令がなければ Pi が停止する。危険、不明なセンサー値、緊急停止の時は 409 と `reason` を返す |
 | POST | `/api/drive/steer` | ステアリング角度変更 |
 | POST | `/api/drive/stop` | 通常停止。以後の走行は拒否しない |
 | POST | `/api/drive/emergency_stop` | 緊急停止。解除するまで走行を拒否する |
 | POST | `/api/drive/emergency_stop/reset` | 緊急停止の解除 |
-| GET | `/api/sensor/ultrasonic` | 超音波距離取得 |
-| GET | `/api/sensor/grayscale` | グレースケール取得 |
+| GET | `/api/sensor/ultrasonic` | 超音波距離取得。不明な時は 503。反射が戻らない時は 343.0 |
+| POST | `/api/safety/calibrate` | 今いる床で段差の閾値を校正する。走行中は 409、段差と区別できない値なら 422 |
+| GET | `/api/status` | 電池、センサー（古い値は `null`）、走行モード、走れない理由、反射ループ、カメラの状態 |
+| GET | `/api/events?after=<id>` | 安全イベント（直近256件）。反射ループの停止には検知から停止までの時間を含む |
+| GET | `/api/sensor/grayscale` | グレースケール取得。不明な時は 503 |
 | POST | `/api/audio/speak` | TTS生成・スピーカー再生 |
 | GET | `/api/audio/listen` | **スタブ**。常に固定文字列を返す |
-| GET | `/api/camera/snapshot` | JPEG Base64画像取得（320×240 固定。クライアントの `width` と `quality` は無視される） |
+| GET | `/api/camera/snapshot` | 最新フレームを JPEG Base64 で取得（320×240 固定） |
+| GET | `/api/camera/stream` | MJPEG の常時配信（`multipart/x-mixed-replace`、320×240、15fps） |
 
-全エンドポイントで `Authorization: Bearer <トークン>` が必須で、不正な場合は 401 を返す。CORS は許可しない。通信は暗号化していないので、信頼できる LAN 内でのみ使用する。電池の値は内部で取得しているが、API では公開していない。
+全エンドポイントで `Authorization: Bearer <トークン>` が必須で、不正な場合は 401 を返す。CORS は許可しない。通信は暗号化していないので、信頼できる LAN 内でのみ使用する。カメラの映像も同様に暗号化されない。
+
+カメラは配信の受信者がいる間と、最後の要求から10秒間だけ動作し、それ以外は止まる。映像は Pi の外へ自動では送らない。
 
 ## 8. TTS仕様
 
@@ -383,6 +389,7 @@ Raspberry Pi側の環境変数（実行時のカレントディレクトリの `
 |---|---|---|
 | `PICARX_API_TOKEN` | 必須 | API トークン。未設定ならサーバーは起動しない |
 | `PICARX_ALLOW_MOCK` | 任意 | `1` の時のみ、ハード初期化失敗時にモックで起動する |
+| `PICARX_DISABLE_CLIFF_GUARD` | 任意 | `1` の時のみ段差検知を無効にする。車輪を浮かせた試験など、落下の恐れがない時だけ使う |
 | `PORT` | 任意 | 待受ポート。既定は `8080` |
 
 トークンは次のように生成し、PC の `python/.env` と Pi の `.env` の両方に設定する。
@@ -406,7 +413,7 @@ uv run python -c "import secrets; print(secrets.token_urlsafe(32))"
 cd rust/build
 
 # お使いのラズパイのモデル (3bplus, zero2w, 4b, 5) を指定してビルド
-# 基準機種は Pi 5（ROADMAP の D-1）。CI は現在 3bplus でビルドする（M1 で変更予定）
+# 基準機種は Pi 5（ROADMAP の D-1）。CI も Pi 5 向けにビルドする
 make build MODEL=5
 ```
 ※ 初回のみ `make image` でビルド用Dockerイメージを作成してください。
@@ -447,7 +454,7 @@ curl -X POST http://127.0.0.1:8080/api/audio/speak \
 
 ## 11. テスト・品質保証
 
-Python はローカルで以下を実行する。CI は未整備である（ROADMAP の M1 で追加）。
+Python は `.github/workflows/python-ci.yml` で `ruff check` と `pytest` を実行する。ローカルでは以下を実行する（`ruff format` は CI の対象外）。
 
 ```bash
 uv run ruff format --check .
@@ -455,7 +462,7 @@ uv run ruff check .
 uv run pytest tests/ -v
 ```
 
-Rust は `.github/workflows/rust-ci.yml` で以下を実行する（Raspberry Pi 3B+ 向けのクロスビルドを含む）。
+Rust は `.github/workflows/rust-ci.yml` で以下を実行する（Raspberry Pi 5 向けのクロスビルドを含む）。
 
 ```bash
 cargo fmt --all -- --check
@@ -465,13 +472,11 @@ cargo nextest run --locked --release --profile ci
 
 ## 12. 既知の制約・今後の拡張
 
-- カメラは現在、1秒間隔のJPEG自動更新であり、真の動画ストリームではない。
-- カメラ更新ごとにスナップショットコマンドを起動するため、低遅延映像には向かない。
+- Python GUI のカメラ表示は1秒間隔の更新のままで、常時配信は使っていない。走行ループのみ配信を使う。
 - Assistantの通常返信は毎回Pi側TTSで再生する。
 - Gemini無料枠の429 `RESOURCE_EXHAUSTED` はアプリケーションでは解決できない。
 - Rust APIサーバーはPi上のカメラコマンド、TTSエンジン、PiCar-Xハードウェアに依存する。
 - TTSエンジン切り替えUIは旧Rust GUIには存在するが、Python GUIからは現在選択できない。
-- 将来的にはPi側にカメラの常時配信を追加する（ROADMAP の M1）。
 - `/api/audio/listen` はスタブであり、音声入力は API から利用できない。
 - 発話を途中で止める API がない。
 - `take_snapshot` ツールは画像のメタデータのみを返すため、LLM は画像を見ていない。
@@ -614,8 +619,8 @@ Memory and Personalization Rules:
 
 | 情報 | 取得元 | 現状 | 計画 |
 |---|---|---|---|
-| 電池 | `/api/status` | Pi 内部で取得、API なし | M1 |
-| センサー、走行モード、安全イベント | `/api/status`, `/api/events` | センサーは個別 API のみ | M1 |
+| 電池 | `/api/status` | 実装済み（実機未確認） | M1 |
+| センサー、走行モード、安全イベント | `/api/status`, `/api/events` | 実装済み（実機未確認） | M1 |
 | 周囲の様子 | カメラ画像（方式は評価後に確認） | LLM へ渡していない | M2 で評価 |
 | いま言われたこと | 音声認識 | 未実装 | M2（PC のマイク）、M6（車載） |
 | 過去の会話、人物の事実 | 記憶 DB | Python 側になし | M2 |

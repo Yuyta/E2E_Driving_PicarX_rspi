@@ -2,23 +2,27 @@
 Autonomous Driving Script using ONNX Runtime for PiCar-X (Plan A: Remote Mode)
 PC上でONNXモデルを実行し、Raspberry Pi (Rust APIサーバー) を介して
 家庭内フリースペース自律走行を行うスクリプト。
-Phase 2.1: Disengagement Logger (直前3秒間の自動タグ付け & 介入記録)
-Phase 3: ハイブリッド安全系 & 空間マッピング基盤 (Safety Layer & Spatial Intelligence)
-  - 3.1: Cliff Detection (底面グレースケールによる段差・階段落下防止)
+
+Pi の反射ループが、障害物、段差、不明なセンサー値、指令の期限切れで車両を止める。
+このスクリプトが止まっても、最後の指令の TTL が切れた時点で車両は止まる。
+ここで担当するのは推論と、Pi の判定を受けた後の行動（脱出、待機、介入の記録）である。
+
+  - 配信の最新フレームごとに推論する。周期の内訳は CycleProfiler で計測する
+  - Phase 2.1: Disengagement Logger (直前の自動タグ付け & 介入記録)
   - 3.2: Dynamic Speed Limiter (急旋回・障害物接近時の自動車速制御)
-  - 3.3: Communication Watchdog (Wi-Fi通信断・ハートビート監視・タイムアウト停止)
-  - 3.4: Breadcrumb Safety (直前走行軌跡の逆再生による十分な距離の安全後退・回避ターン)
+  - 3.3: Communication Watchdog (通信状態の表示と記録。停止は Pi が行う)
+  - 3.4: Breadcrumb Safety (記録した軌跡の範囲に限った安全後退・回避ターン)
   - 3.5: Dynamic Occupancy Grid (2D確率格子地図構築 & PC画面リアルタイム可視化UI)
   - 3.6: Stuck Detector (カメラ視覚変化量による引っかかり・空転検知 & 複合脱出ビヘイビア)
 """
 
 import argparse
-import base64
 import time
 from pathlib import Path
 from typing import Optional, Tuple
 
 import cv2
+import httpx
 import numpy as np
 import onnxruntime as ort
 
@@ -26,23 +30,35 @@ from src.models import DriveDirection
 from src.picarx_client.client import PicarxClient
 
 try:
+    from .cycle_profiler import CycleProfiler
     from .dataset.disengagement_manager import DisengagementBuffer
     from .mapping.occupancy_grid import OccupancyGridMap
     from .mapping.visualizer import MapVisualizer
-    from .safety.cliff_detector import CliffDetector
+    from .safety.body_status import BodyAction, cliff_sensors, decide_action
     from .safety.speed_limiter import SpeedLimiter
     from .safety.stuck_detector import StuckDetector
     from .safety.trajectory_tracker import TrajectoryTracker
     from .safety.watchdog import CommunicationWatchdog
 except ImportError:
+    from src.e2e.cycle_profiler import CycleProfiler
     from src.e2e.dataset.disengagement_manager import DisengagementBuffer
     from src.e2e.mapping.occupancy_grid import OccupancyGridMap
     from src.e2e.mapping.visualizer import MapVisualizer
-    from src.e2e.safety.cliff_detector import CliffDetector
+    from src.e2e.safety.body_status import BodyAction, cliff_sensors, decide_action
     from src.e2e.safety.speed_limiter import SpeedLimiter
     from src.e2e.safety.stuck_detector import StuckDetector
     from src.e2e.safety.trajectory_tracker import TrajectoryTracker
     from src.e2e.safety.watchdog import CommunicationWatchdog
+
+
+# 走行指令の TTL。指令が届かなくなると、この時間で Pi が車両を止める
+MOVE_TTL_MS = 400
+# 制御の通信は短く打ち切る。止まっていても車両は TTL で止まる
+CONTROL_TIMEOUT_SEC = 1.0
+FRAME_TIMEOUT_SEC = 0.5
+WAIT_SLEEP_SEC = 0.1
+# 障害物の前でこの周回数（約1秒）待っても塞がったままなら、行き止まりとして脱出する
+OBSTACLE_ESCAPE_CYCLES = 10
 
 
 class RemoteAutonomousDriver:
@@ -54,8 +70,6 @@ class RemoteAutonomousDriver:
         curve_factor=1.0,
         safe_distance=15.0,
         slowdown_distance=40.0,
-        cliff_threshold=150,
-        enable_cliff=True,
         watchdog_timeout=0.6,
         max_consecutive_errors=3,
         reverse_duration_ms=1200,
@@ -74,7 +88,6 @@ class RemoteAutonomousDriver:
         self.safe_distance = safe_distance
         self.max_steering_angle = 35.0
         self.log_dir = Path(log_dir)
-        self.enable_cliff = enable_cliff
         self.reverse_duration_ms = reverse_duration_ms
         self.enable_stuck_detection = enable_stuck_detection
         self.enable_mapping = enable_mapping
@@ -84,16 +97,15 @@ class RemoteAutonomousDriver:
         self.input_name = self.session.get_inputs()[0].name
 
         # 既存クライアント再利用 (Rust APIサーバー経由)
-        self.client = PicarxClient()
+        self.client = PicarxClient(timeout=CONTROL_TIMEOUT_SEC)
+        self.profiler = CycleProfiler()
 
         # Phase 2.1: 直前走行データを常時保持するリングバッファ
         self.buffer = DisengagementBuffer(max_frames=buffer_frames)
         self.is_obstacle_stopped = False
         self.is_cliff_stopped = False
         self.is_watchdog_stopped = False
-
-        # Phase 3.1: 段差・階段落下検知モジュール
-        self.cliff_detector = CliffDetector(threshold=cliff_threshold)
+        self._reverse_refused = False
 
         # Phase 3.2: 旋回・障害物動的減速リミッター
         self.speed_limiter = SpeedLimiter(
@@ -153,108 +165,103 @@ class RemoteAutonomousDriver:
         img = np.expand_dims(img, axis=0)
         return img
 
+    def _send_move(self, direction, speed: int, steer: int, duration_ms: int) -> bool:
+        """舵角と走行を指令する。Pi に拒否された時や通信失敗時は `False` を返す。"""
+        try:
+            self.client.steer_sync(steer)
+            moved = self.client.move_sync(direction, speed=speed, ttl_ms=duration_ms)
+            self.watchdog.heartbeat()
+        except httpx.HTTPError:
+            self.watchdog.record_error()
+            return False
+        if moved and self.grid_map:
+            signed = -speed if direction == DriveDirection.BACKWARD else speed
+            self.grid_map.update_odometry(
+                speed=signed, steer_angle_deg=steer, duration_ms=duration_ms
+            )
+        return moved
+
+    def _stop_quietly(self) -> None:
+        try:
+            self.client.stop_sync()
+        except httpx.HTTPError:
+            self.watchdog.record_error()
+
+    def _show_status(self, speed: int, steer: int, text: str, color) -> None:
+        if self.visualizer:
+            canvas = self.visualizer.render(
+                camera_frame_bgr=None,
+                speed=speed,
+                steer_angle=steer,
+                status_text=text,
+                status_color=color,
+            )
+            self.visualizer.show(canvas, wait_ms=1)
+
     def execute_breadcrumb_reverse(
         self,
         target_duration_ms: Optional[int] = None,
         last_cliff_sensors: Optional[Tuple[bool, bool, bool]] = None,
-    ) -> None:
+    ) -> bool:
         """
-        直前に通ってきた安全な軌跡を逆再生して十分な距離を後退し、
-        さらに車首を安全な方向へ振って脱出する。
+        記録した軌跡の範囲で後退し、車首を安全な方向へ振って脱出する。
+
+        後方にセンサーがないので、記録のない範囲へは後退しない。
+        1歩も後退できなかった時は何もせず `False` を返す。
         """
         dur_ms = target_duration_ms or self.reverse_duration_ms
-        try:
-            self.client.stop_sync()
-        except Exception:
-            pass
-        time.sleep(0.05)
+        self._stop_quietly()
 
         sequence = self.trajectory_tracker.get_reverse_sequence(dur_ms)
+        if not sequence:
+            if not self._reverse_refused:
+                print("\n[BREADCRUMB REVERSE] No recorded path behind the car. Waiting for help.")
+            self._reverse_refused = True
+            return False
+        self._reverse_refused = False
+
         print(
-            f"\n[BREADCRUMB REVERSE] Executing safe reverse along history "
-            f"({len(sequence)} steps, total {dur_ms}ms)..."
+            f"\n[BREADCRUMB REVERSE] Reversing along history "
+            f"({len(sequence)} steps, target {dur_ms}ms)..."
         )
-
+        reversed_ms = 0
         for steer, spd, step_dur in sequence:
-            try:
-                self.client.steer_sync(steer)
-                self.client.move_sync(
-                    DriveDirection.BACKWARD, speed=spd, duration_ms=step_dur
-                )
-                if self.grid_map:
-                    # 後退時は負の速度でオドメトリ更新
-                    self.grid_map.update_odometry(
-                        speed=-spd, steer_angle_deg=steer, duration_ms=step_dur
-                    )
-                if self.visualizer:
-                    canvas = self.visualizer.render(
-                        camera_frame_bgr=None,
-                        speed=-spd,
-                        steer_angle=steer,
-                        status_text="BREADCRUMB REVERSE",
-                        status_color=(0, 140, 255),
-                    )
-                    self.visualizer.show(canvas, wait_ms=1)
-                time.sleep(step_dur / 1000.0)
-            except Exception:
-                self.watchdog.record_error()
+            if not self._send_move(DriveDirection.BACKWARD, spd, steer, step_dur):
                 break
+            self._show_status(-spd, steer, "BREADCRUMB REVERSE", (0, 140, 255))
+            time.sleep(step_dur / 1000.0)
+            reversed_ms += step_dur
+        self.trajectory_tracker.consume_reverse(reversed_ms)
+        self._stop_quietly()
+        if reversed_ms == 0:
+            return False
 
-        try:
-            self.client.stop_sync()
-        except Exception:
-            pass
-        time.sleep(0.05)
-
-        # 後退後の方向転換 (Turn Away)
+        # 後退後の方向転換 (Turn Away)。危険があれば Pi が止める
         turn_steer, turn_spd, turn_dur = self.trajectory_tracker.get_escape_turn(
             last_cliff_sensors
         )
         print(
             f"[ESCAPE TURN] Turning away from hazard (Steer: {turn_steer:+02d}°, {turn_dur}ms)..."
         )
-        try:
-            self.client.steer_sync(turn_steer)
-            self.client.move_sync(
-                DriveDirection.FORWARD, speed=turn_spd, duration_ms=turn_dur
-            )
-            if self.grid_map:
-                self.grid_map.update_odometry(
-                    speed=turn_spd, steer_angle_deg=turn_steer, duration_ms=turn_dur
-                )
-            if self.visualizer:
-                canvas = self.visualizer.render(
-                    camera_frame_bgr=None,
-                    speed=turn_spd,
-                    steer_angle=turn_steer,
-                    status_text="HAZARD ESCAPE TURN",
-                    status_color=(0, 215, 255),
-                )
-                self.visualizer.show(canvas, wait_ms=1)
+        if self._send_move(DriveDirection.FORWARD, turn_spd, turn_steer, turn_dur):
+            self.trajectory_tracker.record(turn_spd, turn_steer, turn_dur, time.time())
+            self._show_status(turn_spd, turn_steer, "HAZARD ESCAPE TURN", (0, 215, 255))
             time.sleep(turn_dur / 1000.0)
-            self.client.stop_sync()
-            self.client.steer_sync(0)
-            self.watchdog.heartbeat()
-        except Exception:
-            self.watchdog.record_error()
+        self._stop_quietly()
 
-        # 脱出完了後に軌跡履歴とスタック検知をリセット
-        self.trajectory_tracker.clear()
         self.stuck_detector.reset()
         print("[ESCAPE COMPLETED] Resuming autonomous driving.")
+        return True
 
     def execute_unstuck(self) -> None:
         """
-        引っかかり・車輪空転状態からの自動脱出（バック ＋ 左右車体振り ＋ 迂回前進）
+        引っかかり・車輪空転状態からの自動脱出（軌跡に沿った後退 ＋ 左右車体振り）
         """
         print(
             f"\n[STUCK DETECTED] Vehicle trapped/spinning wheels "
             f"(motion: {self.stuck_detector.last_motion_value:.2f}) -> Executing Unstuck Action!"
         )
-        try:
-            self.client.stop_sync()
-        except Exception:
-            pass
+        self._stop_quietly()
 
         # Disengagement ロギング
         saved_path = self.buffer.save_event(
@@ -269,55 +276,55 @@ class RemoteAutonomousDriver:
         if saved_path:
             print(f"[DISENGAGEMENT LOGGED] Saved to: {saved_path}")
 
-        # Step 1: まず直前軌跡を逆再生してしっかり後退 (1000ms)
+        # Step 1: まず直前軌跡を逆再生して後退 (1000ms)
         print("[UNSTUCK: STEP 1] Reversing along trajectory away from trap...")
         self.execute_breadcrumb_reverse(target_duration_ms=1000)
 
-        # Step 2: 左右の車体振り (Wiggle) でタイヤの引っかかり・乗り上げを解消
+        # Step 2: 左右の車体振り (Wiggle) でタイヤの引っかかり・乗り上げを解消。
+        # 前進のみとし、危険があれば Pi が止める。
         print("[UNSTUCK: STEP 2] Wiggling chassis left and right...")
-        wiggle_actions = [
-            (-35, self.speed_limiter.min_speed, 350),  # 左切り前進
-            (35, self.speed_limiter.min_speed, 350),   # 右切り前進
-            (0, self.speed_limiter.min_speed, 400),    # まっすぐ少し後退
-            (35, self.speed_limiter.min_speed, 450),   # 迂回前進
-        ]
-        for steer, spd, dur in wiggle_actions:
-            try:
-                self.client.steer_sync(steer)
-                if steer == 0:
-                    self.client.move_sync(
-                        DriveDirection.BACKWARD, speed=spd, duration_ms=dur
-                    )
-                    if self.grid_map:
-                        self.grid_map.update_odometry(-spd, steer, dur)
-                else:
-                    self.client.move_sync(
-                        DriveDirection.FORWARD, speed=spd, duration_ms=dur
-                    )
-                    if self.grid_map:
-                        self.grid_map.update_odometry(spd, steer, dur)
-                if self.visualizer:
-                    canvas = self.visualizer.render(
-                        camera_frame_bgr=None,
-                        speed=spd,
-                        steer_angle=steer,
-                        status_text="UNSTUCK WIGGLE ACTION",
-                        status_color=(0, 215, 255),
-                    )
-                    self.visualizer.show(canvas, wait_ms=1)
-                time.sleep(dur / 1000.0)
-            except Exception:
+        spd = self.speed_limiter.min_speed
+        for steer, dur in [(-35, 350), (35, 350), (35, 450)]:
+            if not self._send_move(DriveDirection.FORWARD, spd, steer, dur):
                 break
+            self.trajectory_tracker.record(spd, steer, dur, time.time())
+            self._show_status(spd, steer, "UNSTUCK WIGGLE ACTION", (0, 215, 255))
+            time.sleep(dur / 1000.0)
 
-        try:
-            self.client.stop_sync()
-            self.client.steer_sync(0)
-        except Exception:
-            pass
-
+        self._stop_quietly()
         self.stuck_detector.reset()
-        self.trajectory_tracker.clear()
-        print("[UNSTUCK COMPLETED] Free from trap! Resuming autonomous driving.\n")
+        print("[UNSTUCK COMPLETED] Resuming autonomous driving.\n")
+
+    def _log_event_once(self, flag: str, trigger: str, note: str) -> None:
+        """危険が続く間に同じ介入を何度も記録しない"""
+        if getattr(self, flag):
+            return
+        saved_path = self.buffer.save_event(
+            trigger=trigger,
+            output_base_dir=self.log_dir,
+            model_name=self.model_path,
+            note=note,
+        )
+        if saved_path:
+            print(f"\n[DISENGAGEMENT LOGGED] Saved to: {saved_path}")
+        setattr(self, flag, True)
+
+    def _prepare_body(self) -> bool:
+        """走行前に Pi の状態を確認し、今いる床で段差を校正する"""
+        try:
+            status = self.client.get_status_sync()
+            if not status.cliff.guard_enabled:
+                print("Cliff Guard on Pi: DISABLED (PICARX_DISABLE_CLIFF_GUARD=1)")
+                return True
+            self.client.calibrate_floor_sync()
+            calibration = self.client.get_status_sync().cliff.calibration
+            print(f"Cliff Guard on Pi: ACTIVE ({calibration})")
+            return True
+        except httpx.HTTPStatusError as exc:
+            print(f"[START REFUSED] Floor calibration failed: {exc.response.text}")
+        except httpx.HTTPError as exc:
+            print(f"[START REFUSED] Cannot reach the Pi: {exc}")
+        return False
 
     def run(self):
         print("\n=== PiCar-X Remote Autonomous Driving Started (Indoor Home) ===")
@@ -327,16 +334,7 @@ class RemoteAutonomousDriver:
             f"Safe Dist: {self.safe_distance}cm "
             f"(Slowdown: {self.speed_limiter.slowdown_distance}cm)"
         )
-        cliff_status = (
-            f"ACTIVE (Threshold: {self.cliff_detector.threshold})"
-            if self.enable_cliff
-            else "DISABLED"
-        )
-        print(f"Cliff Safety Guard: {cliff_status}")
-        print(
-            f"Watchdog Guard: ACTIVE (Timeout: {self.watchdog.timeout_sec}s, "
-            f"Max Errors: {self.watchdog.max_consecutive_errors})"
-        )
+        print(f"Reflex on Pi: obstacle, cliff, unknown sensors, TTL {MOVE_TTL_MS}ms")
         print(
             f"Breadcrumb Reverse: ACTIVE (Target Distance/Duration: {self.reverse_duration_ms}ms)"
         )
@@ -353,293 +351,213 @@ class RemoteAutonomousDriver:
             else "DISABLED"
         )
         print(f"Dynamic Occupancy Mapping UI: {map_status}")
-        print("Disengagement Logging: ACTIVE (auto-records pre-event 3s)")
-        print("Press Ctrl+C or 'Q' in Map Window to emergency stop.\n")
+        print("Disengagement Logging: ACTIVE")
+        print("Press Ctrl+C or 'Q' in Map Window to stop.\n")
 
-        # 前進開始
-        try:
-            self.client.move_sync(
-                DriveDirection.FORWARD,
-                speed=self.speed_limiter.min_speed,
-                duration_ms=1000,
-            )
-            self.watchdog.heartbeat()
-        except Exception:
-            self.watchdog.record_error()
+        if not self._prepare_body():
+            return
 
-        last_frame_bgr = None
-        last_steer_norm = 0.0
-        last_steer_angle = 0
-        obstacle_encounter_count = 0
+        stream = self.client.open_camera_stream().start()
+        last_seq = 0
+        obstacle_cycles = 0
         step_counter = 0
         last_loop_time = time.time()
 
         try:
             while True:
+                self.profiler.mark_cycle()
                 now = time.time()
-                # 実際のループ経過時間 (10ms〜200msの範囲に制限)
-                loop_dt_ms = max(10, min(200, int((now - last_loop_time) * 1000)))
+                # 実際のループ経過時間。TTL を超えて走り続けることはない
+                loop_dt_ms = max(10, min(MOVE_TTL_MS, int((now - last_loop_time) * 1000)))
                 last_loop_time = now
-
                 step_counter += 1
-                status_badge = "NORMAL DRIVING"
-                badge_color = (0, 220, 0)
 
                 # ----------------------------------------------------
-                # 1. 多重安全チェック (Phase 3 Safety Layer)
+                # 1. カメラ画像取得（新しいフレームが届くまで待つ）
                 # ----------------------------------------------------
-
-                # 1-1. 通信ウォッチドッグ確認 (Phase 3.3 Watchdog)
-                if self.watchdog.should_stop:
-                    status_badge = "WATCHDOG TIMEOUT"
-                    badge_color = (0, 0, 220)
-                    msg = (
-                        f"\r[WATCHDOG STOP] Comm timeout or errors "
-                        f"({self.watchdog.consecutive_errors})! STOPPING."
-                    )
-                    print(msg, end="", flush=True)
-                    try:
-                        self.client.stop_sync()
-                    except Exception:
-                        pass
-
-                    if not self.is_watchdog_stopped:
-                        saved_path = self.buffer.save_event(
-                            trigger="communication_timeout",
-                            output_base_dir=self.log_dir,
-                            model_name=self.model_path,
-                            note=(
-                                f"Triggered by watchdog timeout "
-                                f"(errors={self.watchdog.consecutive_errors})"
-                            ),
+                with self.profiler.stage("capture"):
+                    stream_frame = stream.wait_for_frame(last_seq, timeout=FRAME_TIMEOUT_SEC)
+                    frame = None
+                    if stream_frame is not None:
+                        last_seq = stream_frame.seq
+                        frame = cv2.imdecode(
+                            np.frombuffer(stream_frame.jpeg, np.uint8), cv2.IMREAD_COLOR
                         )
-                        if saved_path:
-                            print(f"\n[DISENGAGEMENT LOGGED] Saved to: {saved_path}")
-                        self.is_watchdog_stopped = True
-
-                    time.sleep(0.2)
-                    # 再接続試行
-                    try:
-                        self.client.get_ultrasonic_sync()
-                        self.watchdog.heartbeat()
-                        self.is_watchdog_stopped = False
-                        print("\n[WATCHDOG RECOVERED] Communication restored.")
-                    except Exception:
-                        self.watchdog.record_error()
+                if frame is None:
+                    # 指令を送らなければ、車両は TTL で止まる
+                    self.watchdog.record_error()
+                    print(f"\r[NO FRAME] {stream.last_error}", end="", flush=True)
                     continue
 
-                # 1-2. 段差・階段落下防止ガード (Phase 3.1 & 3.4 Breadcrumb Reverse)
-                if self.enable_cliff:
+                # ----------------------------------------------------
+                # 2. Pi の状態確認
+                # ----------------------------------------------------
+                with self.profiler.stage("status"):
                     try:
-                        gs = self.client.get_grayscale_sync()
+                        status = self.client.get_status_sync()
                         self.watchdog.heartbeat()
-                    except Exception:
+                        self.is_watchdog_stopped = False
+                    except httpx.HTTPError:
+                        status = None
                         self.watchdog.record_error()
-                        gs = [999, 999, 999]
-
-                    if self.cliff_detector.is_cliff(gs):
-                        status_badge = "CLIFF DROP-OFF DETECTED"
-                        badge_color = (0, 0, 255)
-                        msg = f"\r[CLIFF GUARD] Drop-off Detected! {gs} -> STOPPING & RETREATING"
-                        print(msg, end="", flush=True)
-                        try:
-                            self.client.stop_sync()
-                        except Exception:
-                            pass
-
-                        # 落下危機の初回のみ直前3秒間を自動タグ付け
-                        if not self.is_cliff_stopped:
-                            saved_path = self.buffer.save_event(
-                                trigger="cliff_detected",
-                                output_base_dir=self.log_dir,
-                                model_name=self.model_path,
-                                note=f"Triggered by floor drop-off sensor values: {gs}",
-                            )
-                            if saved_path:
-                                print(f"\n[DISENGAGEMENT LOGGED] Saved to: {saved_path}")
-                            self.is_cliff_stopped = True
-
-                        # 直前軌跡（パンくずリスト）を逆再生して安全に後退 ＋ 回避旋回
-                        cliff_status = self.cliff_detector.get_cliff_status(gs)
-                        self.execute_breadcrumb_reverse(
-                            target_duration_ms=self.reverse_duration_ms,
-                            last_cliff_sensors=cliff_status,
+                if status is None:
+                    if self.watchdog.should_stop:
+                        self._log_event_once(
+                            "is_watchdog_stopped",
+                            "communication_timeout",
+                            f"Status unavailable (errors={self.watchdog.consecutive_errors})",
                         )
-                        continue
+                    continue
 
-                self.is_cliff_stopped = False
-
-                # 1-3. 前方障害物チェック (超音波センサー & 行き止まり脱出)
-                try:
-                    distance = self.client.get_ultrasonic_sync()
-                    self.watchdog.heartbeat()
-                except Exception:
-                    self.watchdog.record_error()
-                    distance = 999.0
-
-                # 障害物距離をマップに反映
+                distance = status.sensors.distance.cm
                 if self.grid_map:
-                    self.grid_map.update_sensor_ultrasonic(distance)
+                    # 反射が戻らない時は、何も見えていないので地図を書き換えない
+                    if distance is not None and not status.sensors.distance.far:
+                        self.grid_map.update_sensor_ultrasonic(distance)
                     if step_counter % 5 == 0:
                         self.grid_map.decay()
 
-                if 0 < distance < self.safe_distance:
-                    status_badge = "OBSTACLE STOP"
-                    badge_color = (0, 140, 255)
-                    obstacle_encounter_count += 1
-                    msg = f"\r[SAFETY GUARD] Obstacle Close: {distance:.1f}cm! STOPPING."
-                    print(msg, end="", flush=True)
-                    try:
-                        self.client.stop_sync()
-                    except Exception:
-                        pass
+                # ----------------------------------------------------
+                # 3. Pi の判定に応じた行動
+                # ----------------------------------------------------
+                action, reason = decide_action(status)
+                if action != BodyAction.ESCAPE_CLIFF:
+                    self.is_cliff_stopped = False
+                if action != BodyAction.AVOID_OBSTACLE:
+                    self.is_obstacle_stopped = False
+                    obstacle_cycles = 0
 
-                    # 障害物急ブレーキの初回のみ直前3秒間を自動タグ付け
-                    if not self.is_obstacle_stopped:
-                        saved_path = self.buffer.save_event(
-                            trigger="obstacle_stop",
-                            output_base_dir=self.log_dir,
-                            model_name=self.model_path,
-                            note=f"Triggered by ultrasonic obstacle distance {distance:.1f}cm",
-                        )
-                        if saved_path:
-                            print(f"\n[DISENGAGEMENT LOGGED] Saved to: {saved_path}")
-                        self.is_obstacle_stopped = True
+                if action == BodyAction.WAIT:
+                    print(f"\r[WAITING] Pi refuses to move: {reason.value}", end="", flush=True)
+                    time.sleep(WAIT_SLEEP_SEC)
+                    continue
 
-                    # 壁や家具の前で行き止まりになった場合は、直前軌跡を逆走して脱出
-                    if obstacle_encounter_count >= 2:
-                        print(
-                            "\n[OBSTACLE DEAD-END] In front of obstacle "
-                            "-> Executing reverse escape."
-                        )
+                if action == BodyAction.ESCAPE_CLIFF:
+                    floor = status.sensors.floor.values
+                    print(f"\r[CLIFF] Floor sensors {floor}", end="", flush=True)
+                    self._log_event_once(
+                        "is_cliff_stopped",
+                        "cliff_detected",
+                        f"Pi reported a drop-off, floor sensor values: {floor}",
+                    )
+                    if not self.execute_breadcrumb_reverse(
+                        target_duration_ms=self.reverse_duration_ms,
+                        last_cliff_sensors=cliff_sensors(status),
+                    ):
+                        time.sleep(WAIT_SLEEP_SEC)
+                    continue
+
+                if action == BodyAction.AVOID_OBSTACLE:
+                    obstacle_cycles += 1
+                    print(f"\r[OBSTACLE] {distance}cm", end="", flush=True)
+                    self._log_event_once(
+                        "is_obstacle_stopped",
+                        "obstacle_stop",
+                        f"Pi reported an obstacle at {distance}cm",
+                    )
+                    if obstacle_cycles >= OBSTACLE_ESCAPE_CYCLES:
+                        if not self._reverse_refused:
+                            print("\n[OBSTACLE DEAD-END] Executing reverse escape.")
                         self.execute_breadcrumb_reverse(
                             target_duration_ms=self.reverse_duration_ms
                         )
-                        obstacle_encounter_count = 0
-                    else:
-                        time.sleep(0.1)
-                    continue
-
-                # 障害物を脱したらフラグリセット
-                self.is_obstacle_stopped = False
-                obstacle_encounter_count = 0
-
-                # ----------------------------------------------------
-                # 2. カメラ画像取得
-                # ----------------------------------------------------
-                try:
-                    snapshot = self.client.get_camera_snapshot_sync(width=320, quality=70)
-                    if not snapshot or not snapshot.image_base64:
-                        self.watchdog.record_error()
-                        continue
-                    img_bytes = base64.b64decode(snapshot.image_base64)
-                    nparr = np.frombuffer(img_bytes, np.uint8)
-                    frame = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                    if frame is None:
-                        self.watchdog.record_error()
-                        continue
-                    last_frame_bgr = frame
-                    self.watchdog.heartbeat()
-                except Exception:
-                    self.watchdog.record_error()
+                        obstacle_cycles = 0
                     continue
 
                 # ----------------------------------------------------
-                # 3. Phase 3.6: スタック（引っかかり・空転）検知 & 自動脱出
+                # 4. Phase 3.6: スタック（引っかかり・空転）検知 & 自動脱出
                 # ----------------------------------------------------
                 if self.enable_stuck_detection:
                     if self.stuck_detector.update(
                         frame, motor_speed=self.speed_limiter.min_speed
                     ):
-                        status_badge = "UNSTUCK ACTION"
-                        badge_color = (0, 215, 255)
                         self.execute_unstuck()
                         continue
 
                 # ----------------------------------------------------
-                # 4. 前処理 & ONNX推論
+                # 5. 前処理 & ONNX推論
                 # ----------------------------------------------------
-                input_tensor = self.preprocess(frame)
-                outputs = self.session.run(None, {self.input_name: input_tensor})
+                with self.profiler.stage("inference"):
+                    input_tensor = self.preprocess(frame)
+                    outputs = self.session.run(None, {self.input_name: input_tensor})
                 steering_norm = float(outputs[0][0][0])  # -1.0 ~ 1.0
 
                 # ----------------------------------------------------
-                # 5. Phase 3.2: 動的車速制御 (Speed Limiter)
+                # 6. Phase 3.2: 動的車速制御 (Speed Limiter)
                 # ----------------------------------------------------
                 dynamic_speed = self.speed_limiter.calculate(
                     steering_norm=steering_norm,
-                    obstacle_distance_cm=distance if distance > 0 else None,
+                    obstacle_distance_cm=distance,
                 )
-
-                # ----------------------------------------------------
-                # 6. 実機制御 & 軌跡記録 (Phase 3.4 Breadcrumb Tracker)
-                # ----------------------------------------------------
                 steer_angle = int(steering_norm * self.max_steering_angle)
-                last_steer_norm = steering_norm
-                last_steer_angle = steer_angle
 
-                # 直前3秒リングバッファに保存
+                # 直前リングバッファに保存
                 self.buffer.append(
-                    frame_bgr=last_frame_bgr,
-                    steering_norm=last_steer_norm,
-                    steer_angle=last_steer_angle,
-                    ultrasonic_dist=distance,
-                    speed=dynamic_speed,
-                )
-
-                # Phase 3.4: 安全走行軌跡に記録 (実経過時間を記録)
-                self.trajectory_tracker.record(
-                    speed=dynamic_speed,
+                    frame_bgr=frame,
+                    steering_norm=steering_norm,
                     steer_angle=steer_angle,
-                    duration_ms=loop_dt_ms,
-                    timestamp=now,
+                    ultrasonic_dist=distance if distance is not None else -1.0,
+                    speed=dynamic_speed,
                 )
 
-                # Phase 3.5: オドメトリ更新 (実経過時間の移動量を積算)
-                if self.grid_map:
-                    self.grid_map.update_odometry(
-                        speed=dynamic_speed,
-                        steer_angle_deg=steer_angle,
-                        duration_ms=loop_dt_ms,
-                    )
-
-                try:
-                    self.client.steer_sync(steer_angle)
-                    self.client.move_sync(
-                        DriveDirection.FORWARD, speed=dynamic_speed, duration_ms=400
-                    )
-                    self.watchdog.heartbeat()
-                except Exception:
-                    self.watchdog.record_error()
-
                 # ----------------------------------------------------
-                # 7. Phase 3.5: マッピングUI リアルタイム描画
+                # 7. 実機制御 & 軌跡記録 (Phase 3.4 Breadcrumb Tracker)
                 # ----------------------------------------------------
-                if self.visualizer:
-                    canvas = self.visualizer.render(
-                        camera_frame_bgr=last_frame_bgr,
+                with self.profiler.stage("command"):
+                    try:
+                        self.client.steer_sync(steer_angle)
+                        moved = self.client.move_sync(
+                            DriveDirection.FORWARD, speed=dynamic_speed, ttl_ms=MOVE_TTL_MS
+                        )
+                        self.watchdog.heartbeat()
+                    except httpx.HTTPError:
+                        moved = False
+                        self.watchdog.record_error()
+
+                # Pi が受け付けた移動だけを軌跡と地図に反映する
+                if moved:
+                    self.trajectory_tracker.record(
                         speed=dynamic_speed,
                         steer_angle=steer_angle,
-                        ultrasonic_dist=distance,
-                        motion_value=self.stuck_detector.last_motion_value,
-                        status_text=status_badge,
-                        status_color=badge_color,
+                        duration_ms=loop_dt_ms,
+                        timestamp=now,
                     )
-                    key = self.visualizer.show(canvas, wait_ms=1)
+                    if self.grid_map:
+                        self.grid_map.update_odometry(
+                            speed=dynamic_speed,
+                            steer_angle_deg=steer_angle,
+                            duration_ms=loop_dt_ms,
+                        )
+
+                # ----------------------------------------------------
+                # 8. Phase 3.5: マッピングUI リアルタイム描画
+                # ----------------------------------------------------
+                if self.visualizer:
+                    with self.profiler.stage("display"):
+                        canvas = self.visualizer.render(
+                            camera_frame_bgr=frame,
+                            speed=dynamic_speed,
+                            steer_angle=steer_angle,
+                            ultrasonic_dist=distance if distance is not None else -1.0,
+                            motion_value=self.stuck_detector.last_motion_value,
+                            status_text="NORMAL DRIVING",
+                            status_color=(0, 220, 0),
+                        )
+                        key = self.visualizer.show(canvas, wait_ms=1)
                     if key == ord("q") or key == ord("Q"):
                         print("\n[STOP] User pressed 'Q' in Map Window.")
                         break
 
                 motion_val = self.stuck_detector.last_motion_value
-                status = (
+                print(
                     f"\rSteer: {steering_norm:+.2f} | Angle: {steer_angle:+02d}° | "
-                    f"Spd: {dynamic_speed:02d} | Flow: {motion_val:04.1f} | Dist: {distance:.1f}cm"
+                    f"Spd: {dynamic_speed:02d} | Flow: {motion_val:04.1f} | Dist: {distance}cm",
+                    end="",
+                    flush=True,
                 )
-                print(status, end="", flush=True)
-                time.sleep(0.05)
 
         except KeyboardInterrupt:
-            print("\n[MANUAL INTERVENTION] Emergency Stop requested by user.")
+            print("\n[MANUAL INTERVENTION] Stop requested by user.")
             saved_path = self.buffer.save_event(
                 trigger="manual_intervention",
                 output_base_dir=self.log_dir,
@@ -649,14 +567,17 @@ class RemoteAutonomousDriver:
             if saved_path:
                 print(f"[DISENGAGEMENT LOGGED] Pre-event frames saved to: {saved_path}")
         finally:
+            stream.stop()
             if self.visualizer:
                 self.visualizer.close()
             try:
-                self.client.steer_sync(0)
                 self.client.stop_sync()
-            except Exception:
-                pass
-            print("Vehicle safely stopped.")
+                self.client.steer_sync(0)
+            except httpx.HTTPError:
+                print("Could not reach the Pi. The car stops on its own when the TTL expires.")
+            print("Vehicle stopped.")
+            print(self.profiler.format_table())
+            print(f"Cycle profile: {self.profiler.save(self.log_dir.parent / 'cycle_profiles')}")
 
 
 def main():
@@ -684,17 +605,6 @@ def main():
         type=float,
         default=40.0,
         help="Obstacle distance to begin dynamic deceleration in cm",
-    )
-    parser.add_argument(
-        "--cliff_threshold",
-        type=int,
-        default=150,
-        help="Cliff/drop-off threshold ADC value (values below this trigger cliff guard)",
-    )
-    parser.add_argument(
-        "--disable_cliff",
-        action="store_true",
-        help="Disable cliff/drop-off safety guard",
     )
     parser.add_argument(
         "--reverse_duration_ms",
@@ -769,8 +679,6 @@ def main():
         curve_factor=args.curve_factor,
         safe_distance=args.safe_dist,
         slowdown_distance=args.slowdown_dist,
-        cliff_threshold=args.cliff_threshold,
-        enable_cliff=not args.disable_cliff,
         watchdog_timeout=args.watchdog_timeout,
         max_consecutive_errors=args.max_errors,
         reverse_duration_ms=args.reverse_duration_ms,

@@ -225,7 +225,7 @@ impl eframe::App for PiCarApp {
             // 1. センサー計器類 (最上部、バックグラウンドスレッドの最新値を常時表示)
             let snapshot = self.sensor_monitor.snapshot();
             ui.horizontal(|ui| {
-                match snapshot.distance_cm {
+                match snapshot.distance_cm.map(|r| r.value) {
                     Some(d) if d >= 0.0 => {
                         ui.colored_label(egui::Color32::LIGHT_BLUE, format!("距離: {:.1} cm", d));
                     }
@@ -233,13 +233,13 @@ impl eframe::App for PiCarApp {
                         ui.colored_label(egui::Color32::LIGHT_BLUE, "距離: -- cm");
                     }
                 }
-                if let Some(g) = snapshot.grayscale {
+                if let Some(g) = snapshot.grayscale.map(|r| r.value) {
                     ui.colored_label(
                         egui::Color32::LIGHT_YELLOW,
                         format!("グレイスケール: L{:4} C{:4} R{:4}", g[0], g[1], g[2]),
                     );
                 }
-                match snapshot.battery {
+                match snapshot.battery.map(|r| r.value) {
                     Some((voltage, percent)) if voltage < BATTERY_LOW_VOLTAGE => {
                         ui.colored_label(
                             egui::Color32::RED,

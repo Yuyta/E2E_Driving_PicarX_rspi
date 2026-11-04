@@ -30,7 +30,7 @@
 `.github/workflows/rust-ci.yml` は、push、Pull Request、手動実行で以下を確認します。
 
 - `rustfmt` と Clippy (`-D warnings`)
-- Raspberry Pi 3B+向け `aarch64-unknown-linux-gnu` リリースビルド
+- Raspberry Pi 5向け `aarch64-unknown-linux-gnu` リリースビルド
 - UnitTest実行とJUnit XMLレポート
 
 UnitTestの結果はGitHub Actionsのチェック、ジョブサマリー、JUnit XMLのArtifactで確認できます。ローカルでは次のMakeターゲットを利用できます。
@@ -38,8 +38,8 @@ UnitTestの結果はGitHub Actionsのチェック、ジョブサマリー、JUni
 ```bash
 cd <project_root>/rust/build
 make fmt
-make lint MODEL=3bplus
-make test MODEL=3bplus  # クロス環境でUnitTestバイナリをコンパイル
+make lint MODEL=5
+make test MODEL=5  # クロス環境でUnitTestバイナリをコンパイル
 ```
 
 ## 環境変数 (LLM連携)

@@ -15,7 +15,7 @@ async def test_client_move():
         return_value=httpx.Response(200, json={"status": "ok"})
     )
     client = PicarxClient(base_url=BASE_URL)
-    result = await client.move(DriveDirection.FORWARD, speed=40, duration_ms=1000)
+    result = await client.move(DriveDirection.FORWARD, speed=40, ttl_ms=1000)
 
     assert result is True
     assert route.called

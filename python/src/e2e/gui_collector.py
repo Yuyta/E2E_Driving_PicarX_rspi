@@ -61,7 +61,7 @@ class CameraWorker(QThread):
 
             # 2. カメラ画像取得 (PicarxClient再利用)
             try:
-                snapshot = self.client.get_camera_snapshot_sync(width=320, quality=70)
+                snapshot = self.client.get_camera_snapshot_sync()
                 if snapshot and snapshot.image_base64:
                     img_bytes = base64.b64decode(snapshot.image_base64)
             except Exception:

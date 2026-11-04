@@ -10,7 +10,7 @@ _client = PicarxClient()
 async def drive_forward(speed: int = 30, duration_ms: int = 500) -> str:
     """PiCar-Xを前進させます。speedは0-100、duration_msは走行時間(ミリ秒)です。"""
     try:
-        ok = await _client.move(DriveDirection.FORWARD, speed=speed, duration_ms=duration_ms)
+        ok = await _client.drive_for(DriveDirection.FORWARD, speed, duration_ms)
         return f"前進成功 (速度:{speed}, 時間:{duration_ms}ms)" if ok else "前進失敗"
     except Exception as e:
         return f"前進エラー: {str(e)}"
@@ -20,7 +20,7 @@ async def drive_forward(speed: int = 30, duration_ms: int = 500) -> str:
 async def drive_backward(speed: int = 30, duration_ms: int = 500) -> str:
     """PiCar-Xを後退させます。speedは0-100、duration_msは走行時間(ミリ秒)です。"""
     try:
-        ok = await _client.move(DriveDirection.BACKWARD, speed=speed, duration_ms=duration_ms)
+        ok = await _client.drive_for(DriveDirection.BACKWARD, speed, duration_ms)
         return f"後退成功 (速度:{speed}, 時間:{duration_ms}ms)" if ok else "後退失敗"
     except Exception as e:
         return f"後退エラー: {str(e)}"

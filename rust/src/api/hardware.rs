@@ -1,11 +1,9 @@
 use std::sync::{Arc, Mutex};
-use std::thread;
-use std::time::Duration;
 
 use crate::api::handlers::RobotHardware;
 use crate::api::models::DriveDirection;
 use crate::picarx::Picarx;
-use crate::sensor_monitor::SensorMonitor;
+use crate::sensor_monitor::{SensorMonitor, SensorSnapshot};
 use crate::tts::{TtsEngine, detect_language, generate_tts_file};
 
 /// 実機 PiCar-X ハードウェア制御実装
@@ -22,57 +20,39 @@ impl PiCarHardware {
 
         Ok(Self { px, sensor_monitor })
     }
+
+    fn car(&self) -> std::sync::MutexGuard<'_, Picarx> {
+        // 停止指令を確実に通すため、別スレッドのパニックでも操作を続ける
+        self.px
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 }
 
 impl RobotHardware for PiCarHardware {
-    fn drive(&self, direction: DriveDirection, speed: i32, duration_ms: u64) -> Result<(), String> {
-        // モーターへの指令は呼び出し中に完了させる。別スレッドで遅れて走り出すと、
-        // 直後の緊急停止を追い越してしまうため。
-        {
-            let mut car = self.px.lock().map_err(|e| e.to_string())?;
-            match direction {
-                DriveDirection::Forward => car.forward(speed),
-                DriveDirection::Backward => car.backward(speed),
-                DriveDirection::Stop => car.stop(),
-            }
-        }
-
-        if duration_ms > 0 && direction != DriveDirection::Stop {
-            let px = Arc::clone(&self.px);
-            thread::spawn(move || {
-                thread::sleep(Duration::from_millis(duration_ms));
-                if let Ok(mut car) = px.lock() {
-                    car.stop();
-                }
-            });
-        }
-
-        Ok(())
+    fn drive(&self, direction: DriveDirection, speed: i32) -> Result<(), String> {
+        let mut car = self.car();
+        let result = match direction {
+            DriveDirection::Forward => car.try_drive(speed),
+            DriveDirection::Backward => car.try_drive(-speed),
+            DriveDirection::Stop => car.try_stop(),
+        };
+        result.map_err(|error| format!("モーター指令に失敗しました: {error}"))
     }
 
     fn steer(&self, angle: i32) -> Result<(), String> {
-        let mut car = self.px.lock().map_err(|e| e.to_string())?;
-        car.set_dir_servo_angle(angle);
+        self.car().set_dir_servo_angle(angle);
         Ok(())
     }
 
     fn stop(&self) -> Result<(), String> {
-        let mut car = self.px.lock().map_err(|e| e.to_string())?;
-        car.stop();
-        Ok(())
+        self.car()
+            .try_stop()
+            .map_err(|error| format!("モーター停止に失敗しました: {error}"))
     }
 
-    fn get_distance(&self) -> Result<f32, String> {
-        let snap = self.sensor_monitor.snapshot();
-        Ok(snap.distance_cm.unwrap_or(0.0) as f32)
-    }
-
-    fn get_grayscale(&self) -> Result<(i32, i32, i32), String> {
-        let snap = self.sensor_monitor.snapshot();
-        match snap.grayscale {
-            Some([l, m, r]) => Ok((l as i32, m as i32, r as i32)),
-            None => Ok((0, 0, 0)),
-        }
+    fn sensors(&self) -> SensorSnapshot {
+        self.sensor_monitor.snapshot()
     }
 
     fn speak(&self, text: &str) -> Result<(), String> {
@@ -81,10 +61,9 @@ impl RobotHardware for PiCarHardware {
             .map_err(|e| format!("TTS生成エラー: {}", e))?;
 
         // 旧Rust GUIと同じPiCar-X固有の音声出力経路を使用する。
-        let mut car = self.px.lock().map_err(|error| error.to_string())?;
-        car.play_file(&wav_path, 1.0)
+        self.car()
+            .play_file(&wav_path, 1.0)
             .map_err(|error| format!("音声ファイル再生エラー: {error}"))?;
-        drop(car);
         if let Err(error) = std::fs::remove_file(&wav_path) {
             eprintln!("音声一時ファイル削除エラー: {error}");
         }
@@ -95,40 +74,5 @@ impl RobotHardware for PiCarHardware {
     fn listen(&self) -> Result<String, String> {
         // 音声認識結果（将来のVosk/Whisper統合用、現在は受信待機）
         Ok("音声認識スタンバイ".to_string())
-    }
-
-    fn take_snapshot(&self, _width: u32, _height: u32) -> Result<String, String> {
-        let args = [
-            "--nopreview",
-            "-t",
-            "100",
-            "--width",
-            "320",
-            "--height",
-            "240",
-            "--quality",
-            "70",
-            "--encoding",
-            "jpg",
-            "-o",
-            "-",
-        ];
-        let output = std::process::Command::new("rpicam-still")
-            .args(args)
-            .output()
-            .or_else(|_| {
-                std::process::Command::new("libcamera-still")
-                    .args(args)
-                    .output()
-            })
-            .map_err(|error| format!("カメラコマンドを起動できません: {error}"))?;
-
-        if !output.status.success() || output.stdout.is_empty() {
-            let detail = String::from_utf8_lossy(&output.stderr);
-            return Err(format!("カメラ撮影に失敗しました: {detail}"));
-        }
-
-        use base64::Engine as _;
-        Ok(base64::engine::general_purpose::STANDARD.encode(output.stdout))
     }
 }
