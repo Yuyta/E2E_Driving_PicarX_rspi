@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -43,6 +44,10 @@ const REG_PRESCALER_T0: u8 = 0x40;
 const REG_PERIOD_T0: u8 = 0x44;
 const TIMER_PERIOD: u16 = 4095; // 50Hz出力用ARR
 const TIMER_PRESCALER: u16 = 351; // 50Hz出力用PSC
+// モーター(P12, P13)はタイマー3を使う。サーボの50Hzは低すぎるので、公式の robot-hat と同じ
+// プリスケーラ10(レジスタ値は1引く)にする。72MHz / (10 * 4096) = 約1.76kHz
+const MOTOR_TIMER_INDEX: u8 = 3;
+const MOTOR_TIMER_PRESCALER: u16 = 9;
 
 // モーター速度 (-100 〜 100)
 const MOTOR_SPEED_MIN: i32 = -100;
@@ -68,6 +73,26 @@ const WARMUP_TONE_FREQ_HZ: f32 = 440.0;
 const WARMUP_TONE_DURATION_MS: u64 = 10;
 const WARMUP_TONE_VOLUME: f32 = 0.0;
 
+/// 舵角から左右の車輪の速度を決める。正の舵角は右折で、前進でも後退でも右が内側になる。
+/// 後輪にデフがないので、左右が同じ速さだと車体が曲がりにくい。
+/// 減速の割合は公式の picarx と同じ `(100 - |舵角|) / 100`。
+fn wheel_speeds(speed: i32, steer_angle: i32) -> (i32, i32) {
+    let inner = speed * (100 - steer_angle.abs().min(100)) / 100;
+    match steer_angle {
+        a if a > 0 => (speed, inner),
+        a if a < 0 => (inner, speed),
+        _ => (speed, speed),
+    }
+}
+
+fn timer_prescaler(timer_index: u8) -> u16 {
+    if timer_index == MOTOR_TIMER_INDEX {
+        MOTOR_TIMER_PRESCALER
+    } else {
+        TIMER_PRESCALER
+    }
+}
+
 pub struct Picarx {
     i2c: I2c,
     _servo_en: OutputPin,
@@ -88,7 +113,8 @@ pub struct Picarx {
     left_reverse: bool,
     right_reverse: bool,
 
-    ultrasonic: Ultrasonic,
+    // GPIOのみを使う。測定中にI2C(モーター)を止めないようロックを分ける
+    ultrasonic: Arc<Mutex<Ultrasonic>>,
     _audio_sink: MixerDeviceSink,
     audio_player: Player,
 
@@ -148,7 +174,7 @@ impl Picarx {
             left_reverse: false,
             right_reverse: true,
             // Picarx::new()側で既にMCUリセット済みのため、ここでは再リセットしない
-            ultrasonic: Ultrasonic::new(false)?,
+            ultrasonic: Arc::new(Mutex::new(Ultrasonic::new(false)?)),
             _audio_sink: audio_sink,
             audio_player,
             last_written: HashMap::new(),
@@ -194,7 +220,7 @@ impl Picarx {
 
     fn init_hat_timers(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         for i in 0..4 {
-            self.write_word(REG_PRESCALER_T0 + i, TIMER_PRESCALER)?;
+            self.write_word(REG_PRESCALER_T0 + i, timer_prescaler(i))?;
             thread::sleep(Duration::from_millis(1));
             self.write_word(REG_PERIOD_T0 + i, TIMER_PERIOD)?;
             thread::sleep(Duration::from_millis(1));
@@ -202,8 +228,8 @@ impl Picarx {
 
         thread::sleep(Duration::from_millis(50));
         println!(
-            "✓ Timers initialized (50Hz: ARR={}, PSC={})",
-            TIMER_PERIOD, TIMER_PRESCALER
+            "✓ Timers initialized (ARR={}, servo PSC={}, motor PSC={})",
+            TIMER_PERIOD, TIMER_PRESCALER, MOTOR_TIMER_PRESCALER
         );
         Ok(())
     }
@@ -237,6 +263,16 @@ impl Picarx {
     }
 
     fn set_motor_speed(&mut self, motor_idx: u8, speed: i32) {
+        if let Err(e) = self.try_set_motor_speed(motor_idx, speed) {
+            eprintln!("⚠ モーターPWM書き込み失敗 (motor_idx={}): {}", motor_idx, e);
+        }
+    }
+
+    fn try_set_motor_speed(
+        &mut self,
+        motor_idx: u8,
+        speed: i32,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let mut clamped_speed = speed.clamp(MOTOR_SPEED_MIN, MOTOR_SPEED_MAX);
 
         let is_left = motor_idx == 0;
@@ -275,12 +311,7 @@ impl Picarx {
             REG_MOTOR2_PWM
         };
 
-        if let Err(e) = self.write_word(reg_pwm, pwm_value) {
-            eprintln!(
-                "⚠ モーターPWM書き込み失敗 (reg=0x{:02X}, motor_idx={}): {}",
-                reg_pwm, motor_idx, e
-            );
-        }
+        self.write_word(reg_pwm, pwm_value)
     }
 
     fn set_servo_angle(&mut self, reg: u8, angle: i32) {
@@ -309,6 +340,27 @@ impl Picarx {
     pub fn stop(&mut self) {
         self.set_motor_speed(0, 0);
         self.set_motor_speed(1, 0);
+    }
+
+    /// 両モーターへの書き込みを試み、失敗を呼び出し元へ返す。片方が失敗しても他方は止める。
+    pub fn try_stop(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.try_set_both(0)
+    }
+
+    /// `speed` が負なら後退する。現在の舵角に応じて内側の車輪を遅くする。失敗を呼び出し元へ返す。
+    pub fn try_drive(&mut self, speed: i32) -> Result<(), Box<dyn std::error::Error>> {
+        let (left, right) = wheel_speeds(speed, self.dir_angle);
+        self.try_set_wheels(left, right)
+    }
+
+    fn try_set_both(&mut self, speed: i32) -> Result<(), Box<dyn std::error::Error>> {
+        self.try_set_wheels(speed, speed)
+    }
+
+    fn try_set_wheels(&mut self, left: i32, right: i32) -> Result<(), Box<dyn std::error::Error>> {
+        let left = self.try_set_motor_speed(0, left);
+        let right = self.try_set_motor_speed(1, right);
+        left.and(right)
     }
 
     pub fn set_dir_servo_angle(&mut self, angle: i32) {
@@ -419,16 +471,20 @@ impl Picarx {
         let a1 = self.read_adc_channel(1)?;
         let a2 = self.read_adc_channel(2)?;
 
-        Ok([a0 & ADC_MASK, a1 & ADC_MASK, a2 & ADC_MASK])
+        // 実機では進行方向に向かって A0 が右、A2 が左。戻り値は [左, 中央, 右] に揃える
+        Ok([a2 & ADC_MASK, a1 & ADC_MASK, a0 & ADC_MASK])
     }
 
     pub fn get_distance(&mut self) -> f64 {
-        self.ultrasonic.read_distance()
+        self.ultrasonic
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .read_distance()
     }
 
-    /// リトライなしで1回だけ距離計測を試みる(バックグラウンドポーリング向け)
-    pub fn try_get_distance_once(&mut self) -> Option<f64> {
-        self.ultrasonic.try_read_distance_once()
+    /// 超音波センサーへの参照。`Picarx` のロックを持たずに測定するために使う。
+    pub fn ultrasonic_handle(&self) -> Arc<Mutex<Ultrasonic>> {
+        Arc::clone(&self.ultrasonic)
     }
 
     /// バッテリーの実際の電圧(V)を取得する
@@ -521,5 +577,47 @@ impl Drop for Picarx {
         // servo off
         std::thread::sleep(std::time::Duration::from_millis(SERVO_POWEROFF_DELAY_MS));
         self._servo_en.set_low();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        MOTOR_TIMER_INDEX, MOTOR_TIMER_PRESCALER, REG_MOTOR1_PWM, REG_MOTOR2_PWM, REG_PWM_CH0,
+        REG_PWM_CH2, TIMER_PRESCALER, timer_prescaler, wheel_speeds,
+    };
+
+    /// robot-hat の割り当てと同じく、チャンネルを4で割った値がタイマー番号になる
+    fn timer_of(pwm_register: u8) -> u8 {
+        (pwm_register - REG_PWM_CH0) / 4
+    }
+
+    #[test]
+    fn straight_driving_keeps_both_wheels_equal() {
+        assert_eq!(wheel_speeds(50, 0), (50, 50));
+        assert_eq!(wheel_speeds(-50, 0), (-50, -50));
+    }
+
+    #[test]
+    fn the_inner_wheel_slows_down_when_steering() {
+        assert_eq!(wheel_speeds(50, 30), (50, 35));
+        assert_eq!(wheel_speeds(50, -30), (35, 50));
+    }
+
+    #[test]
+    fn the_inner_wheel_is_the_same_side_when_reversing() {
+        assert_eq!(wheel_speeds(-50, 30), (-50, -35));
+        assert_eq!(wheel_speeds(-50, -30), (-35, -50));
+    }
+
+    #[test]
+    fn motors_get_the_fast_timer_and_servos_keep_50hz() {
+        assert_eq!(timer_of(REG_MOTOR1_PWM), MOTOR_TIMER_INDEX);
+        assert_eq!(timer_of(REG_MOTOR2_PWM), MOTOR_TIMER_INDEX);
+        assert_eq!(timer_prescaler(MOTOR_TIMER_INDEX), MOTOR_TIMER_PRESCALER);
+
+        for servo in REG_PWM_CH0..=REG_PWM_CH2 {
+            assert_eq!(timer_prescaler(timer_of(servo)), TIMER_PRESCALER);
+        }
     }
 }

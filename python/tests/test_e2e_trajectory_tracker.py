@@ -17,10 +17,8 @@ def test_trajectory_tracker_record():
 
 def test_reverse_sequence_empty():
     tracker = TrajectoryTracker(default_reverse_duration_ms=1000, reverse_speed=30)
-    seq = tracker.get_reverse_sequence()
-    # 履歴が空の場合はまっすぐ1000ms後退
-    assert len(seq) == 1
-    assert seq[0] == (0, 30, 1000)
+    # 履歴がなければ後方の安全を確認できないので後退しない
+    assert tracker.get_reverse_sequence() == []
 
 
 def test_reverse_sequence_unwind():
@@ -44,17 +42,35 @@ def test_reverse_sequence_unwind():
     assert sum(s[2] for s in seq) == 600
 
 
-def test_reverse_sequence_partial_and_fill():
+def test_reverse_sequence_stops_at_the_end_of_history():
     tracker = TrajectoryTracker(default_reverse_duration_ms=1000, reverse_speed=30)
 
     # 200ms 分しか履歴がない場合
     tracker.record(speed=30, steer_angle=-25, duration_ms=200, timestamp=1.0)
 
     seq = tracker.get_reverse_sequence(target_duration_ms=800)
-    # 200ms分 (-25°) + 残り600msを最後の角度(-25°)で補完
-    assert sum(s[2] for s in seq) == 800
-    assert seq[0] == (-25, 30, 200)
-    assert seq[1] == (-25, 30, 600)
+    # 記録にある200ms分だけ戻り、その先へは進まない
+    assert seq == [(-25, 30, 200)]
+
+
+def test_reverse_sequence_skips_steps_the_pi_would_reject():
+    tracker = TrajectoryTracker(reverse_speed=30)
+    tracker.record(speed=30, steer_angle=5, duration_ms=200, timestamp=1.0)
+    tracker.record(speed=30, steer_angle=9, duration_ms=20, timestamp=1.2)
+    assert tracker.get_reverse_sequence(target_duration_ms=500) == [(5, 30, 200)]
+
+
+def test_consume_reverse_keeps_the_rest_of_the_history():
+    tracker = TrajectoryTracker(reverse_speed=30)
+    tracker.record(speed=30, steer_angle=0, duration_ms=200, timestamp=1.0)
+    tracker.record(speed=30, steer_angle=10, duration_ms=200, timestamp=1.2)
+
+    tracker.consume_reverse(300)
+
+    assert [(p.steer_angle, p.duration_ms) for p in tracker.history] == [(0, 100)]
+    assert tracker.get_reverse_sequence(target_duration_ms=500) == [(0, 30, 100)]
+    tracker.consume_reverse(1000)
+    assert tracker.get_reverse_sequence() == []
 
 
 def test_escape_turn_cliff():

@@ -134,8 +134,8 @@ jobs:
           path: rust/test-results/junit.xml
           if-no-files-found: warn
 
-  build-3bplus:
-    name: Cross-build for Raspberry Pi 3B+
+  build-pi5:
+    name: Cross-build for Raspberry Pi 5
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -146,7 +146,7 @@ jobs:
 
       - name: Build release binary
         id: build
-        run: make -C rust/build build MODEL=3bplus
+        run: make -C rust/build build MODEL=5
 
       - name: Add build summary
         if: ${{ always() }}
@@ -154,18 +154,18 @@ jobs:
           BUILD_OUTCOME: ${{ steps.build.outcome }}
         run: |
           {
-            echo "## Raspberry Pi 3B+ build"
+            echo "## Raspberry Pi 5 build"
             echo "| Setting | Value |"
             echo "| --- | --- |"
             echo "| Target | aarch64-unknown-linux-gnu |"
-            echo "| CPU | cortex-a53 |"
+            echo "| CPU | cortex-a76 |"
             echo "| Result | ${BUILD_OUTCOME} |"
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload 3bplus binary
+      - name: Upload Pi 5 binary
         if: ${{ steps.build.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
-          name: picar-x-rust-3bplus
+          name: picar-x-rust-pi5
           path: rust/target/aarch64-unknown-linux-gnu/release/picar-x-rust
           if-no-files-found: error

@@ -8,6 +8,7 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PySide6.QtCore import QEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from src.gui.app import PicarxMainWindow  # noqa: E402
@@ -45,6 +46,10 @@ def window():
     win.camera_timer.stop()
     yield win, client, app
     win.close()
+    # Linux では、ウィジェットを Python の終了処理に任せるとクラッシュする
+    win.deleteLater()
+    app.sendPostedEvents(None, QEvent.DeferredDelete)
+    app.processEvents()
 
 
 def wait_until(predicate, app, timeout=2.0):

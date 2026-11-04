@@ -1,2 +1,2 @@
 mod core;
-pub use core::Ultrasonic;
+pub use core::{FAR_DISTANCE_CM, Ultrasonic};

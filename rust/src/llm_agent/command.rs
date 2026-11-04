@@ -23,12 +23,12 @@ pub enum SensorKind {
 impl SensorKind {
     fn read_from(self, s: &SensorSnapshot) -> Option<f64> {
         match self {
-            SensorKind::Distance => s.distance_cm,
-            SensorKind::GrayscaleLeft => s.grayscale.map(|g| g[0] as f64),
-            SensorKind::GrayscaleCenter => s.grayscale.map(|g| g[1] as f64),
-            SensorKind::GrayscaleRight => s.grayscale.map(|g| g[2] as f64),
-            SensorKind::BatteryVoltage => s.battery.map(|(v, _)| v),
-            SensorKind::BatteryPercent => s.battery.map(|(_, p)| p as f64),
+            SensorKind::Distance => s.distance_cm.map(|r| r.value),
+            SensorKind::GrayscaleLeft => s.grayscale.map(|r| r.value[0] as f64),
+            SensorKind::GrayscaleCenter => s.grayscale.map(|r| r.value[1] as f64),
+            SensorKind::GrayscaleRight => s.grayscale.map(|r| r.value[2] as f64),
+            SensorKind::BatteryVoltage => s.battery.map(|r| r.value.0),
+            SensorKind::BatteryPercent => s.battery.map(|r| r.value.1 as f64),
         }
     }
 }
@@ -273,13 +273,13 @@ impl CommandQueue {
 #[cfg(test)]
 mod tests {
     use super::{Command, Condition, ConditionExpr, Operator, SensorKind};
-    use crate::sensor_monitor::SensorSnapshot;
+    use crate::sensor_monitor::{SensorSnapshot, Timed};
 
     fn snapshot() -> SensorSnapshot {
         SensorSnapshot {
-            distance_cm: Some(10.0),
-            grayscale: Some([100, 200, 300]),
-            battery: Some((7.4, 85)),
+            distance_cm: Some(Timed::now(10.0)),
+            grayscale: Some(Timed::now([100, 200, 300])),
+            battery: Some(Timed::now((7.4, 85))),
         }
     }
 

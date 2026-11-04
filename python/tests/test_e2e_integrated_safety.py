@@ -5,8 +5,8 @@ Integrated Test for PiCar-X E2E Safety, Mapping & Autonomy Layer
 """
 
 import numpy as np
+
 from src.e2e.mapping.occupancy_grid import OccupancyGridMap
-from src.e2e.safety.cliff_detector import CliffDetector
 from src.e2e.safety.speed_limiter import SpeedLimiter
 from src.e2e.safety.stuck_detector import StuckDetector
 from src.e2e.safety.trajectory_tracker import TrajectoryTracker
@@ -15,7 +15,6 @@ from src.e2e.safety.watchdog import CommunicationWatchdog
 
 def test_integrated_cliff_and_breadcrumb_escape():
     """段差検知と直前軌跡逆再生の協調動作テスト"""
-    cliff_detector = CliffDetector(threshold=150)
     tracker = TrajectoryTracker(default_reverse_duration_ms=1000, reverse_speed=25)
     grid_map = OccupancyGridMap(grid_width=100, grid_height=100, cell_size_m=0.05)
 
@@ -24,9 +23,8 @@ def test_integrated_cliff_and_breadcrumb_escape():
     grid_map.update_odometry(speed=30, steer_angle_deg=0, duration_ms=500)
     assert grid_map.robot_x > 0.0
 
-    # 2. 左側センサーが段差（値 < 150）を検知
-    cliff_sensor_values = [50, 800, 800]
-    assert cliff_detector.is_cliff(cliff_sensor_values)
+    # 2. Pi が左側センサーで段差を検知（/api/status の floor.cliff）
+    cliff_status = (True, False, False)
 
     # 3. 直前軌跡から逆再生シーケンスを取得
     reverse_seq = tracker.get_reverse_sequence(target_duration_ms=500)
@@ -36,7 +34,6 @@ def test_integrated_cliff_and_breadcrumb_escape():
         grid_map.update_odometry(speed=-spd, steer_angle_deg=steer, duration_ms=dur)
 
     # 4. 後退後のエスケープ旋回
-    cliff_status = cliff_detector.get_cliff_status(cliff_sensor_values)
     turn_steer, turn_spd, turn_dur = tracker.get_escape_turn(cliff_status)
     # 左が崖だったため、右方向 (+35°) へ旋回前進するはず
     assert turn_steer > 0

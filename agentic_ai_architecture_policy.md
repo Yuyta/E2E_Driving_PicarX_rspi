@@ -104,11 +104,14 @@ Gemini は応答の品質と速度に優れる。一方で通信断やクォー�
 
 | 用途 | 要求 | 応答 |
 |---|---|---|
-| 走行 | `POST /api/drive/move` `{"direction":"forward","speed":30,"duration_ms":1000}` | `{"status":"ok"}` |
+| 走行 | `POST /api/drive/move` `{"direction":"forward","speed":30,"ttl_ms":500}` | `{"status":"ok"}` |
 | 緊急停止 | `POST /api/drive/emergency_stop`、`POST /api/drive/emergency_stop/reset` | `{"status":"ok"}` |
-| 距離 | `GET /api/sensor/ultrasonic` | `{"distance_cm":35.4}` |
+| 距離 | `GET /api/sensor/ultrasonic` | `{"distance_cm":35.4,"age_ms":12}`。不明な時は 503 |
 | 発話 | `POST /api/audio/speak` `{"text":"..."}` | `{"status":"ok"}` |
-| 画像 | `GET /api/camera/snapshot` | `{"image_base64":"...","width":320,"height":240}` |
+| 画像 | `GET /api/camera/snapshot` | `{"image_base64":"...","width":320,"height":240,"seq":1,"age_ms":20}` |
+| 映像 | `GET /api/camera/stream` | MJPEG の常時配信 |
+| 状態 | `GET /api/status` | 電池、センサー、走行モード、走れない理由 |
+| 安全イベント | `GET /api/events?after=<id>` | `{"events":[...],"latest_event_id":3}` |
 
 全要求で Bearer トークンが必須である。一覧は [APPLICATION_SPECIFICATION.md §7](APPLICATION_SPECIFICATION.md) を参照する。
 

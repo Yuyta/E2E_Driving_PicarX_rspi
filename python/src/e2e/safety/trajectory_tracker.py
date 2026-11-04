@@ -9,6 +9,9 @@ from collections import deque
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+# Pi の `/api/drive/move` が受け付ける最短の TTL
+MIN_COMMAND_MS = 50
+
 
 @dataclass
 class TrajectoryPoint:
@@ -67,6 +70,8 @@ class TrajectoryTracker:
     ) -> List[Tuple[int, int, int]]:
         """
         直前に走行してきた安全な軌跡を逆再生するための後退シーケンスを生成。
+        後方にセンサーがないため、記録にない範囲へは後退しない。
+        履歴が足りなければ短いシーケンスを返し、空なら空のリストを返す。
 
         Args:
             target_duration_ms: 後退したい合計時間 (省略時は default_reverse_duration_ms)
@@ -80,10 +85,6 @@ class TrajectoryTracker:
             else self.default_reverse_duration_ms
         )
 
-        # 履歴が空の場合は直進後退の単一コマンドを返す
-        if not self.history:
-            return [(0, self.reverse_speed, target_ms)]
-
         sequence: List[Tuple[int, int, int]] = []
         accumulated_ms = 0
 
@@ -94,17 +95,28 @@ class TrajectoryTracker:
 
             remaining_ms = target_ms - accumulated_ms
             step_ms = min(pt.duration_ms, remaining_ms)
+            if step_ms < MIN_COMMAND_MS:
+                # Pi が受け付けない短さの指令は作らない
+                accumulated_ms += step_ms
+                continue
 
             # アッカーマンステアリングでは、前進時と同じ舵角で後退することで同じ軌跡を戻る
             sequence.append((pt.steer_angle, self.reverse_speed, step_ms))
             accumulated_ms += step_ms
 
-        # 履歴の総時間が target_ms に満たない場合は、最後の舵角で残りを埋める
-        if accumulated_ms < target_ms:
-            last_angle = sequence[-1][0] if sequence else 0
-            sequence.append((last_angle, self.reverse_speed, target_ms - accumulated_ms))
-
         return sequence
+
+    def consume_reverse(self, duration_ms: int) -> None:
+        """実際に後退した分を履歴から取り除く。残りは次の後退に使える。"""
+        remaining_ms = duration_ms
+        while self.history and remaining_ms > 0:
+            newest = self.history[-1]
+            if newest.duration_ms <= remaining_ms:
+                remaining_ms -= newest.duration_ms
+                self.history.pop()
+            else:
+                newest.duration_ms -= remaining_ms
+                remaining_ms = 0
 
     def get_escape_turn(
         self, last_cliff_sensors: Optional[Tuple[bool, bool, bool]] = None
