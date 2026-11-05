@@ -48,19 +48,27 @@ class LLMFactory:
             )
 
         elif selected == ModelPreset.OLLAMA_LOCAL:
-            from langchain_ollama import ChatOllama
-
-            # プリセット名 "ollama/qwen3.5:4b" からモデル名抽出
-            raw_name = selected.value.replace("ollama/", "")
-            return ChatOllama(
-                model=raw_name,
-                base_url=settings.ollama_base_url,
-                temperature=temperature,
-                num_ctx=OLLAMA_NUM_CTX,
-                keep_alive=OLLAMA_KEEP_ALIVE,
-                # 思考モードは応答を遅くするので、会話では使わない
-                reasoning=False,
-            )
+            return LLMFactory.create_local(temperature=temperature)
 
         else:
             raise ValueError(f"サポートされていないモデルプリセットです: {selected}")
+
+    @staticmethod
+    def create_local(
+        model: Optional[str] = None, temperature: float = 0.2, **options
+    ) -> BaseChatModel:
+        """Ollama のモデルを生成する。比較のため、プリセット以外のモデルも指定できる。"""
+        from langchain_ollama import ChatOllama
+
+        # プリセット名 "ollama/qwen3.5:4b" からモデル名抽出
+        raw_name = model or ModelPreset.OLLAMA_LOCAL.value.replace("ollama/", "")
+        return ChatOllama(
+            model=raw_name,
+            base_url=settings.ollama_base_url,
+            temperature=temperature,
+            num_ctx=OLLAMA_NUM_CTX,
+            keep_alive=OLLAMA_KEEP_ALIVE,
+            # 思考モードは応答を遅くするので、会話では使わない
+            reasoning=False,
+            **options,
+        )

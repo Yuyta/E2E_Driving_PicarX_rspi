@@ -166,12 +166,17 @@ class MemoryStore:
         messages.sort(key=lambda m: (hits[m.id], m.id), reverse=True)
         return messages[:limit]
 
-    def build_context(self, query: str) -> str:
+    def build_context(
+        self,
+        query: str,
+        previous_limit: int = PREVIOUS_SESSION_MESSAGES,
+        related_limit: int = RELATED_MESSAGES,
+    ) -> str:
         """Agent のシステムプロンプトへ入れる文章を作る。記憶がなければ空文字を返す。"""
         facts = self.facts()
-        previous = self.previous_session_messages()
+        previous = self.previous_session_messages(previous_limit)
         shown = {message.id for message in previous}
-        related = [message for message in self.search(query) if message.id not in shown]
+        related = [m for m in self.search(query, related_limit) if m.id not in shown]
         if not (facts or previous or related):
             return ""
 

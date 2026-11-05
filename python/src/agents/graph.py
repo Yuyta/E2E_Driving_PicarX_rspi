@@ -5,9 +5,9 @@ from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, System
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
-from src.agents.body_context import fetch_body_context
+from src.agents.body_context import STATUS_TIMEOUT_SEC, fetch_body_context
 from src.agents.state import AgentState
-from src.config import ModelPreset
+from src.config import ModelPreset, settings
 from src.llm_factory import LLMFactory
 from src.memory.store import get_memory_store
 from src.picarx_client.client import PicarxClient
@@ -24,7 +24,6 @@ from src.tools import (
 )
 
 optimizer = TokenOptimizer()
-STATUS_TIMEOUT_SEC = 1.0
 CONTEXT_HEADER = "参考情報。発言への回答に必要な時だけ使う。そのまま読み上げない。"
 ROUTER_PROMPT = (
     "あなたはPiCar-Xのメインコントローラです。ユーザーの指示を達成するために適切なツールを呼び出すか、"
@@ -60,9 +59,14 @@ def memory_context(memory, messages: List[BaseMessage]) -> str:
 
 def create_agent_graph(preset: Optional[ModelPreset] = None, status_client=None, memory=None):
     """マルチエージェント StateGraph を構築してコンパイル"""
-    llm = LLMFactory.create(preset=preset)
     # 応答を待たせないよう、状態の取得は短く打ち切る
     status_client = status_client or PicarxClient(timeout=STATUS_TIMEOUT_SEC)
+    if ModelPreset(preset or settings.default_model) == ModelPreset.OLLAMA_LOCAL:
+        from src.agents.local_agent import LocalAgent
+
+        return LocalAgent(status_client=status_client, memory=memory)
+
+    llm = LLMFactory.create(preset=preset)
 
     # ツールバインドLLM
     drive_tools = [drive_forward, drive_backward, steer_wheels, stop_moving, read_distance]
