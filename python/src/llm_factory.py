@@ -4,6 +4,10 @@ from langchain_core.language_models.chat_models import BaseChatModel
 
 from src.config import ModelPreset, settings
 
+OLLAMA_NUM_CTX = 4096
+# 読み込みに時間がかかるので、会話の間はメモリに残す
+OLLAMA_KEEP_ALIVE = "10m"
+
 
 class LLMFactory:
     """4種のモデル（Gemini 3種 + Ollama 1種）を動的に切り替えるファクトリ"""
@@ -46,12 +50,16 @@ class LLMFactory:
         elif selected == ModelPreset.OLLAMA_LOCAL:
             from langchain_ollama import ChatOllama
 
-            # プリセット名 "ollama/qwen2.5:7b" からモデル名抽出
+            # プリセット名 "ollama/qwen3.5:4b" からモデル名抽出
             raw_name = selected.value.replace("ollama/", "")
             return ChatOllama(
                 model=raw_name,
                 base_url=settings.ollama_base_url,
                 temperature=temperature,
+                num_ctx=OLLAMA_NUM_CTX,
+                keep_alive=OLLAMA_KEEP_ALIVE,
+                # 思考モードは応答を遅くするので、会話では使わない
+                reasoning=False,
             )
 
         else:

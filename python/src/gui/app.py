@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import sqlite3
 import sys
 import threading
 
@@ -21,10 +22,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.agents.stop_intent import StopIntent, parse_stop_intent
 from src.config import ModelPreset, settings
 from src.gui.async_runner import AsyncRunner
+from src.memory.store import get_memory_store
 from src.models import DriveDirection
 from src.picarx_client.client import PicarxClient
+
+AGENT_TIMEOUT_SEC = 60.0
+# ローカル LLM は最初の読み込みに時間がかかる
+LOCAL_AGENT_TIMEOUT_SEC = 120.0
 
 
 class PicarxMainWindow(QMainWindow):
@@ -298,6 +305,40 @@ class PicarxMainWindow(QMainWindow):
             return
         self.chat_input.clear()
         self.chat_history.append(f"<b>User:</b> {text}")
+
+        intent = parse_stop_intent(text)
+        if intent != StopIntent.NONE:
+            # 共有のイベントループに左右されないよう、専用スレッドで送る
+            threading.Thread(
+                target=self._send_fast_stop, args=(text, intent), daemon=True
+            ).start()
+            return
+        self._start_agent_turn(text)
+
+    def _send_fast_stop(self, text, intent):
+        """LLM を通さず停止する。失敗や続きの指示があれば LLM へ渡す。"""
+        try:
+            stopped = self.client.stop_sync()
+            failure = None if stopped else "Pi が停止を受け付けませんでした"
+        except Exception as exc:
+            stopped = False
+            failure = str(exc)
+
+        if stopped and intent == StopIntent.ONLY_STOP:
+            self._ui(lambda: self._append_chat("<b>Assistant:</b> 停止しました。"))
+            self._remember_turn(text, "停止しました。")
+            return
+        if stopped:
+            self._ui(lambda: self._append_chat("<i>[System] 停止しました。続きを処理します...</i>"))
+        else:
+            self._ui(
+                lambda: self._append_chat(
+                    f"<b>[Error]</b> 停止に失敗しました: {failure}。LLM からも試します"
+                )
+            )
+        self._ui(lambda: self._start_agent_turn(text))
+
+    def _start_agent_turn(self, text):
         self.chat_history.append(f"<i>Thinking with {self.current_model.value}...</i>")
 
         async def task():
@@ -328,6 +369,7 @@ class PicarxMainWindow(QMainWindow):
                 )
                 response = self._extract_response_text(response)
                 self._chat_messages.extend(messages[len(self._chat_messages) :])
+                self._remember_turn(text, response)
                 self._append_chat(f"<b>Assistant:</b> {response}")
                 try:
                     await self.client.speak(response)
@@ -342,6 +384,15 @@ class PicarxMainWindow(QMainWindow):
 
         self._async_call(task())
 
+    def _remember_turn(self, user_text, response):
+        """会話を保存する。保存に失敗しても応答は止めない。"""
+        try:
+            memory = get_memory_store()
+            memory.add_message("user", user_text)
+            memory.add_message("assistant", response)
+        except (OSError, sqlite3.Error) as error:
+            self._append_chat(f"<b>[Memory Error]</b> {error}")
+
     async def _invoke_agent_with_recovery(self):
         state = {
             "messages": self._chat_messages,
@@ -353,34 +404,68 @@ class PicarxMainWindow(QMainWindow):
         }
         config = {"recursion_limit": 20}
 
-        try:
+        async def invoke(timeout=AGENT_TIMEOUT_SEC):
             return await asyncio.wait_for(
-                self._agent_graph.ainvoke(state, config=config), timeout=60.0
+                self._agent_graph.ainvoke(state, config=config), timeout=timeout
             )
-        except Exception as error:
-            if not self._is_transient_model_error(error):
-                raise
 
+        try:
+            return await invoke()
+        except Exception as error:
+            if self.current_model == ModelPreset.OLLAMA_LOCAL or not self._is_model_unavailable(
+                error
+            ):
+                raise
+            first_error = error
+
+        # 混雑は少し待てば直ることがある。上限超過や通信断は待っても直らない
+        if self._is_model_busy(first_error):
             self._append_chat("<i>[System] Geminiが混雑しています。再試行しています...</i>")
             await asyncio.sleep(3.0)
             try:
-                return await asyncio.wait_for(
-                    self._agent_graph.ainvoke(state, config=config), timeout=60.0
-                )
-            except Exception:
-                fallback = ModelPreset.GEMINI_FLASH_LITE
-                if self.current_model == fallback:
+                return await invoke()
+            except Exception as error:
+                if not self._is_model_unavailable(error):
                     raise
+
+            if self.current_model != ModelPreset.GEMINI_FLASH_LITE:
                 self._append_chat("<i>[System] Flash-Liteへ切り替えて再試行しています...</i>")
-                self._agent_graph = self._create_agent_graph(fallback)
-                return await asyncio.wait_for(
-                    self._agent_graph.ainvoke(state, config=config), timeout=60.0
-                )
+                self._agent_graph = self._create_agent_graph(ModelPreset.GEMINI_FLASH_LITE)
+                try:
+                    return await invoke()
+                except Exception as error:
+                    if not self._is_model_unavailable(error):
+                        raise
+
+        self._append_chat("<i>[System] Geminiが使えないため、ローカルLLMで応答します...</i>")
+        self._agent_graph = self._create_agent_graph(ModelPreset.OLLAMA_LOCAL)
+        return await invoke(LOCAL_AGENT_TIMEOUT_SEC)
 
     @staticmethod
-    def _is_transient_model_error(error):
+    def _is_model_busy(error):
         message = str(error).upper()
         return "503" in message or "UNAVAILABLE" in message or "高負荷" in message
+
+    @classmethod
+    def _is_model_unavailable(cls, error):
+        """別のモデルへ切り替えれば解決しそうなエラーかどうか"""
+        if isinstance(error, (asyncio.TimeoutError, TimeoutError, ConnectionError, OSError)):
+            return True
+        message = f"{type(error).__name__} {error}".upper()
+        return cls._is_model_busy(error) or any(
+            word in message
+            for word in (
+                "429",
+                "RESOURCE_EXHAUSTED",
+                "QUOTA",
+                "CONNECT",
+                "TIMEOUT",
+                "NAME RESOLUTION",
+                "GETADDRINFO",
+                "API_KEY",
+                "API KEY",
+            )
+        )
 
     def _create_agent_graph(self, preset):
         from src.agents.graph import create_agent_graph
