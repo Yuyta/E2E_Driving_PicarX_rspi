@@ -14,8 +14,9 @@ from src.agents.local_agent import (
     REFUSED_MOTION,
     LocalAction,
     LocalAgent,
-    allows_motion,
+    Motion,
     parse_action,
+    plan_motion,
 )
 from src.config import ModelPreset
 from src.memory.store import MemoryStore
@@ -92,21 +93,26 @@ def test_parse_action(text, expected):
 @pytest.mark.parametrize(
     "action, text, expected",
     [
-        ("forward", "少し前に進んで", True),
-        ("forward", "前回の旅行は楽しかった", False),
-        ("forward", "前に進まないで", False),
-        ("forward", "進化って面白いよね", False),
-        ("forward", "「前に進んで」って英語で何て言うの？", False),
-        ("backward", "昨日バックで駐車するのに苦労したよ", False),
-        ("backward", "バックして", True),
-        ("backward", "前に進んで", False),
-        ("right", "右に曲がって", True),
-        ("right", "左に曲がって", False),
-        ("center", "タイヤをまっすぐにして", True),
+        ("forward", "少し前に進んで", Motion(drive="forward")),
+        ("forward", "前回の旅行は楽しかった", None),
+        ("forward", "前に進まないで", None),
+        ("forward", "進化って面白いよね", None),
+        ("forward", "「前に進んで」って英語で何て言うの？", None),
+        ("backward", "昨日バックで駐車するのに苦労したよ", None),
+        ("backward", "バックして", Motion(drive="backward")),
+        ("backward", "前に進んで", None),
+        ("right", "右に曲がって", Motion(steer="right")),
+        ("right", "左に曲がって", None),
+        ("center", "タイヤをまっすぐにして", Motion(steer="center")),
+        ("left", "ハンドルを左に戻して", Motion(steer="left")),
+        ("forward", "前に進みながら右に曲がって", Motion(drive="forward", steer="right")),
+        ("right", "前に進みながら右に曲がって", Motion(drive="forward", steer="right")),
+        ("left", "バックしながら左に曲がって", Motion(drive="backward", steer="left")),
+        ("forward", "前に進みながら曲がって", Motion(drive="forward")),
     ],
 )
-def test_allows_motion(action, text, expected):
-    assert allows_motion(action, text) is expected
+def test_plan_motion(action, text, expected):
+    assert plan_motion(action, text) == expected
 
 
 @pytest.mark.parametrize(
@@ -181,7 +187,81 @@ async def test_stop_is_always_allowed():
 async def test_failed_drive_is_reported_from_the_tool_result():
     agent = make_agent({"action": "forward"}, result="前進失敗")
     messages = await say(agent, "前に進んで")
-    assert messages[-1].content == "前進できませんでした（前進失敗）。"
+    assert messages[-1].additional_kwargs["speech"] == "前進できませんでした。"
+    assert "前進失敗" in messages[-1].content
+
+
+REFUSAL = "前進エラー: Client error '409 Conflict' for url 'http://192.0.2.1:8080/api/drive/move'"
+
+
+@pytest.mark.asyncio
+async def test_refusal_speech_gives_the_reason_without_the_error():
+    payload = status_payload(forward="obstacle")
+    agent = LocalAgent(
+        llm=make_llm({"action": "forward"}),
+        status_client=make_status_client(status=RobotStatus.model_validate(payload)),
+        memory=MemoryStore(":memory:"),
+        tools=make_tools(REFUSAL),
+    )
+    messages = await say(agent, "前に進んで")
+    assert messages[-1].additional_kwargs["speech"] == "前進できませんでした。障害物が近い。"
+    assert "409" in messages[-1].content
+
+
+@pytest.mark.asyncio
+async def test_error_details_are_not_sent_to_the_llm_on_the_next_turn():
+    agent = make_agent({"action": "forward"}, {"action": "reply", "text": "はい"}, result=REFUSAL)
+    first = await say(agent, "前に進んで")
+    await say(agent, "ありがとう", history=first)
+    assert not any("409" in m.content or "192.0.2.1" in m.content for m in sent_prompt(agent))
+
+
+@pytest.mark.parametrize(
+    "action",
+    ["forward", "right"],
+)
+@pytest.mark.asyncio
+async def test_turning_while_driving_steers_drives_and_recenters(action):
+    tools = make_tools("成功")
+    waits = []
+
+    async def record_wait(seconds):
+        waits.append(seconds)
+
+    agent = LocalAgent(
+        llm=make_llm({"action": action}),
+        status_client=make_status_client(),
+        memory=MemoryStore(":memory:"),
+        tools=tools,
+        sleep=record_wait,
+    )
+    messages = await say(agent, "少し前に進みながら右に曲がって")
+    assert tools["steer_wheels"].calls == [{"angle": 30}, {"angle": 0}]
+    assert tools["drive_forward"].calls == [{"speed": 50, "duration_ms": 500}]
+    assert waits == [0.5]
+    assert messages[-1].content == "右に曲がりながら前に進みました。"
+
+
+@pytest.mark.asyncio
+async def test_turning_without_a_side_asks_and_does_not_move():
+    tools = make_tools()
+    agent = make_agent({"action": "forward"}, tools=tools)
+    messages = await say(agent, "前に進みながら曲がって")
+    assert tools["drive_forward"].calls == []
+    assert tools["steer_wheels"].calls == []
+    assert messages[-1].content == "右と左のどちらに曲がりますか？"
+
+
+@pytest.mark.asyncio
+async def test_refused_turn_recenters_the_steering():
+    class RefusingDrive(FakeTool):
+        pass
+
+    tools = make_tools("成功")
+    tools["drive_forward"] = RefusingDrive(REFUSAL)
+    agent = make_agent({"action": "forward"}, tools=tools)
+    await say(agent, "前に進みながら右に曲がって")
+    assert tools["steer_wheels"].calls == [{"angle": 30}, {"angle": 0}]
 
 
 @pytest.mark.asyncio

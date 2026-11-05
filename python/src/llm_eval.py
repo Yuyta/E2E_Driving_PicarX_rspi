@@ -4,6 +4,7 @@
     uv run python -m src.llm_eval --model qwen3.5:2b --repeat 3
     uv run python -m src.llm_eval --baseline
     uv run python -m src.llm_eval --conversation
+    uv run python -m src.llm_eval --compound
 
 走行ツールは記録するだけの偽物で、状態は固定値を使う。記憶は一時ファイルに作る。
 発言や記憶はすべて架空のもので、結果に個人情報は含まない。
@@ -61,6 +62,23 @@ class Case:
     reply_has: Optional[str] = None
     args: Optional[dict] = None
     fact: Optional[Tuple[str, bool]] = None  # (値, 保存されているべきか)
+    tools: Optional[Tuple[str, ...]] = None  # 複数のツールを順に呼ぶ時
+
+
+TURN = ("steer_wheels", "drive_forward", "steer_wheels")
+TURN_BACK = ("steer_wheels", "drive_backward", "steer_wheels")
+COMPOUND_CASES = [
+    Case("前に進みながら右に曲がって", tools=TURN, args={"angle": 30}),
+    Case("右に曲がりながら進んで", tools=TURN, args={"angle": 30}),
+    Case("左に曲がりながら前に進んで", tools=TURN, args={"angle": -30}),
+    Case("少し前に進みながら左に曲がって", tools=TURN, args={"angle": -30}),
+    Case("右にカーブしながら前進して", tools=TURN, args={"angle": 30}),
+    Case("前に進みながら左へ", tools=TURN, args={"angle": -30}),
+    Case("バックしながら右に曲がって", tools=TURN_BACK, args={"angle": 30}),
+    Case("左に曲がりながら後ろに下がって", tools=TURN_BACK, args={"angle": -30}),
+    Case("前に進みながら曲がって", reply_has="どちら"),
+    Case("進みながら右と左を見て"),
+]
 
 
 CASES = [
@@ -164,7 +182,8 @@ def make_memory(directory: str, name: str) -> MemoryStore:
 
 def judge(case: Case, reply: str, tools: List[Tuple[str, dict]], facts: Dict[str, str]) -> bool:
     names = [name for name, _ in tools]
-    if names != ([case.tool] if case.tool else []):
+    expected = list(case.tools) if case.tools else ([case.tool] if case.tool else [])
+    if names != expected:
         return False
     if case.reply_has and case.reply_has not in reply:
         return False
@@ -249,13 +268,20 @@ async def run_baseline_case(llm, case: Case, directory: str, name: str) -> dict:
 
 
 def result_row(case, reply, calls, facts, elapsed, check_fact=True) -> dict:
-    checked = case if check_fact else Case(case.text, case.tool, case.reply_has, case.args)
+    checked = (
+        case
+        if check_fact
+        else Case(case.text, case.tool, case.reply_has, case.args, tools=case.tools)
+    )
     names = [name for name, _ in calls]
     return {
         "text": case.text,
         "passed": judge(checked, reply, calls, facts),
         # 頼んでいないのに車を動かしたか
-        "motion_error": any(name in MOTION_TOOLS and name != case.tool for name in names),
+        "motion_error": any(
+            name in MOTION_TOOLS and name != case.tool and name not in (case.tools or ())
+            for name in names
+        ),
         "seconds": round(elapsed, 2),
         "tools": names,
         "reply": reply,
@@ -382,12 +408,13 @@ def main() -> None:
     parser.add_argument("--baseline", action="store_true")
     parser.add_argument("--conversation", action="store_true")
     parser.add_argument("--heldout", action="store_true", help="調整に使っていない発言で測る")
+    parser.add_argument("--compound", action="store_true", help="曲がりながら走る指示を測る")
     args = parser.parse_args()
 
     if args.conversation:
         report = asyncio.run(run_conversation(args.model))
     else:
-        cases = HELDOUT_CASES if args.heldout else CASES
+        cases = COMPOUND_CASES if args.compound else HELDOUT_CASES if args.heldout else CASES
         report = asyncio.run(evaluate(args.model, args.repeat, args.baseline, cases))
     RESULT_DIR.mkdir(parents=True, exist_ok=True)
     path = RESULT_DIR / f"eval_{time.strftime('%Y%m%d_%H%M%S')}.json"

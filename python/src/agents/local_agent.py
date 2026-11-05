@@ -10,14 +10,16 @@
 - 実行の可否はコードで検証する
 """
 
+import asyncio
 import json
 import re
 import sqlite3
 from typing import Dict, List, NamedTuple, Optional
 
+import httpx
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 
-from src.agents.body_context import answer_state_question
+from src.agents.body_context import REASON_TEXT, answer_state_question
 from src.llm_factory import LLMFactory
 from src.memory.store import get_memory_store
 from src.tools.drive_tool import drive_backward, drive_forward, steer_wheels, stop_moving
@@ -94,16 +96,19 @@ MEMORY_QUESTION = re.compile(
     r"前回|この前|このまえ|さっき|昨日|きのう|おととい|先週|何の話|なんの話|話した|っけ|"
     r"覚えてる|覚えている|どうだった|名前は(何|なに|[?？])|名前を?(知|教|分か|わか)"
 )
+STEER_ONLY = re.compile(r"舵|ハンドル|タイヤ")
+TURN_WORDS = re.compile(r"曲が|まが|カーブ")
+ASK_TURN_SIDE = "右と左のどちらに曲がりますか？"
 REFUSED_MOTION = "動かす指示かどうか分からなかったので、動かしていません。"
 NOT_UNDERSTOOD = "うまく理解できませんでした。もう一度お願いします。"
-MOTION_REPLIES = {
-    "forward": ("前に進みました。", "前進"),
-    "backward": ("後ろに下がりました。", "後退"),
-    "left": ("舵を左に切りました。", "舵の操作"),
-    "right": ("舵を右に切りました。", "舵の操作"),
-    "center": ("舵を中央に戻しました。", "舵の操作"),
-    "stop": ("停止しました。", "停止"),
+DRIVE_REPLIES = {"forward": "前に進みました。", "backward": "後ろに下がりました。"}
+DRIVE_LABELS = {"forward": "前進", "backward": "後退"}
+STEER_REPLIES = {
+    "left": "舵を左に切りました。",
+    "right": "舵を右に切りました。",
+    "center": "舵を中央に戻しました。",
 }
+SIDE_TEXT = {"left": "左", "right": "右"}
 SUCCESS_WORDS = ("成功", "完了")
 DEFAULT_TOOLS = {
     "drive_forward": drive_forward,
@@ -111,6 +116,18 @@ DEFAULT_TOOLS = {
     "steer_wheels": steer_wheels,
     "stop_moving": stop_moving,
 }
+
+
+class Reply(NamedTuple):
+    """画面に出す文章と、読み上げて記憶する文章。エラーの詳細は読み上げない。"""
+
+    text: str
+    speech: Optional[str] = None
+
+
+class Motion(NamedTuple):
+    drive: Optional[str] = None  # forward または backward
+    steer: Optional[str] = None  # left、right または center
 
 
 class LocalAction(NamedTuple):
@@ -136,9 +153,35 @@ def parse_action(content: object) -> Optional[LocalAction]:
     )
 
 
-def allows_motion(action: str, text: str) -> bool:
-    """発言に裏付けがある動きだけを許す。LLM の誤判断で車を動かさない。"""
-    return not NOT_A_REQUEST.search(text) and bool(MOTION_WORDS[action].search(text))
+def steer_side(text: str) -> Optional[str]:
+    """発言が示す左右を返す。両方ある時や、どちらもない時は None を返す。"""
+    left = bool(MOTION_WORDS["left"].search(text))
+    right = bool(MOTION_WORDS["right"].search(text))
+    if left == right:
+        return None
+    return "left" if left else "right"
+
+
+def plan_motion(action: str, text: str) -> Optional[Motion]:
+    """LLM の行動と発言から動きを決める。
+
+    「前に進みながら右に曲がって」を LLM が forward と right のどちらで返しても、
+    同じ動きになるようにする。発言に裏付けがなければ None を返す。
+    """
+    if NOT_A_REQUEST.search(text):
+        return None
+    if action in ("forward", "backward"):
+        if not MOTION_WORDS[action].search(text):
+            return None
+        return Motion(drive=action, steer=steer_side(text))
+    if not MOTION_WORDS[action].search(text):
+        return None
+    if action == "center" or STEER_ONLY.search(text):
+        return Motion(steer=action)
+    for drive in ("forward", "backward"):
+        if MOTION_WORDS[drive].search(text):
+            return Motion(drive=drive, steer=action)
+    return Motion(steer=action)
 
 
 def message_text(message: BaseMessage) -> str:
@@ -156,20 +199,30 @@ def conversation_messages(messages: List[BaseMessage]) -> List[BaseMessage]:
         if isinstance(message, HumanMessage):
             result.append(message)
         elif isinstance(message, AIMessage) and message_text(message) and not message.tool_calls:
-            result.append(AIMessage(content=message_text(message)))
+            # エラーの詳細は次の判断に使わない
+            speech = message.additional_kwargs.get("speech")
+            result.append(AIMessage(content=speech or message_text(message)))
     return result
 
 
 class LocalAgent:
     """`create_agent_graph` の戻り値と同じく `ainvoke` で呼べるローカル用の Agent"""
 
-    def __init__(self, llm=None, status_client=None, memory=None, tools: Optional[Dict] = None):
+    def __init__(
+        self,
+        llm=None,
+        status_client=None,
+        memory=None,
+        tools: Optional[Dict] = None,
+        sleep=asyncio.sleep,
+    ):
         self._llm = llm or LLMFactory.create_local(
             temperature=0.0, format=ACTION_SCHEMA, num_predict=MAX_REPLY_TOKENS
         )
         self._status_client = status_client
         self._memory = memory
         self._tools = tools or DEFAULT_TOOLS
+        self._sleep = sleep
         self._history_start = 0
         # 記憶を渡したターンは、次のターンも同じ位置に同じ文章を置いて読み直しを防ぐ
         self._contexts: Dict[int, str] = {}
@@ -178,13 +231,16 @@ class LocalAgent:
         messages = list(state["messages"])
         latest = next(m for m in reversed(messages) if isinstance(m, HumanMessage))
         reply = await self._respond(messages, latest)
+        if isinstance(reply, str):
+            reply = Reply(reply)
+        extra = {"speech": reply.speech} if reply.speech else {}
         return {
-            "messages": messages + [AIMessage(content=reply)],
+            "messages": messages + [AIMessage(content=reply.text, additional_kwargs=extra)],
             "current_agent": "main",
             "is_finished": True,
         }
 
-    async def _respond(self, messages: List[BaseMessage], latest: HumanMessage) -> str:
+    async def _respond(self, messages: List[BaseMessage], latest: HumanMessage) -> Reply | str:
         text = message_text(latest)
         answer = await answer_state_question(text, self._status_client)
         if answer is not None:
@@ -238,7 +294,7 @@ class LocalAgent:
         except (OSError, sqlite3.Error):
             return ""
 
-    async def _execute(self, action: LocalAction, text: str) -> str:
+    async def _execute(self, action: LocalAction, text: str) -> Reply | str:
         name = action.action
         if name == "reply":
             return action.text or NOT_UNDERSTOOD
@@ -246,28 +302,73 @@ class LocalAgent:
             return self._remember(action, text)
         if name == "forget":
             return self._forget(action)
-        if name != "stop" and not allows_motion(name, text):
+        if name == "stop":
+            return await self._stop()
+        motion = plan_motion(name, text)
+        if motion is None:
             return REFUSED_MOTION
-        return await self._run_motion(name, text)
+        if motion.drive and not motion.steer and TURN_WORDS.search(text):
+            return ASK_TURN_SIDE
+        return await self._run_motion(motion, text)
 
-    async def _run_motion(self, name: str, text: str) -> str:
+    async def _stop(self) -> Reply | str:
+        result = str(await self._tools["stop_moving"].ainvoke({}))
+        if self._succeeded(result):
+            return "停止しました。"
+        return await self._failure("停止", result)
+
+    async def _run_motion(self, motion: Motion, text: str) -> Reply | str:
+        if motion.steer:
+            result = await self._steer(motion.steer)
+            if not self._succeeded(result):
+                return await self._failure("舵の操作", result)
+        if not motion.drive:
+            return STEER_REPLIES[motion.steer]
+
         duration_ms = SHORT_MS if SHORT_MOTION.search(text) else NORMAL_MS
-        drive_args = {"speed": MOTION_SPEED, "duration_ms": duration_ms}
-        tool_name, args = {
-            "forward": ("drive_forward", drive_args),
-            "backward": ("drive_backward", drive_args),
-            "left": ("steer_wheels", {"angle": -STEER_ANGLE}),
-            "right": ("steer_wheels", {"angle": STEER_ANGLE}),
-            "center": ("steer_wheels", {"angle": 0}),
-            "stop": ("stop_moving", {}),
-        }[name]
-        result = str(await self._tools[tool_name].ainvoke(args))
-        success, label = MOTION_REPLIES[name]
-        if any(word in result for word in SUCCESS_WORDS):
-            return success
-        return f"{label}できませんでした（{result}）。"
+        tool = "drive_forward" if motion.drive == "forward" else "drive_backward"
+        result = str(
+            await self._tools[tool].ainvoke({"speed": MOTION_SPEED, "duration_ms": duration_ms})
+        )
+        turning = motion.steer in ("left", "right")
+        if not self._succeeded(result):
+            if turning:
+                await self._steer("center")
+            return await self._failure(DRIVE_LABELS[motion.drive], result, motion.drive)
+        if not turning:
+            return DRIVE_REPLIES[motion.drive]
+        # 次の走行が曲がらないよう、走り終わったら舵を戻す
+        await self._sleep(duration_ms / 1000)
+        await self._steer("center")
+        return f"{SIDE_TEXT[motion.steer]}に曲がりながら{DRIVE_REPLIES[motion.drive]}"
 
-    def _remember(self, action: LocalAction, text: str) -> str:
+    async def _steer(self, side: str) -> str:
+        angle = {"left": -STEER_ANGLE, "right": STEER_ANGLE, "center": 0}[side]
+        return str(await self._tools["steer_wheels"].ainvoke({"angle": angle}))
+
+    @staticmethod
+    def _succeeded(result: str) -> bool:
+        return any(word in result for word in SUCCESS_WORDS)
+
+    async def _failure(self, label: str, detail: str, drive: Optional[str] = None) -> Reply:
+        speech = f"{label}できませんでした。"
+        reason = await self._refusal_reason(drive) if drive else None
+        if reason:
+            speech += f"{reason}。"
+        return Reply(f"{speech}（詳細: {detail}）", speech)
+
+    async def _refusal_reason(self, drive: str) -> Optional[str]:
+        """Pi が走行を拒否した理由を返す。分からなければ None を返す。"""
+        if self._status_client is None:
+            return None
+        try:
+            status = await self._status_client.get_status()
+        except (httpx.HTTPError, ValueError):
+            return None
+        reason = getattr(status.blocked, drive)
+        return REASON_TEXT.get(reason.value, reason.value) if reason else None
+
+    def _remember(self, action: LocalAction, text: str) -> Reply | str:
         # 「たろう = 覚えておいて」のような誤りを保存しない
         if not action.key or not action.value or action.value not in text:
             return NOT_UNDERSTOOD
@@ -276,12 +377,14 @@ class LocalAgent:
         try:
             self._memory_store().remember_fact(action.key, action.value)
         except (OSError, sqlite3.Error) as error:
-            return f"記憶できませんでした（{error}）。"
+            return Reply(f"記憶できませんでした（詳細: {error}）", "記憶できませんでした。")
         return f"{action.key}は{action.value}、と覚えました。"
 
-    def _forget(self, action: LocalAction) -> str:
+    def _forget(self, action: LocalAction) -> Reply | str:
         try:
             forgotten = self._memory_store().forget_fact(action.key)
         except (OSError, sqlite3.Error) as error:
-            return f"忘れることができませんでした（{error}）。"
+            return Reply(
+                f"忘れることができませんでした（詳細: {error}）", "忘れることができませんでした。"
+            )
         return f"{action.key}を忘れました。" if forgotten else f"{action.key}の記憶はありません。"

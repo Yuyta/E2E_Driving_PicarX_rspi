@@ -359,20 +359,12 @@ class PicarxMainWindow(QMainWindow):
                 self._chat_messages.append(HumanMessage(content=text))
                 result = await self._invoke_agent_with_recovery()
                 messages = result.get("messages", [])
-                response = next(
-                    (
-                        message.content
-                        for message in reversed(messages)
-                        if isinstance(message, AIMessage) and message.content
-                    ),
-                    "応答を取得できませんでした。",
-                )
-                response = self._extract_response_text(response)
+                response, speech = self._reply_from_messages(messages)
                 self._chat_messages.extend(messages[len(self._chat_messages) :])
-                self._remember_turn(text, response)
+                self._remember_turn(text, speech)
                 self._append_chat(f"<b>Assistant:</b> {response}")
                 try:
-                    await self.client.speak(response)
+                    await self.client.speak(speech)
                 except Exception as tts_error:
                     self._append_chat(f"<b>[TTS Error]</b> {tts_error}")
             except asyncio.TimeoutError:
@@ -383,6 +375,19 @@ class PicarxMainWindow(QMainWindow):
                 self._append_chat(f"<b>[Error]</b> {exc}")
 
         self._async_call(task())
+
+    @classmethod
+    def _reply_from_messages(cls, messages):
+        """画面に出す文章と、読み上げて記憶する文章を返す"""
+        message = next(
+            (m for m in reversed(messages) if isinstance(m, AIMessage) and m.content),
+            None,
+        )
+        if message is None:
+            fallback = "応答を取得できませんでした。"
+            return fallback, fallback
+        response = cls._extract_response_text(message.content)
+        return response, message.additional_kwargs.get("speech") or response
 
     def _remember_turn(self, user_text, response):
         """会話を保存する。保存に失敗しても応答は止めない。"""
