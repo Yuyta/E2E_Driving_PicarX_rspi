@@ -7,6 +7,8 @@ from src.config import ModelPreset, settings
 OLLAMA_NUM_CTX = 4096
 # 読み込みに時間がかかるので、会話の間はメモリに残す
 OLLAMA_KEEP_ALIVE = "10m"
+# 既定の6より、最初の応答が速かった。すべて使うと他の処理が重くなるので2つ残す
+OLLAMA_NUM_THREAD = 10
 
 
 class LLMFactory:
@@ -60,7 +62,7 @@ class LLMFactory:
         """Ollama のモデルを生成する。比較のため、プリセット以外のモデルも指定できる。"""
         from langchain_ollama import ChatOllama
 
-        # プリセット名 "ollama/qwen3.5:4b" からモデル名抽出
+        # プリセット名 "ollama/qwen3.5:4b-text" からモデル名抽出
         raw_name = model or ModelPreset.OLLAMA_LOCAL.value.replace("ollama/", "")
         return ChatOllama(
             model=raw_name,
@@ -68,6 +70,7 @@ class LLMFactory:
             temperature=temperature,
             num_ctx=OLLAMA_NUM_CTX,
             keep_alive=OLLAMA_KEEP_ALIVE,
+            num_thread=options.pop("num_thread", OLLAMA_NUM_THREAD),
             # 思考モードは応答を遅くするので、会話では使わない
             reasoning=False,
             **options,

@@ -132,7 +132,7 @@ flowchart TD
 | Gemini Flash | `gemini-3.8-flash` | デフォルト。通常の対話・制御 |
 | Gemini Flash-Lite | `gemini-3.5-flash-lite` | 低コスト・低遅延 |
 | Gemini Pro | `gemini-3.1-pro-preview` | 高度な推論 |
-| Ollama Local | `ollama/qwen3.5:4b` | ローカルLLM（PC の CPU で実行）。Gemini が使えない時の代替 |
+| Ollama Local | `ollama/qwen3.5:4b-text` | ローカルLLM（PC の CPU で実行）。Gemini が使えない時の代替。`qwen3.5:4b` を取得後、`uv run python -m src.llm_setup` で作成する |
 
 モデル変更時はLangGraphを再生成する。
 

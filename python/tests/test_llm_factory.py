@@ -17,4 +17,4 @@ def test_llm_factory_presets():
 
     # 4. Ollama Local
     ollama = LLMFactory.create(preset=ModelPreset.OLLAMA_LOCAL)
-    assert ollama.model == "qwen3.5:4b"
+    assert ollama.model == "qwen3.5:4b-text"
