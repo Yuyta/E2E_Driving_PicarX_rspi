@@ -144,24 +144,19 @@ def run_recovery(win, first_graph, created_graphs):
         created.append(preset)
         return created_graphs[preset]
 
-    with (
-        patch.object(win, "_create_agent_graph", side_effect=create),
-        patch("src.gui.app.asyncio.sleep", AsyncMock()),
-    ):
+    with patch.object(win, "_create_agent_graph", side_effect=create):
         return asyncio.run(win._invoke_agent_with_recovery()), created
 
 
 @pytest.mark.parametrize(
     "error",
     [
-        RuntimeError("429 RESOURCE_EXHAUSTED"),
         OSError("network unreachable"),
         RuntimeError("ConnectError: getaddrinfo failed"),
-        asyncio.TimeoutError(),
         RuntimeError("API key not valid"),
     ],
 )
-def test_quota_or_network_failure_goes_straight_to_local_llm(window, error):
+def test_network_or_key_failure_goes_straight_to_local_llm(window, error):
     win, _, _ = window
     answer = {"messages": []}
     local = fake_graph(answer)
@@ -172,31 +167,63 @@ def test_quota_or_network_failure_goes_straight_to_local_llm(window, error):
     assert created == [ModelPreset.OLLAMA_LOCAL]
 
 
-def test_busy_gemini_retries_then_flash_lite_then_local_llm(window):
+@pytest.mark.parametrize(
+    "error",
+    [
+        RuntimeError("503 UNAVAILABLE. This model is currently experiencing high demand."),
+        asyncio.TimeoutError(),
+        RuntimeError("ReadTimeout: The read operation timed out"),
+        # 無料枠の上限はモデルごとなので、Flash-Lite は使えることがある
+        RuntimeError("429 RESOURCE_EXHAUSTED. GenerateRequestsPerDayPerProjectPerModel-FreeTier"),
+    ],
+)
+def test_busy_silent_or_exhausted_gemini_goes_to_flash_lite_without_waiting(window, error):
+    win, _, _ = window
+    answer = {"messages": []}
+    first = fake_graph(error)
+    lite = fake_graph(answer)
+
+    result, created = run_recovery(win, first, {ModelPreset.GEMINI_FLASH_LITE: lite})
+
+    assert result is answer
+    # 混雑は数秒では直らないので、同じモデルでやり直さない
+    assert first.ainvoke.await_count == 1
+    assert created == [ModelPreset.GEMINI_FLASH_LITE]
+
+
+def test_busy_flash_lite_falls_back_to_the_local_llm(window):
     win, _, _ = window
     busy = RuntimeError("503 UNAVAILABLE")
     answer = {"messages": []}
-    first = fake_graph(busy, busy)
-    lite = fake_graph(busy)
     local = fake_graph(answer)
 
     result, created = run_recovery(
         win,
-        first,
-        {ModelPreset.GEMINI_FLASH_LITE: lite, ModelPreset.OLLAMA_LOCAL: local},
+        fake_graph(busy),
+        {ModelPreset.GEMINI_FLASH_LITE: fake_graph(busy), ModelPreset.OLLAMA_LOCAL: local},
     )
 
     assert result is answer
-    assert first.ainvoke.await_count == 2
     assert created == [ModelPreset.GEMINI_FLASH_LITE, ModelPreset.OLLAMA_LOCAL]
 
 
-def test_busy_gemini_recovering_on_retry_stays_on_gemini(window):
+def test_busy_flash_lite_selected_by_the_user_goes_to_the_local_llm(window):
     win, _, _ = window
     answer = {"messages": []}
-    result, created = run_recovery(win, fake_graph(RuntimeError("503 UNAVAILABLE"), answer), {})
-    assert result is answer
-    assert created == []
+    local = fake_graph(answer)
+    with patch.object(win, "_create_agent_graph", side_effect=lambda preset: local) as create:
+        win.current_model = ModelPreset.GEMINI_FLASH_LITE
+        win._agent_graph = fake_graph(RuntimeError("503 UNAVAILABLE"))
+        assert asyncio.run(win._invoke_agent_with_recovery()) is answer
+    create.assert_called_once_with(ModelPreset.OLLAMA_LOCAL)
+
+
+def test_gemini_requests_are_bounded_and_not_retried_inside_the_library():
+    from src.llm_factory import GEMINI_TIMEOUT_SEC, LLMFactory
+
+    llm = LLMFactory.create(ModelPreset.GEMINI_FLASH, api_key="test-key")
+    assert llm.timeout == GEMINI_TIMEOUT_SEC
+    assert llm.max_retries == 0
 
 
 def test_programming_errors_are_not_hidden_by_the_fallback(window):
@@ -414,3 +441,15 @@ def test_voice_button_explains_how_to_install_when_libraries_are_missing(window)
         win._init_voice()
     assert not win.btn_talk.isEnabled()
     assert "--extra voice" in win.btn_talk.toolTip()
+
+
+def test_look_questions_are_acknowledged_before_the_slow_answer(window):
+    win, client, app = window
+    with (
+        patch("src.agents.graph.create_agent_graph"),
+        patch.object(win, "_invoke_agent_with_recovery", AsyncMock(side_effect=TimeoutError)),
+    ):
+        win._start_agent_turn("何が見える？")
+        assert wait_until(lambda: client.speak.await_count >= 1, app)
+    assert client.speak.await_args_list[0].args[0] == "見てみます。"
+    assert "見てみます。" in win.chat_history.toPlainText()

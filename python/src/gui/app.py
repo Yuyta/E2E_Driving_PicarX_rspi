@@ -31,6 +31,7 @@ from src.memory.events import EventRecorder
 from src.memory.store import get_memory_store
 from src.models import DriveDirection
 from src.picarx_client.client import PicarxClient
+from src.vision.local_vlm import ACKNOWLEDGEMENT, is_look_question
 from src.voice.listener import VOICE_EXTRA_HINT, Recorder, Transcriber
 from src.voice.speaker import Speaker
 
@@ -435,6 +436,10 @@ class PicarxMainWindow(QMainWindow):
 
     def _start_agent_turn(self, text):
         self.chat_history.append(f"<i>Thinking with {self.current_model.value}...</i>")
+        if is_look_question(text):
+            # 画像の認識に約10秒かかるので、先に返事をしておく
+            self.chat_history.append(f"<b>Assistant:</b> {ACKNOWLEDGEMENT}")
+            self._async_call(self._say(ACKNOWLEDGEMENT))
 
         async def task():
             try:
@@ -515,24 +520,17 @@ class PicarxMainWindow(QMainWindow):
                 raise
             first_error = error
 
-        # 混雑は少し待てば直ることがある。上限超過や通信断は待っても直らない
-        if self._is_model_busy(first_error):
-            self._append_chat("<i>[System] Geminiが混雑しています。再試行しています...</i>")
-            await asyncio.sleep(3.0)
+        # 混雑、応答なし、上限超過は、Flash-Lite なら答えられることがある。通信断は直らない
+        if self._should_try_flash_lite(first_error):
+            self._append_chat(
+                "<i>[System] Geminiが混雑中か上限に達しています。Flash-Liteで応答します...</i>"
+            )
+            self._agent_graph = self._create_agent_graph(ModelPreset.GEMINI_FLASH_LITE)
             try:
                 return await invoke()
             except Exception as error:
                 if not self._is_model_unavailable(error):
                     raise
-
-            if self.current_model != ModelPreset.GEMINI_FLASH_LITE:
-                self._append_chat("<i>[System] Flash-Liteへ切り替えて再試行しています...</i>")
-                self._agent_graph = self._create_agent_graph(ModelPreset.GEMINI_FLASH_LITE)
-                try:
-                    return await invoke()
-                except Exception as error:
-                    if not self._is_model_unavailable(error):
-                        raise
 
         self._append_chat("<i>[System] Geminiが使えないため、ローカルLLMで応答します...</i>")
         self._agent_graph = self._create_agent_graph(ModelPreset.OLLAMA_LOCAL)
@@ -542,6 +540,21 @@ class PicarxMainWindow(QMainWindow):
     def _is_model_busy(error):
         message = str(error).upper()
         return "503" in message or "UNAVAILABLE" in message or "高負荷" in message
+
+    def _should_try_flash_lite(self, error):
+        """Flash が使えない時も Flash-Lite は答えられた（2026-11-06）。
+
+        混雑と応答なしのほか、無料枠の上限も対象にする。
+        上限はモデルごとで、Flash は1日20回しかない。
+        """
+        if self.current_model == ModelPreset.GEMINI_FLASH_LITE:
+            return False
+        if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
+            return True
+        message = f"{type(error).__name__} {error}".upper()
+        return self._is_model_busy(error) or any(
+            word in message for word in ("TIMEOUT", "TIMED OUT", "429", "RESOURCE_EXHAUSTED")
+        )
 
     @classmethod
     def _is_model_unavailable(cls, error):

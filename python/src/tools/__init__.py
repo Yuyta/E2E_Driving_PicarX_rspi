@@ -1,8 +1,9 @@
 from src.tools.drive_tool import drive_backward, drive_forward, steer_wheels, stop_moving
 from src.tools.memory_tool import forget_fact, remember_fact
 from src.tools.sensor_tool import read_distance, read_grayscale
+from src.tools.vision_tool import look
 
-# 発話は Agent の返事を Speaker が読み上げる。カメラは認識方式を決めるまで渡さない
+# 発話は Agent の返事を Speaker が読み上げる。カメラは PC の VLM の説明だけを渡す
 ALL_TOOLS = [
     drive_forward,
     drive_backward,
@@ -12,6 +13,7 @@ ALL_TOOLS = [
     read_grayscale,
     remember_fact,
     forget_fact,
+    look,
 ]
 
 __all__ = [
@@ -23,5 +25,6 @@ __all__ = [
     "read_grayscale",
     "remember_fact",
     "forget_fact",
+    "look",
     "ALL_TOOLS",
 ]

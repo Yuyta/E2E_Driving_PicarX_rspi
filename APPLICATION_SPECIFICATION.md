@@ -81,6 +81,7 @@ flowchart TD
 - `python/src/agents/local_agent.py`（ローカル LLM の Agent）
 - `python/src/memory/store.py`、`python/src/memory/events.py`（記憶）
 - `python/src/voice/speaker.py`（発話）、`python/src/voice/listener.py`（音声入力）
+- `python/src/vision/local_vlm.py`（カメラ画像の認識）
 
 ### 2.2 Raspberry Pi側
 
@@ -133,8 +134,8 @@ flowchart TD
 
 | 表示モデル | 内部モデルID | 用途 |
 |---|---|---|
-| Gemini Flash | `gemini-3.8-flash` | デフォルト。通常の対話・制御 |
-| Gemini Flash-Lite | `gemini-3.5-flash-lite` | 低コスト・低遅延 |
+| Gemini Flash | `gemini-3.8-flash` | 通常の対話・制御。無料枠は1日20回 |
+| Gemini Flash-Lite | `gemini-3.5-flash-lite` | デフォルト。低コスト・低遅延 |
 | Gemini Pro | `gemini-3.1-pro-preview` | 高度な推論 |
 | Ollama Local | `ollama/qwen3.5:4b-text` | ローカルLLM（PC の CPU で実行）。Gemini が使えない時の代替。`qwen3.5:4b` を取得後、`uv run python -m src.llm_setup` で作成する |
 
@@ -494,7 +495,7 @@ cargo nextest run --locked --release --profile ci
 - Rust APIサーバーはPi上のカメラコマンド、TTSエンジン、PiCar-Xハードウェアに依存する。
 - TTSエンジン切り替えUIは旧Rust GUIには存在するが、Python GUIからは現在選択できない。
 - `/api/audio/listen` はスタブであり、Pi では録音しない。音声入力は PC のマイクで行う（車載マイクは ROADMAP の M6）。
-- LLM は画像を見ていない。認識方式を決めるまで、撮影ツールは Agent に渡さない（ROADMAP の M2）。
+- カメラの画像は PC のローカル VLM（`qwen3.5:4b`）で認識し、約10秒かかる。細い物を見落とすので、走行の安全の判断には使わない。Gemini の Agent には `look` ツールで説明の文章だけを渡す。
 - Agent は現在地と学習状況を参照できない（M4、M5）。
 - 旧 Rust GUI（`--gui`）とその LLM は反射ループを通さずにモーターを動かす。廃止の計画は ROADMAP の M2 にある。
 
@@ -636,7 +637,7 @@ Memory and Personalization Rules:
 |---|---|---|---|
 | 電池 | `/api/status` | 実装済み（実機未確認） | M1 |
 | センサー、走行モード、安全イベント | `/api/status`, `/api/events` | 実装済み（実機未確認） | M1 |
-| 周囲の様子 | カメラ画像（方式は評価後に確認） | LLM へ渡していない | M2 で評価 |
+| 周囲の様子 | カメラ画像を PC のローカル VLM で説明 | 実装済み（実際の室内は未確認） | M2 |
 | いま言われたこと | 音声認識 | 未実装 | M2（PC のマイク）、M6（車載） |
 | 過去の会話、人物の事実 | 記憶 DB | 実装済み（Python） | M2 |
 | 車体の出来事（安全停止、緊急停止、校正） | `/api/events` から記憶 DB へ保存 | 実装済み（実機未確認） | M2 |
@@ -676,7 +677,7 @@ Memory and Personalization Rules:
 
 ### 14.7 LLM
 
-- Gemini を既定とし、通信断やクォータ超過の時は PC のローカル LLM で応答する
+- Gemini Flash-Lite を既定とし、使えない時は PC のローカル LLM で応答する。Flash を選んだ時は、混雑、応答なし（20秒）、無料枠の上限で Flash-Lite へ切り替える。無料枠の上限はモデルごとで、`gemini-3.8-flash` は1日20回
 - PC は GPU なしの Core i7-1255U、メモリ 16GB。ローカルのモデルと量子化レベルは応答時間の実測で選ぶ
 - 小さなモデルに対応するため、応答形式は最小限にする
 - 応答を文単位で音声合成し、待ち時間を短く感じさせる

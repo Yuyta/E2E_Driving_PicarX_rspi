@@ -9,6 +9,10 @@ OLLAMA_NUM_CTX = 4096
 OLLAMA_KEEP_ALIVE = "10m"
 # 既定の6より、最初の応答が速かった。すべて使うと他の処理が重くなるので2つ残す
 OLLAMA_NUM_THREAD = 10
+# 混雑時は応答がないまま待たされることがある（2026-11-06 に 90秒以上）。
+# ライブラリ内でやり直さず、アプリ側で Flash-Lite やローカル LLM へ切り替える
+GEMINI_TIMEOUT_SEC = 20.0
+GEMINI_MAX_RETRIES = 0
 
 
 class LLMFactory:
@@ -45,8 +49,8 @@ class LLMFactory:
                 model=model_name,
                 temperature=temperature,
                 google_api_key=key if key else None,
-                # トークン節約のための設定
-                max_retries=5,
+                timeout=GEMINI_TIMEOUT_SEC,
+                max_retries=GEMINI_MAX_RETRIES,
             )
 
         elif selected == ModelPreset.OLLAMA_LOCAL:
@@ -69,7 +73,7 @@ class LLMFactory:
             base_url=settings.ollama_base_url,
             temperature=temperature,
             num_ctx=OLLAMA_NUM_CTX,
-            keep_alive=OLLAMA_KEEP_ALIVE,
+            keep_alive=options.pop("keep_alive", OLLAMA_KEEP_ALIVE),
             num_thread=options.pop("num_thread", OLLAMA_NUM_THREAD),
             # 思考モードは応答を遅くするので、会話では使わない
             reasoning=False,

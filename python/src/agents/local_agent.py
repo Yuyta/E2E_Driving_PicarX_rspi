@@ -23,6 +23,7 @@ from src.agents.body_context import REASON_TEXT, answer_state_question
 from src.llm_factory import LLMFactory
 from src.memory.store import get_memory_store
 from src.tools.drive_tool import drive_backward, drive_forward, steer_wheels, stop_moving
+from src.vision.local_vlm import LocalVision, is_look_question
 
 MOTION_SPEED = 50  # 実機では速度50前後でないと動きが弱い
 SHORT_MS = 500
@@ -46,6 +47,7 @@ ACTIONS = (
     "stop",
     "remember",
     "forget",
+    "look",
 )
 ACTION_SCHEMA = {
     "type": "object",
@@ -65,9 +67,10 @@ action の意味:
 - stop: 止まる。「待って」「やめて」「動かないで」も含む
 - remember: 事実を覚える。key に短い見出し、value に内容を入れる
 - forget: 事実を忘れる。key に見出しを入れる
+- look: カメラで前を見て、見える物を答える
 - reply: 上のどれでもない会話。text に短い日本語で答える
 動かすのは、今動くように頼まれた時だけです。
-電池やセンサーの値、カメラの映像は分かりません。聞かれたら分からないと答えます。
+電池やセンサーの値は分かりません。聞かれたら分からないと答えます。
 参考情報の記憶があれば、過去のことはそれだけを使って答えます。
 
 例:
@@ -75,6 +78,7 @@ action の意味:
 バックして → {"action":"backward"}
 右に曲がって → {"action":"right"}
 危ないからやめて → {"action":"stop"}
+前に何がある？ → {"action":"look"}
 私の名前はたろうです。覚えておいて → {"action":"remember","key":"ユーザーの名前","value":"たろう"}
 前回の旅行は楽しかったね → {"action":"reply","text":"楽しかったですね。"}
 「前に進んで」は英語で何て言う？ → {"action":"reply","text":"Go forward です。"}"""
@@ -218,6 +222,7 @@ class LocalAgent:
         memory=None,
         tools: Optional[Dict] = None,
         sleep=asyncio.sleep,
+        vision=None,
     ):
         self._llm = llm or LLMFactory.create_local(
             temperature=0.0, format=ACTION_SCHEMA, num_predict=MAX_REPLY_TOKENS
@@ -226,6 +231,7 @@ class LocalAgent:
         self._memory = memory
         self._tools = tools or DEFAULT_TOOLS
         self._sleep = sleep
+        self._vision = vision
         self._history_start = 0
         # 記憶を渡したターンは、次のターンも同じ位置に同じ文章を置いて読み直しを防ぐ
         self._contexts: Dict[int, str] = {}
@@ -241,6 +247,9 @@ class LocalAgent:
 
     async def _respond(self, messages: List[BaseMessage], latest: HumanMessage) -> Reply | str:
         text = message_text(latest)
+        # 「周りの様子どう？」は車体の状態ではなく、見える物を聞いている
+        if is_look_question(text):
+            return await self._look(text)
         answer = await answer_state_question(text, self._status_client)
         if answer is not None:
             return answer
@@ -305,12 +314,22 @@ class LocalAgent:
             return self._forget(action)
         if name == "stop":
             return await self._stop()
+        if name == "look":
+            return await self._look(text)
         motion = plan_motion(name, text)
         if motion is None:
             return REFUSED_MOTION
         if motion.drive and not motion.steer and TURN_WORDS.search(text):
             return ASK_TURN_SIDE
         return await self._run_motion(motion, text)
+
+    async def _look(self, text: str) -> Reply | str:
+        if self._vision is None:
+            self._vision = LocalVision()
+        result = await self._vision.describe(text)
+        if result.ok:
+            return result.text
+        return Reply(f"{result.text}（詳細: {result.detail}）", result.text)
 
     async def _stop(self) -> Reply | str:
         result = str(await self._tools["stop_moving"].ainvoke({}))

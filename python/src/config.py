@@ -10,8 +10,8 @@ load_dotenv()
 class ModelPreset(str, Enum):
     """利用可能なLLMモデルプリセット"""
 
-    GEMINI_FLASH = "gemini-3.8-flash"  # デフォルト: 高速・軽量・低トークンコスト
-    GEMINI_FLASH_LITE = "gemini-3.5-flash-lite"  # 低遅延・低コスト
+    GEMINI_FLASH = "gemini-3.8-flash"  # 無料枠は1日20回しかない
+    GEMINI_FLASH_LITE = "gemini-3.5-flash-lite"  # デフォルト: 低遅延・低コスト
     GEMINI_PRO = "gemini-3.1-pro-preview"  # 高度な推論・複雑な計画
     OLLAMA_LOCAL = (
         "ollama/qwen3.5:4b-text"  # ローカルLLM (完全オフライン)。PC の CPU で実測して選定
@@ -23,7 +23,9 @@ class Settings(BaseModel):
 
     # LLM設定
     default_model: ModelPreset = Field(
-        default=ModelPreset.GEMINI_FLASH, description="デフォルトのLLMモデル"
+        # Flash は無料枠が1日20回で、数ターンで尽きる（2026-11-06、利用者の判断）
+        default=ModelPreset.GEMINI_FLASH_LITE,
+        description="デフォルトのLLMモデル",
     )
     gemini_api_key: str = Field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
     ollama_base_url: str = Field(
