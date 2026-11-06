@@ -152,6 +152,13 @@ class PicarxClient:
             resp.raise_for_status()
             return resp.status_code == 200
 
+    async def stop_speech(self) -> bool:
+        """Pi で再生中と生成中の発話を止める"""
+        async with httpx.AsyncClient(timeout=self.timeout, headers=self._headers) as client:
+            resp = await client.post(f"{self.base_url}/api/audio/stop")
+            resp.raise_for_status()
+            return True
+
     async def listen(self) -> str:
         """
         Raspberry Pi 側でマイク録音・STTされたテキストを取得。
@@ -185,6 +192,13 @@ class PicarxClient:
     def stop_sync(self) -> bool:
         resp = self._sync().post(f"{self.base_url}/api/drive/stop")
         return resp.status_code == 200
+
+    def stop_speech_sync(self) -> bool:
+        """発話を止める。共有の接続に左右されないよう、毎回新しい接続で送る。"""
+        with httpx.Client(timeout=self.timeout, headers=self._headers) as client:
+            resp = client.post(f"{self.base_url}/api/audio/stop")
+            resp.raise_for_status()
+            return True
 
     def emergency_stop_sync(self) -> bool:
         """緊急停止を指示する。解除されるまで走行は拒否される。失敗時は例外を送出する。

@@ -101,8 +101,6 @@ async def test_every_router_turn_sends_the_current_state_to_the_llm():
     await app.ainvoke(
         {
             "messages": [HumanMessage(content="電池どう？")],
-            "current_agent": "main",
-            "is_finished": False,
         }
     )
 

@@ -171,8 +171,6 @@ async def test_llm_receives_memory_and_state_after_restart(db_path):
     await app.ainvoke(
         {
             "messages": [HumanMessage(content="前回何の話をした？")],
-            "current_agent": "main",
-            "is_finished": False,
         }
     )
 

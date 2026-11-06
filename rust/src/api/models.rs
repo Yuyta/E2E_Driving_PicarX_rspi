@@ -169,6 +169,12 @@ pub struct CameraStatus {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct AudioStatus {
+    /// 再生中またはキューに残っている発話がある
+    pub speaking: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct StatusResponse {
     /// `idle` / `forward` / `backward` / `emergency_stop`
     pub mode: &'static str,
@@ -180,6 +186,7 @@ pub struct StatusResponse {
     pub cliff: CliffStatus,
     pub reflex: ReflexStatus,
     pub camera: CameraStatus,
+    pub audio: AudioStatus,
     pub latest_event_id: u64,
 }
 

@@ -34,6 +34,7 @@ HISTORY_MAX_MESSAGES = 24
 HISTORY_KEEP_MESSAGES = 8
 MEMORY_PREVIOUS_LIMIT = 4
 MEMORY_RELATED_LIMIT = 2
+MEMORY_EVENT_LIMIT = 3
 
 ACTIONS = (
     "reply",
@@ -96,6 +97,8 @@ MEMORY_QUESTION = re.compile(
     r"前回|この前|このまえ|さっき|昨日|きのう|おととい|先週|何の話|なんの話|話した|っけ|"
     r"覚えてる|覚えている|どうだった|名前は(何|なに|[?？])|名前を?(知|教|分か|わか)"
 )
+# 車体の出来事を聞く発言。読む量を減らすため、この時だけ出来事を渡す
+EVENT_QUESTION = re.compile(r"止まった|とまった|止まっちゃ|ぶつか|何があった|何かあった|緊急停止")
 STEER_ONLY = re.compile(r"舵|ハンドル|タイヤ")
 TURN_WORDS = re.compile(r"曲が|まが|カーブ")
 ASK_TURN_SIDE = "右と左のどちらに曲がりますか？"
@@ -234,11 +237,7 @@ class LocalAgent:
         if isinstance(reply, str):
             reply = Reply(reply)
         extra = {"speech": reply.speech} if reply.speech else {}
-        return {
-            "messages": messages + [AIMessage(content=reply.text, additional_kwargs=extra)],
-            "current_agent": "main",
-            "is_finished": True,
-        }
+        return {"messages": messages + [AIMessage(content=reply.text, additional_kwargs=extra)]}
 
     async def _respond(self, messages: List[BaseMessage], latest: HumanMessage) -> Reply | str:
         text = message_text(latest)
@@ -284,12 +283,14 @@ class LocalAgent:
             mentions_fact = any(
                 word and word in text for pair in memory.facts().items() for word in pair
             )
-            if not (MEMORY_QUESTION.search(text) or mentions_fact):
+            asks_event = bool(EVENT_QUESTION.search(text))
+            if not (MEMORY_QUESTION.search(text) or mentions_fact or asks_event):
                 return ""
             return memory.build_context(
                 text,
                 previous_limit=MEMORY_PREVIOUS_LIMIT,
                 related_limit=MEMORY_RELATED_LIMIT,
+                event_limit=MEMORY_EVENT_LIMIT if asks_event else 0,
             )
         except (OSError, sqlite3.Error):
             return ""

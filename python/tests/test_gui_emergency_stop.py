@@ -4,6 +4,7 @@ import threading
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import numpy as np
 import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
@@ -15,6 +16,7 @@ from src.config import ModelPreset  # noqa: E402
 from src.gui.app import PicarxMainWindow  # noqa: E402
 from src.gui.async_runner import AsyncRunner  # noqa: E402
 from src.memory.store import MemoryStore  # noqa: E402
+from src.voice.listener import SAMPLE_RATE, TOO_QUIET, Transcript  # noqa: E402
 
 
 def test_async_runner_submit_does_not_block_caller():
@@ -42,7 +44,12 @@ def window():
     client = MagicMock()
     client.get_ultrasonic = AsyncMock(return_value=100.0)
     client.get_camera_snapshot = AsyncMock(side_effect=RuntimeError("no camera"))
-    with patch("src.gui.app.PicarxClient", return_value=client):
+    client.speak = AsyncMock(return_value=True)
+    # Whisper の読み込みはテストごとに行わない。音声のテストは偽物を入れる
+    with (
+        patch("src.gui.app.PicarxClient", return_value=client),
+        patch.object(PicarxMainWindow, "_init_voice"),
+    ):
         win = PicarxMainWindow()
     win.poll_timer.stop()
     win.camera_timer.stop()
@@ -159,9 +166,7 @@ def test_quota_or_network_failure_goes_straight_to_local_llm(window, error):
     answer = {"messages": []}
     local = fake_graph(answer)
 
-    result, created = run_recovery(
-        win, fake_graph(error), {ModelPreset.OLLAMA_LOCAL: local}
-    )
+    result, created = run_recovery(win, fake_graph(error), {ModelPreset.OLLAMA_LOCAL: local})
 
     assert result is answer
     assert created == [ModelPreset.OLLAMA_LOCAL]
@@ -189,9 +194,7 @@ def test_busy_gemini_retries_then_flash_lite_then_local_llm(window):
 def test_busy_gemini_recovering_on_retry_stays_on_gemini(window):
     win, _, _ = window
     answer = {"messages": []}
-    result, created = run_recovery(
-        win, fake_graph(RuntimeError("503 UNAVAILABLE"), answer), {}
-    )
+    result, created = run_recovery(win, fake_graph(RuntimeError("503 UNAVAILABLE"), answer), {})
     assert result is answer
     assert created == []
 
@@ -225,6 +228,7 @@ def test_stop_word_stops_at_once_without_the_llm(window, tmp_path):
     ):
         send_chat(win, "止まって！")
         assert wait_until(lambda: "停止しました" in win.chat_history.toPlainText(), app)
+        assert wait_until(lambda: client.speak.await_count == 1, app)
     client.stop_sync.assert_called_once()
     agent.assert_not_called()
 
@@ -293,3 +297,120 @@ def test_emergency_stop_status_survives_telemetry_poll_until_reset(window):
     win._on_emergency_reset()
     assert wait_until(lambda: "EMERGENCY" not in win.lbl_safety.text(), app)
     client.reset_emergency_stop.assert_awaited_once()
+
+
+def test_new_message_interrupts_the_previous_reply(window):
+    win, client, app = window
+    stopped = threading.Event()
+    client.stop_speech_sync.side_effect = lambda: stopped.set() or True
+    with patch.object(win, "_start_agent_turn"):
+        send_chat(win, "電池どう？")
+    assert stopped.wait(2)
+
+
+def test_emergency_stop_also_stops_speech(window):
+    win, client, _ = window
+    stopped = threading.Event()
+    client.emergency_stop_sync.return_value = True
+    client.stop_speech_sync.side_effect = lambda: stopped.set() or True
+    win._on_emergency_stop()
+    assert stopped.wait(2)
+
+
+def test_reply_is_spoken_sentence_by_sentence(window):
+    win, client, app = window
+    client.speak = AsyncMock(return_value=True)
+    win._async_call(win._say("前に進みました。次はどうしますか？")).result(timeout=2)
+    assert [c.args[0] for c in client.speak.await_args_list] == [
+        "前に進みました。",
+        "次はどうしますか？",
+    ]
+
+
+def test_speech_failure_is_shown_not_raised(window):
+    win, client, app = window
+    client.speak = AsyncMock(side_effect=RuntimeError("TTS生成エラー"))
+    win._async_call(win._say("こんにちは。")).result(timeout=2)
+    assert wait_until(lambda: "[TTS Error]" in win.chat_history.toPlainText(), app)
+
+
+class FakeRecorder:
+    def __init__(self, audio=None, error=None):
+        self.audio = audio if audio is not None else np.zeros(SAMPLE_RATE, dtype=np.float32)
+        self.error = error
+        self.recording = False
+
+    def start(self):
+        if self.error:
+            raise self.error
+        self.recording = True
+
+    def stop(self):
+        self.recording = False
+        return self.audio
+
+
+class FakeTranscriber:
+    def __init__(self, result):
+        self.result = result
+
+    def transcribe(self, audio):
+        return self.result
+
+
+def test_talking_interrupts_speech_and_sends_the_words_like_typed_text(window):
+    win, client, app = window
+    win._recorder = FakeRecorder()
+    win._transcriber = FakeTranscriber(Transcript("電池どう？"))
+    stopped = threading.Event()
+    client.stop_speech_sync.side_effect = lambda: stopped.set() or True
+
+    with patch.object(win, "_start_agent_turn") as agent:
+        win._on_talk_pressed()
+        assert win._recorder.recording
+        assert stopped.wait(2)
+        win._on_talk_released()
+        assert wait_until(lambda: agent.called, app)
+    agent.assert_called_once_with("電池どう？")
+    assert "User (🎤): 電池どう？" in win.chat_history.toPlainText()
+
+
+def test_spoken_stop_word_uses_the_fast_stop(window):
+    win, client, app = window
+    client.stop_sync.return_value = True
+    win._recorder = FakeRecorder()
+    win._transcriber = FakeTranscriber(Transcript("止まって"))
+    with patch.object(win, "_start_agent_turn") as agent:
+        win._on_talk_pressed()
+        win._on_talk_released()
+        assert wait_until(lambda: client.speak.await_count == 1, app)
+    client.stop_sync.assert_called_once()
+    agent.assert_not_called()
+
+
+def test_unheard_voice_is_reported_and_not_sent(window):
+    win, _, app = window
+    win._recorder = FakeRecorder()
+    win._transcriber = FakeTranscriber(Transcript("", TOO_QUIET))
+    with patch.object(win, "_start_agent_turn") as agent:
+        win._on_talk_pressed()
+        win._on_talk_released()
+        assert wait_until(lambda: TOO_QUIET in win.chat_history.toPlainText(), app)
+    agent.assert_not_called()
+
+
+def test_missing_microphone_is_reported(window):
+    win, _, app = window
+    win._recorder = FakeRecorder(error=OSError("no input device"))
+    win._transcriber = FakeTranscriber(Transcript("x"))
+    win._on_talk_pressed()
+    win._on_talk_released()
+    assert wait_until(lambda: "マイクを使えません" in win.chat_history.toPlainText(), app)
+
+
+def test_voice_button_explains_how_to_install_when_libraries_are_missing(window):
+    win, _, app = window
+    with patch("src.gui.app.importlib.util.find_spec", return_value=None):
+        win._init_voice()
+    assert not win.btn_talk.isEnabled()
+    assert "--extra voice" in win.btn_talk.toolTip()

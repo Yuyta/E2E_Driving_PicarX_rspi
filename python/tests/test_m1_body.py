@@ -14,7 +14,6 @@ from src.e2e.safety.body_status import BodyAction, cliff_sensors, decide_action
 from src.models import DriveDirection, MoveCommand, RobotStatus, SafetyEvent, SafetyReason
 from src.picarx_client.camera_stream import LatestFrameStream, iter_jpeg_frames
 from src.picarx_client.client import PicarxClient
-from src.tools.camera_tool import take_snapshot
 
 BASE_URL = "http://test-robot:8080"
 
@@ -194,15 +193,14 @@ async def test_drive_for_stops_renewing_when_refused():
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_snapshot_tool_no_longer_sends_ignored_parameters():
-    from src.config import settings
-
-    route = respx.get(f"{settings.robot_base_url}/api/camera/snapshot").mock(
+async def test_snapshot_no_longer_sends_ignored_parameters():
+    route = respx.get(f"{BASE_URL}/api/camera/snapshot").mock(
         return_value=httpx.Response(
             200, json={"image_base64": "AA==", "width": 320, "height": 240, "seq": 1, "age_ms": 5}
         )
     )
-    assert "320x240" in await take_snapshot.ainvoke({})
+    snapshot = await PicarxClient(base_url=BASE_URL).get_camera_snapshot()
+    assert (snapshot.width, snapshot.height) == (320, 240)
     assert not route.calls.last.request.url.params
 
 

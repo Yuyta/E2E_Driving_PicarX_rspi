@@ -546,7 +546,6 @@ impl Picarx {
     ///
     /// 再生はrodioの内部ミキサースレッドで行われるため、この関数は音の再生完了を待たずに
     /// 即座に返る（メインループ/入力処理をブロックしない）。
-    #[allow(dead_code)] // 公開ハードウェア機能。現行サンプルではトーン再生を使用。
     pub fn play_file<P: AsRef<Path>>(
         &mut self,
         file_path: P,
@@ -561,6 +560,16 @@ impl Picarx {
         self.audio_player.append(source);
 
         Ok(())
+    }
+
+    /// 再生中の音と、キューに残っている音をすべて止める
+    pub fn stop_audio(&mut self) {
+        self.audio_player.stop();
+    }
+
+    /// 再生中またはキューに残っている音があるか
+    pub fn is_playing_audio(&self) -> bool {
+        !self.audio_player.empty()
     }
 }
 

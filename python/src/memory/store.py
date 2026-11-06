@@ -1,4 +1,4 @@
-"""会話と人物の事実を保存する。再起動後も前回の話題を答えられるようにする。
+"""会話、人物の事実、車体の出来事を保存する。再起動後も前回の話題を答えられるようにする。
 
 DB には個人情報が入るので、git の追跡対象外の場所に置く。
 """
@@ -26,6 +26,7 @@ PREVIOUS_SESSION_MESSAGES = 6
 RELATED_MESSAGES = 5
 MAX_FACTS = 30
 MAX_SNIPPET_CHARS = 200
+RECENT_EVENTS = 5
 
 ROLE_TEXT = {"user": "ユーザー", "assistant": "あなた"}
 MEMORY_RULE = (
@@ -55,7 +56,22 @@ CREATE TABLE IF NOT EXISTS facts (
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    -- Pi の事象を二度保存しないための識別子。Pi の再起動で番号が戻るので時刻を含める
+    source_key TEXT UNIQUE,
+    kind TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    occurred_at TEXT NOT NULL
+);
 """
+
+
+class StoredEvent(NamedTuple):
+    id: int
+    kind: str
+    summary: str
+    occurred_at: str
 
 
 class StoredMessage(NamedTuple):
@@ -77,6 +93,14 @@ def _now() -> str:
 
 def _snippet(text: str) -> str:
     return text if len(text) <= MAX_SNIPPET_CHARS else text[:MAX_SNIPPET_CHARS] + "…"
+
+
+def _local_time(iso: str) -> str:
+    """「さっき」が分かるよう、出来事は PC の時刻で分単位まで示す"""
+    try:
+        return datetime.fromisoformat(iso).astimezone().strftime("%m/%d %H:%M")
+    except ValueError:
+        return iso[:16]
 
 
 def _format_line(message: StoredMessage) -> str:
@@ -120,6 +144,33 @@ class MemoryStore:
         with self._lock, self._db:
             cursor = self._db.execute("DELETE FROM facts WHERE key = ?", (key,))
             return cursor.rowcount > 0
+
+    def add_event(
+        self,
+        kind: str,
+        summary: str,
+        occurred_at: Optional[datetime] = None,
+        source_key: Optional[str] = None,
+    ) -> bool:
+        """出来事を保存する。同じ `source_key` が保存済みなら何もせず False を返す。"""
+        at = (occurred_at or datetime.now(timezone.utc)).isoformat(timespec="seconds")
+        with self._lock, self._db:
+            cursor = self._db.execute(
+                "INSERT OR IGNORE INTO events (source_key, kind, summary, occurred_at) "
+                "VALUES (?, ?, ?, ?)",
+                (source_key, kind, summary, at),
+            )
+            return cursor.rowcount > 0
+
+    def recent_events(self, limit: int = RECENT_EVENTS) -> List[StoredEvent]:
+        """新しい出来事を古い順に返す。今回の起動中の出来事も含める"""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id, kind, summary, occurred_at FROM events "
+                "ORDER BY occurred_at DESC, id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [StoredEvent(*row) for row in reversed(rows)]
 
     def facts(self) -> Dict[str, str]:
         with self._lock:
@@ -171,13 +222,15 @@ class MemoryStore:
         query: str,
         previous_limit: int = PREVIOUS_SESSION_MESSAGES,
         related_limit: int = RELATED_MESSAGES,
+        event_limit: int = RECENT_EVENTS,
     ) -> str:
         """Agent のシステムプロンプトへ入れる文章を作る。記憶がなければ空文字を返す。"""
         facts = self.facts()
         previous = self.previous_session_messages(previous_limit)
         shown = {message.id for message in previous}
         related = [m for m in self.search(query, related_limit) if m.id not in shown]
-        if not (facts or previous or related):
+        events = self.recent_events(event_limit) if event_limit else []
+        if not (facts or previous or related or events):
             return ""
 
         lines = ["【記憶】"]
@@ -190,6 +243,9 @@ class MemoryStore:
         if related:
             lines.append("関連する過去の会話:")
             lines.extend(_format_line(message) for message in related)
+        if events:
+            lines.append("最近の車体の出来事:")
+            lines.extend(f"- {_local_time(e.occurred_at)} {e.summary}" for e in events)
         lines.append(MEMORY_RULE)
         return "\n".join(lines)
 

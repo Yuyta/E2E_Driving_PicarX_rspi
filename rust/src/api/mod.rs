@@ -6,7 +6,7 @@ use crate::api::handlers::{
     AppState, RobotHardware, calibrate_floor, calibrate_handler, emergency_stop_handler,
     emergency_stop_reset_handler, events_handler, grayscale_handler, listen_handler, move_handler,
     require_token, snapshot_handler, speak_handler, status_handler, steer_handler, stop_handler,
-    stream_handler, ultrasonic_handler,
+    stop_speech_handler, stream_handler, ultrasonic_handler,
 };
 use crate::api::models::DriveDirection;
 use crate::rpi_camera::{CameraHub, spawn_camera_supervisor};
@@ -43,6 +43,7 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/sensor/ultrasonic", get(ultrasonic_handler))
         .route("/api/sensor/grayscale", get(grayscale_handler))
         .route("/api/audio/speak", post(speak_handler))
+        .route("/api/audio/stop", post(stop_speech_handler))
         .route("/api/audio/listen", get(listen_handler))
         .route("/api/camera/snapshot", get(snapshot_handler))
         .route("/api/camera/stream", get(stream_handler))
@@ -73,6 +74,12 @@ impl RobotHardware for MockFallbackHardware {
     }
     fn speak(&self, _text: &str) -> Result<(), String> {
         Ok(())
+    }
+    fn stop_speech(&self) -> Result<(), String> {
+        Ok(())
+    }
+    fn is_speaking(&self) -> bool {
+        false
     }
     fn listen(&self) -> Result<String, String> {
         Ok("Mock Audio Listen".to_string())
@@ -192,6 +199,7 @@ mod tests {
         last_speed: AtomicUsize,
         stop: AtomicUsize,
         fail_stop: AtomicBool,
+        speaking: AtomicBool,
     }
 
     struct MockHardware {
@@ -227,7 +235,15 @@ mod tests {
             }
         }
         fn speak(&self, _text: &str) -> Result<(), String> {
+            self.counters.speaking.store(true, Ordering::SeqCst);
             Ok(())
+        }
+        fn stop_speech(&self) -> Result<(), String> {
+            self.counters.speaking.store(false, Ordering::SeqCst);
+            Ok(())
+        }
+        fn is_speaking(&self) -> bool {
+            self.counters.speaking.load(Ordering::SeqCst)
         }
         fn listen(&self) -> Result<String, String> {
             Ok("テスト音声認識".to_string())
@@ -625,6 +641,22 @@ mod tests {
             app.send("GET", "/api/audio/listen", None).await,
             StatusCode::OK
         );
+    }
+
+    #[tokio::test]
+    async fn speech_can_be_stopped_and_is_reported_in_status() {
+        let app = TestApp::new(50.0);
+        assert_eq!(app.status().await["audio"]["speaking"], false);
+
+        app.send("POST", "/api/audio/speak", Some(r#"{"text":"こんにちは"}"#))
+            .await;
+        assert_eq!(app.status().await["audio"]["speaking"], true);
+
+        assert_eq!(
+            app.send("POST", "/api/audio/stop", None).await,
+            StatusCode::OK
+        );
+        assert_eq!(app.status().await["audio"]["speaking"], false);
     }
 
     #[tokio::test]

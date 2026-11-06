@@ -1,9 +1,11 @@
 import asyncio
 import base64
+import importlib.util
 import sqlite3
 import sys
 import threading
 
+import httpx
 from langchain_core.messages import AIMessage, HumanMessage
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QImage, QPixmap
@@ -25,9 +27,12 @@ from PySide6.QtWidgets import (
 from src.agents.stop_intent import StopIntent, parse_stop_intent
 from src.config import ModelPreset, settings
 from src.gui.async_runner import AsyncRunner
+from src.memory.events import EventRecorder
 from src.memory.store import get_memory_store
 from src.models import DriveDirection
 from src.picarx_client.client import PicarxClient
+from src.voice.listener import VOICE_EXTRA_HINT, Recorder, Transcriber
+from src.voice.speaker import Speaker
 
 AGENT_TIMEOUT_SEC = 60.0
 # ローカル LLM は最初の読み込みに時間がかかる
@@ -46,6 +51,9 @@ class PicarxMainWindow(QMainWindow):
         self.resize(950, 700)
 
         self.client = PicarxClient()
+        self._speaker = Speaker(self.client, on_error=self._on_speech_stop_failed)
+        self._events = EventRecorder(self.client, lambda: get_memory_store())
+        self._event_error = None
         self.current_model = settings.default_model
         self._agent_graph = None
         self._agent_model = None
@@ -56,8 +64,12 @@ class PicarxMainWindow(QMainWindow):
         self._runner = AsyncRunner()
         self._ui_call.connect(self._run_on_ui, Qt.QueuedConnection)
 
+        self._recorder = None
+        self._transcriber = None
+
         self._init_ui()
         self._init_timer()
+        self._init_voice()
 
     def _init_ui(self):
         central_widget = QWidget(self)
@@ -177,6 +189,13 @@ class PicarxMainWindow(QMainWindow):
         btn_send = QPushButton("Send")
         btn_send.clicked.connect(self._on_send_chat)
         input_layout.addWidget(btn_send)
+
+        # 車体にはマイクがないので、PC のマイクで話す
+        self.btn_talk = QPushButton("🎤 押して話す")
+        self.btn_talk.setToolTip("押している間だけ PC のマイクで録音します")
+        self.btn_talk.pressed.connect(self._on_talk_pressed)
+        self.btn_talk.released.connect(self._on_talk_released)
+        input_layout.addWidget(self.btn_talk)
         chat_vbox.addLayout(input_layout)
 
         right_layout.addWidget(chat_group)
@@ -218,8 +237,22 @@ class PicarxMainWindow(QMainWindow):
                 self._ui(lambda: self._show_distance(dist))
             except Exception:
                 self._ui(lambda: self.lbl_distance.setText("Disconnected"))
+                return
+            await self._record_events()
 
         self._async_call(task())
+
+    async def _record_events(self):
+        """安全イベントを記憶へ保存する。失敗は内容が変わった時だけ表示する。"""
+        try:
+            await self._events.poll()
+        except (OSError, sqlite3.Error, httpx.HTTPError, ValueError) as error:
+            message = str(error)
+            if message != self._event_error:
+                self._event_error = message
+                self._append_chat(f"<b>[Memory Error]</b> 出来事を保存できません: {message}")
+        else:
+            self._event_error = None
 
     def _show_distance(self, dist: float) -> None:
         self.lbl_distance.setText(f"{dist:.1f} cm")
@@ -235,6 +268,10 @@ class PicarxMainWindow(QMainWindow):
     def _on_emergency_stop(self):
         # LLMの処理や共有イベントループの状態に左右されないよう、専用スレッドで送信する
         threading.Thread(target=self._send_emergency_stop, daemon=True).start()
+        self._speaker.interrupt()
+
+    def _on_speech_stop_failed(self, error):
+        self._append_chat(f"<b>[TTS Error]</b> 発話を止められませんでした: {error}")
 
     def _send_emergency_stop(self):
         try:
@@ -299,19 +336,76 @@ class PicarxMainWindow(QMainWindow):
 
         self._async_call(task())
 
+    def _init_voice(self):
+        """音声入力を準備する。必要なライブラリがなければボタンを無効にする"""
+        if not all(importlib.util.find_spec(name) for name in ("sounddevice", "faster_whisper")):
+            self.btn_talk.setEnabled(False)
+            self.btn_talk.setToolTip(VOICE_EXTRA_HINT)
+            return
+        self._recorder = Recorder()
+        self._transcriber = Transcriber()
+        # モデルの読み込みに数秒かかるので、最初に話す前に済ませておく
+        threading.Thread(target=self._preload_transcriber, daemon=True).start()
+
+    def _preload_transcriber(self):
+        try:
+            self._transcriber.load()
+        except Exception as error:
+            message = str(error)
+            self._append_chat(f"<b>[Voice Error]</b> 音声認識を準備できません: {message}")
+
+    def _on_talk_pressed(self):
+        if self._recorder is None:
+            self._append_chat(f"<b>[Voice Error]</b> {VOICE_EXTRA_HINT}")
+            return
+        # 話し始めたら、読み上げ中の返事を止める
+        self._speaker.interrupt()
+        try:
+            self._recorder.start()
+        except Exception as error:
+            self._append_chat(f"<b>[Voice Error]</b> マイクを使えません: {error}")
+            return
+        self.btn_talk.setText("🔴 録音中（離すと送信）")
+
+    def _on_talk_released(self):
+        if self._recorder is None or not self._recorder.recording:
+            return
+        self.btn_talk.setText("🎤 押して話す")
+        audio = self._recorder.stop()
+        transcriber = self._transcriber
+
+        async def task():
+            try:
+                result = await asyncio.to_thread(transcriber.transcribe, audio)
+            except Exception as error:
+                message = str(error)
+                self._append_chat(f"<b>[Voice Error]</b> 文字起こしに失敗しました: {message}")
+                return
+            if result.problem:
+                self._append_chat(f"<i>[System] {result.problem}</i>")
+                return
+            self._ui(lambda: self._submit_text(result.text, voice=True))
+
+        self._async_call(task())
+
     def _on_send_chat(self):
         text = self.chat_input.text().strip()
         if not text:
             return
         self.chat_input.clear()
-        self.chat_history.append(f"<b>User:</b> {text}")
+        self._submit_text(text)
+
+    def _submit_text(self, text, voice=False):
+        """文字入力と音声入力の共通の入口"""
+        label = "User (🎤)" if voice else "User"
+        self.chat_history.append(f"<b>{label}:</b> {text}")
+        # 話しかけられたら、前の返事の読み上げを止める
+        self._speaker.interrupt()
 
         intent = parse_stop_intent(text)
         if intent != StopIntent.NONE:
             # 共有のイベントループに左右されないよう、専用スレッドで送る
-            threading.Thread(
-                target=self._send_fast_stop, args=(text, intent), daemon=True
-            ).start()
+            threading.Thread(target=self._send_fast_stop, args=(text, intent), daemon=True).start()
             return
         self._start_agent_turn(text)
 
@@ -327,6 +421,7 @@ class PicarxMainWindow(QMainWindow):
         if stopped and intent == StopIntent.ONLY_STOP:
             self._ui(lambda: self._append_chat("<b>Assistant:</b> 停止しました。"))
             self._remember_turn(text, "停止しました。")
+            self._async_call(self._say("停止しました。"))
             return
         if stopped:
             self._ui(lambda: self._append_chat("<i>[System] 停止しました。続きを処理します...</i>"))
@@ -345,9 +440,9 @@ class PicarxMainWindow(QMainWindow):
             try:
                 speech_text = self._speech_text_from_command(text)
                 if speech_text is not None:
-                    await self.client.speak(speech_text)
                     self._remove_pending_user_message(text)
-                    self._append_chat("<b>Assistant:</b> 発話しました。")
+                    self._append_chat("<b>Assistant:</b> 発話します。")
+                    await self._say(speech_text)
                     return
 
                 from src.agents.graph import create_agent_graph
@@ -363,10 +458,7 @@ class PicarxMainWindow(QMainWindow):
                 self._chat_messages.extend(messages[len(self._chat_messages) :])
                 self._remember_turn(text, speech)
                 self._append_chat(f"<b>Assistant:</b> {response}")
-                try:
-                    await self.client.speak(speech)
-                except Exception as tts_error:
-                    self._append_chat(f"<b>[TTS Error]</b> {tts_error}")
+                await self._say(speech)
             except asyncio.TimeoutError:
                 self._remove_pending_user_message(text)
                 self._append_chat("<b>[Error]</b> AI応答がタイムアウトしました。")
@@ -375,6 +467,13 @@ class PicarxMainWindow(QMainWindow):
                 self._append_chat(f"<b>[Error]</b> {exc}")
 
         self._async_call(task())
+
+    async def _say(self, text):
+        """発話はすべて Speaker を通す。読み上げに失敗しても会話は続ける。"""
+        try:
+            await self._speaker.say(text)
+        except Exception as error:
+            self._append_chat(f"<b>[TTS Error]</b> {error}")
 
     @classmethod
     def _reply_from_messages(cls, messages):
@@ -399,14 +498,7 @@ class PicarxMainWindow(QMainWindow):
             self._append_chat(f"<b>[Memory Error]</b> {error}")
 
     async def _invoke_agent_with_recovery(self):
-        state = {
-            "messages": self._chat_messages,
-            "distance_cm": None,
-            "grayscale": None,
-            "snapshot_base64": None,
-            "current_agent": "main",
-            "is_finished": False,
-        }
+        state = {"messages": self._chat_messages}
         config = {"recursion_limit": 20}
 
         async def invoke(timeout=AGENT_TIMEOUT_SEC):
@@ -529,6 +621,8 @@ class PicarxMainWindow(QMainWindow):
         self._ui(lambda: self.chat_history.append(html))
 
     def closeEvent(self, event):
+        if self._recorder is not None and self._recorder.recording:
+            self._recorder.stop()
         self.poll_timer.stop()
         self.camera_timer.stop()
         self._runner.close()

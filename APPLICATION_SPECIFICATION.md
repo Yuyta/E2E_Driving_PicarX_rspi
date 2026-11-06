@@ -12,7 +12,7 @@
 - カメラ画像の自動取得とGUI表示
 - Raspberry Pi側のローカルTTSによる音声再生
 
-音声入力、永続的な会話記憶（Python GUI）、電池などの状態を踏まえた会話は未実装である。目標の仕様は [§14](#14-会話-agent-の目標仕様未実装) に記載する。
+Python GUI は電池などの状態を毎ターン Agent へ渡し、会話、人物の事実、車体の出来事を SQLite に保存する。音声入力は PC の内蔵マイクによる「押して話す」方式で、ローカルの Whisper で文字にする（車体にはマイクがない）。目標の仕様は [§14](#14-会話-agent-の目標仕様未実装) に記載する。
 
 > [!NOTE]
 > - プロジェクト全体の開発ロードマップ・進捗状況は [ROADMAP.md](ROADMAP.md) を参照してください。
@@ -69,6 +69,7 @@ flowchart TD
 - HTTPクライアント: HTTPX
 - 設定ファイル: `.env`
 - エントリポイント: `python -m src.gui.app`
+- 音声入力: `uv sync --extra voice` で `faster-whisper` と `sounddevice` を入れる
 
 主な実装ファイル:
 
@@ -76,7 +77,10 @@ flowchart TD
 - `python/src/config.py`
 - `python/src/llm_factory.py`
 - `python/src/picarx_client/client.py`
-- `python/src/agents/graph.py`
+- `python/src/agents/graph.py`（Gemini の Agent）
+- `python/src/agents/local_agent.py`（ローカル LLM の Agent）
+- `python/src/memory/store.py`、`python/src/memory/events.py`（記憶）
+- `python/src/voice/speaker.py`（発話）、`python/src/voice/listener.py`（音声入力）
 
 ### 2.2 Raspberry Pi側
 
@@ -150,20 +154,28 @@ Gemini APIが503 `UNAVAILABLE` となった場合は、以下の順で復旧を�
 
 通常のメッセージは以下の処理を行う。
 
-1. GUIにユーザー入力を表示
-2. `HumanMessage` として会話履歴へ追加
-3. LangGraphを実行
-4. 最新のAIメッセージからテキストを抽出
-5. GUIにAssistant返信を表示
-6. Assistant返信をPi側TTS APIへ送信
+1. GUIにユーザー入力を表示し、読み上げ中の返事を止める（`Speaker.interrupt()`）。音声入力は「🎤 押して話す」を離した時に文字にして、ここから同じ流れに入る
+2. 「止まって」などの停止だけの指示は LLM を通さずに停止する
+3. `HumanMessage` として会話履歴へ追加
+4. Agent を実行する。Gemini は LLM とツールを往復する1つの Agent、ローカル LLM は JSON で行動を決める専用の Agent
+5. 最新のAIメッセージからテキストを抽出し、GUIに表示
+6. 読み上げ用の文章を `Speaker` が文ごとに Pi の TTS API へ送る
+7. 発言と返事を記憶 DB に保存する
 
-会話履歴はプロセス内のリストのみで、アプリを終了すると消える。
+発話はすべて `Speaker` を通す。LLM には発話ツールを渡さず、Agent の返事を読み上げる。Pi は1文目を再生しながら2文目を生成するので、話し始めが早くなる。
+
+読み上げは次の時に止まる。止めた後に Pi で生成し終わった文は再生しない。
+
+- 新しいメッセージを送信した時、「🎤 押して話す」を押した時
+- 緊急停止ボタンを押した時
+
+会話の記憶は再起動後も残る。Agent のプロセス内の履歴はアプリを終了すると消える。
 
 Gemini 3.xの応答がテキストブロック配列の場合は、`type == "text"` の要素だけを抽出して表示する。署名やメタデータは表示しない。
 
 ### 3.4 直接発話コマンド
 
-以下の入力はGeminiを経由せず、Pi側TTS APIを直接呼び出す。
+以下の入力はGeminiを経由せず、`Speaker` から Pi 側TTS APIを呼び出す。
 
 | 入力例 | 発話内容 |
 |---|---|
@@ -255,10 +267,11 @@ GUIから以下の操作を実行できる。
 | POST | `/api/drive/emergency_stop/reset` | 緊急停止の解除 |
 | GET | `/api/sensor/ultrasonic` | 超音波距離取得。不明な時は 503。反射が戻らない時は 343.0 |
 | POST | `/api/safety/calibrate` | 今いる床で段差の閾値を校正する。走行中は 409、段差と区別できない値なら 422 |
-| GET | `/api/status` | 電池、センサー（古い値は `null`）、走行モード、走れない理由、反射ループ、カメラの状態 |
+| GET | `/api/status` | 電池、センサー（古い値は `null`）、走行モード、走れない理由、反射ループ、カメラ、発話中か（`audio.speaking`） |
 | GET | `/api/events?after=<id>` | 安全イベント（直近256件）。反射ループの停止には検知から停止までの時間を含む |
 | GET | `/api/sensor/grayscale` | グレースケール取得。不明な時は 503 |
-| POST | `/api/audio/speak` | TTS生成・スピーカー再生 |
+| POST | `/api/audio/speak` | TTS生成と再生キューへの追加。再生の完了は待たない |
+| POST | `/api/audio/stop` | 再生中とキューの発話を止める。生成中の文も再生しない |
 | GET | `/api/audio/listen` | **スタブ**。常に固定文字列を返す |
 | GET | `/api/camera/snapshot` | 最新フレームを JPEG Base64 で取得（320×240 固定） |
 | GET | `/api/camera/stream` | MJPEG の常時配信（`multipart/x-mixed-replace`、320×240、15fps） |
@@ -288,8 +301,11 @@ PC GUI
   -> Rust detect_language()
   -> Rust generate_tts_file()
   -> open_jtalk または espeak-ng (Default エンジン固定)
+  -> 生成中に /api/audio/stop が来ていれば捨てる
   -> PiCar-X の play_file()（再生キューへ追加し、完了を待たずに返る）
   -> スピーカー
+
+PC 側の `Speaker` は返事を文に分けて順に送る。短すぎる文は前の文につなげ、句点のない長い文は読点で切る。
 ```
 
 Rust GUI 内での非同期TTS処理（別スレッド）:
@@ -477,11 +493,10 @@ cargo nextest run --locked --release --profile ci
 - Gemini無料枠の429 `RESOURCE_EXHAUSTED` はアプリケーションでは解決できない。
 - Rust APIサーバーはPi上のカメラコマンド、TTSエンジン、PiCar-Xハードウェアに依存する。
 - TTSエンジン切り替えUIは旧Rust GUIには存在するが、Python GUIからは現在選択できない。
-- `/api/audio/listen` はスタブであり、音声入力は API から利用できない。
-- 発話を途中で止める API がない。
-- `take_snapshot` ツールは画像のメタデータのみを返すため、LLM は画像を見ていない。
-- Drive、Vision、Voice のサブエージェントノードはグラフに登録されているが、エッジがなく実行されない。実際には `router` ノードと `tools` ノードのみが動作する。
-- Agent は電池、現在地、走行状態、学習状況を参照できない。
+- `/api/audio/listen` はスタブであり、Pi では録音しない。音声入力は PC のマイクで行う（車載マイクは ROADMAP の M6）。
+- LLM は画像を見ていない。認識方式を決めるまで、撮影ツールは Agent に渡さない（ROADMAP の M2）。
+- Agent は現在地と学習状況を参照できない（M4、M5）。
+- 旧 Rust GUI（`--gui`）とその LLM は反射ループを通さずにモーターを動かす。廃止の計画は ROADMAP の M2 にある。
 
 ## 13. 会話メモリ機能（旧 Rust GUI のみ）
 
@@ -623,7 +638,8 @@ Memory and Personalization Rules:
 | センサー、走行モード、安全イベント | `/api/status`, `/api/events` | 実装済み（実機未確認） | M1 |
 | 周囲の様子 | カメラ画像（方式は評価後に確認） | LLM へ渡していない | M2 で評価 |
 | いま言われたこと | 音声認識 | 未実装 | M2（PC のマイク）、M6（車載） |
-| 過去の会話、人物の事実 | 記憶 DB | Python 側になし | M2 |
+| 過去の会話、人物の事実 | 記憶 DB | 実装済み（Python） | M2 |
+| 車体の出来事（安全停止、緊急停止、校正） | `/api/events` から記憶 DB へ保存 | 実装済み（実機未確認） | M2 |
 | 今いる場所 | 場所グラフ | なし | M4 |
 | 使用中のモデル、介入率、上達度 | レジストリ、走行記録 | 実走の指標なし | M3、M5 |
 
