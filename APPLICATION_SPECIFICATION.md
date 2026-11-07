@@ -12,7 +12,7 @@
 - カメラ画像の自動取得とGUI表示
 - Raspberry Pi側のローカルTTSによる音声再生
 
-Python GUI は電池などの状態を毎ターン Agent へ渡し、会話、人物の事実、車体の出来事を SQLite に保存する。音声入力は PC の内蔵マイクによる「押して話す」方式で、ローカルの Whisper で文字にする（車体にはマイクがない）。目標の仕様は [§13](#13-会話-agent-の目標仕様未実装) に記載する。
+Python GUI は電池などの状態を毎ターン Agent へ渡し、会話、人物の事実、車体の出来事を SQLite に保存する。音声入力は PC の内蔵マイクによる「押して話す」方式で、ローカルの Whisper で文字にする（車体にはマイクがない）。目標の仕様と実装の状況は [§13](#13-会話-agent-の目標仕様と実装の状況) に記載する。
 
 > [!NOTE]
 > - プロジェクト全体の開発ロードマップ・進捗状況は [ROADMAP.md](ROADMAP.md) を参照してください。
@@ -26,7 +26,10 @@ flowchart TD
     subgraph PC["ローカルPC (Python 3.11以上 / uv)"]
         UI["GUI (PySide6 / app.py)"]
         Graph["LangGraph Agent (graph.py)"]
-        Tools["Tools<br>(Drive / Sensor / Camera / Voice)"]
+        Tools["Tools<br>(Drive / Sensor / Memory / Look)"]
+        Speaker["Speaker (発話)"]
+        Whisper["Whisper (音声入力)"]
+        Memory[("記憶 (SQLite + FTS5)")]
         Client["PicarxClient (HTTPX)"]
         LLMFactory["LLM Factory (llm_factory.py)"]
     end
@@ -38,15 +41,19 @@ flowchart TD
 
     subgraph Pi["Raspberry Pi (Rust / Axum Server :8080)"]
         API["Axum HTTP API (/api/*)"]
-        Safety["安全ガード<br>(発進時の超音波チェック / 前進拒否)"]
+        Safety["反射ループ (約40Hz)<br>障害物、段差、TTL、緊急停止"]
         TTS["TTS モジュール (tts.rs)<br>(Open JTalk / eSpeak)"]
-        Cam["カメラ (rpicam-still)"]
+        Cam["カメラ常時配信 (rpicam-vid)"]
         HW["PiCar-X 実機ハードウェア<br>(モーター / サーボ / センサー / スピーカー)"]
     end
 
     UI --> Graph
+    UI --> Whisper
+    UI --> Speaker --> Client
     Graph --> Tools
+    Graph --> Memory
     Tools --> Client
+    Tools -- "look (画像の説明)" --> Ollama
     Graph --> LLMFactory
     LLMFactory --> Gemini & Ollama
 
@@ -249,14 +256,11 @@ GUI起動後、1秒間隔で `/api/camera/snapshot` を自動呼び出しする�
 
 現在はMJPEGやH.264による連続動画ストリームではなく、1秒ごとの自動スナップショット更新である。
 
-### 4.2 Raspberry Pi側の撮影コマンド
+### 4.2 Raspberry Pi側のカメラ
 
-Rust APIサーバーは次の順でカメラコマンドを実行する。
+Rust APIサーバーは `rpicam-vid`（起動できない場合は `libcamera-vid`）で MJPEG を常時配信し、`/api/camera/snapshot` はその最新フレームを返す。カメラは要求がある間と、最後の要求から10秒間だけ動く（§7）。
 
-1. `rpicam-still`
-2. 起動できない場合は `libcamera-still`
-
-どちらも利用できない場合、APIはHTTP 500を返し、GUIには `Camera Error` を表示する。
+フレームを取得できない場合、API は HTTP 503 を返し、GUI には `Camera Error` を表示する。
 
 ### 4.3 カメラ表示状態
 
@@ -293,7 +297,7 @@ GUIから以下の操作を実行できる。
 | 緊急停止 | `POST /api/drive/emergency_stop` | 即時停止。解除するまで走行を拒否 |
 | 緊急停止の解除 | `POST /api/drive/emergency_stop/reset` | 車両は動かさない |
 
-前進時はRust側の安全ガードが、命令の受信時に超音波距離を確認する。危険距離の場合、前進命令を拒否する。走行中の監視は行わない。
+走行の安全は Pi の反射ループ（約40Hz）が守る。命令の受信時に危険や不明なセンサー値があれば拒否し、走行中も障害物、段差、TTL の期限切れ、緊急停止で止める（E2E_SPECIFICATION.md §4.5）。
 
 通信は背景スレッドのイベントループで実行するので、LLM の応答待ち中も GUI は操作できる。緊急停止はこのループとも別の専用スレッドから送信する。
 
@@ -483,7 +487,7 @@ cargo nextest run --locked --release --profile ci
 - カメラの画像は PC のローカル VLM（`qwen3.5:4b`）で認識し、約7秒かかる。VLM は GUI の起動時に読み込み、30分残す。細い物を見落とすので、走行の安全の判断には使わない。Gemini の Agent には `look` ツールで説明の文章だけを渡す。
 - Agent は現在地と学習状況を参照できない（M4、M5）。
 
-## 13. 会話 Agent の目標仕様（未実装）
+## 13. 会話 Agent の目標仕様と実装の状況
 
 > [!NOTE]
 > 実施順序と完了条件は [ROADMAP.md](ROADMAP.md)、全体構成は [agentic_ai_architecture_policy.md](agentic_ai_architecture_policy.md) を参照する。
@@ -496,25 +500,25 @@ cargo nextest run --locked --release --profile ci
 
 | 情報 | 取得元 | 現状 | 計画 |
 |---|---|---|---|
-| 電池 | `/api/status` | 実装済み（実機未確認） | M1 |
-| センサー、走行モード、安全イベント | `/api/status`, `/api/events` | 実装済み（実機未確認） | M1 |
-| 周囲の様子 | カメラ画像を PC のローカル VLM で説明 | 実装済み（実際の室内は未確認） | M2 |
-| いま言われたこと | 音声認識 | 未実装 | M2（PC のマイク）、M6（車載） |
-| 過去の会話、人物の事実 | 記憶 DB | 実装済み（Python） | M2 |
-| 車体の出来事（安全停止、緊急停止、校正） | `/api/events` から記憶 DB へ保存 | 実装済み（実機未確認） | M2 |
+| 電池 | `/api/status` | 実装済み、実機で確認 | M1 |
+| センサー、走行モード、安全イベント | `/api/status`, `/api/events` | 実装済み、実機で確認 | M1 |
+| 周囲の様子 | カメラ画像を PC のローカル VLM で説明（§3.6） | 実装済み、実際の室内で確認 | M2 |
+| いま言われたこと | PC のマイクとローカルの Whisper（§3.7） | 実装済み（PC のマイク）。車載は未実装 | M2、M6（車載） |
+| 過去の会話、人物の事実 | 記憶 DB | 実装済み | M2 |
+| 車体の出来事（安全停止、緊急停止、校正） | `/api/events` から記憶 DB へ保存 | 実装済み、実機で確認 | M2 |
 | 今いる場所 | 場所グラフ | なし | M4 |
 | 使用中のモデル、介入率、上達度 | レジストリ、走行記録 | 実走の指標なし | M3、M5 |
 
 ### 13.3 応答の組み立て
 
-1. 発話を受け取り、すぐに短い相づちを返す
+1. 発話を受け取る。相づちは見る質問の「見てみます。」だけにする（普通の会話の相づちは試して取りやめた、§3.6）
 2. 状態ストアから現在の状態を短いテキストにする
 3. 記憶を検索し、関連する事実と会話を取得する
 4. ペルソナ、状態、記憶、直近の会話を予算内で組み立てて LLM へ渡す
 5. 応答を文単位で音声合成して再生する
 6. 会話、抽出した事実、発生したイベントを記憶へ保存する
 
-現在の状態はツール呼び出しに頼らず毎ターン注入する。不明な値や古い値は「不明」と伝え、推測で答えない。
+現在の状態はツール呼び出しに頼らず毎ターン注入する。不明な値や古い値は「不明」と伝え、推測で答えない。1〜6 は M2 で実装した。記憶の要約（§13.4）は未実装。
 
 ### 13.4 記憶
 
@@ -525,8 +529,8 @@ cargo nextest run --locked --release --profile ci
 
 ### 13.5 安全境界
 
-- LLM の出力は意図（`go_to`、`explore`、`return`、`look`、`stop`、`say`）に限定する
-- 速度や時間を LLM に直接指定させない
+- LLM の出力は意図（`go_to`、`explore`、`return`、`look`、`stop`、`say`）に限定する（M5。現在は LLM が速度と時間を指定して走らせ、危険な走行は Pi の反射ループと TTL が止める）
+- 速度や時間を LLM に直接指定させない（M5）
 - Body は意図を拒否でき、拒否の理由を Agent に返す
 - 「止まって」などの停止指示は LLM を介さずに即時処理する
 
@@ -534,7 +538,7 @@ cargo nextest run --locked --release --profile ci
 
 - 最初は停止して聞く方式か押して話す方式を使う（モーター音と自声への対策）
 - ロボットの発話中に話しかけられた場合は発話を止める
-- 脳へ接続できない時は、定型の応答で状況を伝える
+- 脳へ接続できない時は、定型の応答で状況を伝える（ROADMAP の M7。Pi だけで話す）
 
 ### 13.7 LLM
 
@@ -547,4 +551,4 @@ cargo nextest run --locked --release --profile ci
 
 - 室内画像、音声、会話、記憶 DB は git に追加しない
 - 画像や音声など、新しい種類のデータをクラウドへ送る機能は、追加前に確認する（ROADMAP の D-3）
-- 車載マイクの装着前に API の認証を実装する
+- API は Bearer トークンで認証する（実装済み）。通信は暗号化していないので、車載マイクの音声を送る前に扱いを確認する
