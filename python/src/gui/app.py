@@ -35,6 +35,7 @@ from src.metrics.turn_timing import ACK_AUDIO, REPLY_AUDIO, REPLY_READY, STOPPED
 from src.models import DriveDirection
 from src.picarx_client.client import PicarxClient
 from src.vision.local_vlm import ACKNOWLEDGEMENT, is_look_question
+from src.voice.breath import preload as preload_breath
 from src.voice.listener import VOICE_EXTRA_HINT, Recorder, Transcriber
 from src.voice.speaker import Speaker
 
@@ -56,6 +57,8 @@ class PicarxMainWindow(QMainWindow):
 
         self.client = PicarxClient()
         self._speaker = Speaker(self.client, on_error=self._on_speech_stop_failed)
+        # 読点を足す処理の読み込みに約0.5秒かかるので、最初の返事の前に済ませておく
+        threading.Thread(target=preload_breath, daemon=True).start()
         self._events = EventRecorder(self.client, lambda: get_memory_store())
         self._event_error = None
         self.current_model = settings.default_model

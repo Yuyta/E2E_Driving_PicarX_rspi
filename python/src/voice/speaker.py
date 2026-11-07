@@ -9,6 +9,8 @@ import re
 import threading
 from typing import Callable, List, Optional
 
+from src.voice.breath import add_breath_pauses
+
 SENTENCE_END = re.compile(r"(?<=[。！？!?\n])")
 # 短すぎる文は前の文につなげる（「はい。」だけを1回の合成にしない）
 MIN_SENTENCE_CHARS = 4
@@ -79,7 +81,8 @@ class Speaker:
         async with self._order:
             if not self._stop_done.is_set():
                 await asyncio.to_thread(self._stop_done.wait, STOP_WAIT_SEC)
-            for index, sentence in enumerate(split_sentences(text)):
+            # ひと息が長いと Pi の Open JTalk が途中から遅く読むので、読点を足してから送る
+            for index, sentence in enumerate(split_sentences(add_breath_pauses(text))):
                 if self.generation != generation:
                     return False
                 await self._client.speak(sentence)
