@@ -4,6 +4,7 @@ import importlib.util
 import sqlite3
 import sys
 import threading
+import time
 
 import httpx
 from langchain_core.messages import AIMessage, HumanMessage
@@ -29,6 +30,8 @@ from src.config import ModelPreset, settings
 from src.gui.async_runner import AsyncRunner
 from src.memory.events import EventRecorder
 from src.memory.store import get_memory_store
+from src.metrics import turn_timing
+from src.metrics.turn_timing import ACK_AUDIO, REPLY_AUDIO, REPLY_READY, STOPPED, TurnTiming
 from src.models import DriveDirection
 from src.picarx_client.client import PicarxClient
 from src.vision.local_vlm import ACKNOWLEDGEMENT, is_look_question
@@ -67,6 +70,8 @@ class PicarxMainWindow(QMainWindow):
 
         self._recorder = None
         self._transcriber = None
+        # 次に始まる会話の応答時間。入力を受けた時に作り、Agent の処理へ渡す
+        self._turn_timing = None
 
         self._init_ui()
         self._init_timer()
@@ -89,6 +94,8 @@ class PicarxMainWindow(QMainWindow):
         for preset in ModelPreset:
             is_default = " (Default)" if preset == settings.default_model else ""
             self.model_combo.addItem(f"{preset.value}{is_default}", preset)
+        # 一覧の先頭ではなく、実際に使う既定のモデルを表示する
+        self.model_combo.setCurrentIndex(self.model_combo.findData(self.current_model))
 
         self.model_combo.currentIndexChanged.connect(self._on_model_changed)
         model_layout.addWidget(self.model_combo)
@@ -372,12 +379,14 @@ class PicarxMainWindow(QMainWindow):
         if self._recorder is None or not self._recorder.recording:
             return
         self.btn_talk.setText("🎤 押して話す")
+        released = time.monotonic()
         audio = self._recorder.stop()
         transcriber = self._transcriber
 
         async def task():
             try:
                 result = await asyncio.to_thread(transcriber.transcribe, audio)
+                stt_sec = round(time.monotonic() - released, 3)
             except Exception as error:
                 message = str(error)
                 self._append_chat(f"<b>[Voice Error]</b> 文字起こしに失敗しました: {message}")
@@ -385,7 +394,8 @@ class PicarxMainWindow(QMainWindow):
             if result.problem:
                 self._append_chat(f"<i>[System] {result.problem}</i>")
                 return
-            self._ui(lambda: self._submit_text(result.text, voice=True))
+            timing = TurnTiming("voice", started=released, stt_sec=stt_sec)
+            self._ui(lambda: self._submit_text(result.text, voice=True, timing=timing))
 
         self._async_call(task())
 
@@ -396,8 +406,9 @@ class PicarxMainWindow(QMainWindow):
         self.chat_input.clear()
         self._submit_text(text)
 
-    def _submit_text(self, text, voice=False):
+    def _submit_text(self, text, voice=False, timing=None):
         """文字入力と音声入力の共通の入口"""
+        self._turn_timing = timing or TurnTiming("voice" if voice else "text")
         label = "User (🎤)" if voice else "User"
         self.chat_history.append(f"<b>{label}:</b> {text}")
         # 話しかけられたら、前の返事の読み上げを止める
@@ -410,10 +421,27 @@ class PicarxMainWindow(QMainWindow):
             return
         self._start_agent_turn(text)
 
+    def _take_turn_timing(self):
+        timing, self._turn_timing = self._turn_timing, None
+        return timing or TurnTiming("text")
+
+    def _finish_turn_timing(self, timing, ok=True):
+        """応答時間を保存して表示する。保存に失敗しても会話は止めない"""
+        timing.ok = ok
+        try:
+            turn_timing.save(timing)
+        except OSError as error:
+            self._append_chat(f"<b>[Timing Error]</b> 応答時間を保存できません: {error}")
+        if ok and timing.summary():
+            self._append_chat(f"<i>[Time] {timing.summary()}</i>")
+
     def _send_fast_stop(self, text, intent):
         """LLM を通さず停止する。失敗や続きの指示があれば LLM へ渡す。"""
+        timing = self._turn_timing
         try:
             stopped = self.client.stop_sync()
+            if stopped and timing:
+                timing.mark(STOPPED)
             failure = None if stopped else "Pi が停止を受け付けませんでした"
         except Exception as exc:
             stopped = False
@@ -422,7 +450,14 @@ class PicarxMainWindow(QMainWindow):
         if stopped and intent == StopIntent.ONLY_STOP:
             self._ui(lambda: self._append_chat("<b>Assistant:</b> 停止しました。"))
             self._remember_turn(text, "停止しました。")
-            self._async_call(self._say("停止しました。"))
+            timing = self._take_turn_timing()
+            timing.kind = "stop"
+
+            async def speak_and_record():
+                await self._say("停止しました。", timing, REPLY_AUDIO)
+                self._finish_turn_timing(timing)
+
+            self._async_call(speak_and_record())
             return
         if stopped:
             self._ui(lambda: self._append_chat("<i>[System] 停止しました。続きを処理します...</i>"))
@@ -435,19 +470,23 @@ class PicarxMainWindow(QMainWindow):
         self._ui(lambda: self._start_agent_turn(text))
 
     def _start_agent_turn(self, text):
+        timing = self._take_turn_timing()
         self.chat_history.append(f"<i>Thinking with {self.current_model.value}...</i>")
         if is_look_question(text):
+            timing.kind = "look"
             # 画像の認識に約10秒かかるので、先に返事をしておく
             self.chat_history.append(f"<b>Assistant:</b> {ACKNOWLEDGEMENT}")
-            self._async_call(self._say(ACKNOWLEDGEMENT))
+            self._async_call(self._say(ACKNOWLEDGEMENT, timing, ACK_AUDIO))
 
         async def task():
             try:
                 speech_text = self._speech_text_from_command(text)
                 if speech_text is not None:
+                    timing.kind = "speech_command"
                     self._remove_pending_user_message(text)
                     self._append_chat("<b>Assistant:</b> 発話します。")
-                    await self._say(speech_text)
+                    await self._say(speech_text, timing, REPLY_AUDIO)
+                    self._finish_turn_timing(timing)
                     return
 
                 from src.agents.graph import create_agent_graph
@@ -458,25 +497,32 @@ class PicarxMainWindow(QMainWindow):
 
                 self._chat_messages.append(HumanMessage(content=text))
                 result = await self._invoke_agent_with_recovery()
+                timing.mark(REPLY_READY)
+                # 切り替えた時は、実際に答えたモデルを記録する
+                timing.model = self._agent_model.value if self._agent_model else None
                 messages = result.get("messages", [])
                 response, speech = self._reply_from_messages(messages)
                 self._chat_messages.extend(messages[len(self._chat_messages) :])
                 self._remember_turn(text, speech)
                 self._append_chat(f"<b>Assistant:</b> {response}")
-                await self._say(speech)
+                await self._say(speech, timing, REPLY_AUDIO)
+                self._finish_turn_timing(timing)
             except asyncio.TimeoutError:
                 self._remove_pending_user_message(text)
                 self._append_chat("<b>[Error]</b> AI応答がタイムアウトしました。")
+                self._finish_turn_timing(timing, ok=False)
             except Exception as exc:
                 self._remove_pending_user_message(text)
                 self._append_chat(f"<b>[Error]</b> {exc}")
+                self._finish_turn_timing(timing, ok=False)
 
         self._async_call(task())
 
-    async def _say(self, text):
+    async def _say(self, text, timing=None, mark=None):
         """発話はすべて Speaker を通す。読み上げに失敗しても会話は続ける。"""
+        on_first = (lambda: timing.mark(mark)) if timing and mark else None
         try:
-            await self._speaker.say(text)
+            await self._speaker.say(text, on_first_sentence=on_first)
         except Exception as error:
             self._append_chat(f"<b>[TTS Error]</b> {error}")
 

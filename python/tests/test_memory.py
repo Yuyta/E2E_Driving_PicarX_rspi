@@ -233,3 +233,15 @@ def test_benchmark_conversation_requires_real_tool_calls_not_imitated_text():
     assert judge_turn("stop_moving", None, "（stop_moving を実行しました）", []) is False
     assert judge_turn(None, "7.6", "電池は7.60Vです", []) is True
     assert judge_turn(None, "7.6", "電池は7.60Vです", ["read_distance"]) is False
+
+
+def test_tests_use_a_temporary_memory_database():
+    # GUI のテストが利用者の記憶へ会話を書き込まないようにする（conftest.py）
+    import os
+    from pathlib import Path
+
+    from src.memory.store import DEFAULT_DB_PATH
+
+    get_memory_store().add_message("user", "テスト")
+    assert Path(os.environ[MEMORY_DB_ENV]).exists()
+    assert Path(os.environ[MEMORY_DB_ENV]) != DEFAULT_DB_PATH

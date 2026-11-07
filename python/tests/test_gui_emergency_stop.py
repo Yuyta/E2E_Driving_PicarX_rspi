@@ -453,3 +453,11 @@ def test_look_questions_are_acknowledged_before_the_slow_answer(window):
         assert wait_until(lambda: client.speak.await_count >= 1, app)
     assert client.speak.await_args_list[0].args[0] == "見てみます。"
     assert "見てみます。" in win.chat_history.toPlainText()
+
+
+def test_model_selector_shows_the_model_actually_used(window):
+    win, _, _ = window
+    from src.config import settings
+
+    assert win.model_combo.currentData() == settings.default_model
+    assert win.current_model == settings.default_model

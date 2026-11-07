@@ -66,9 +66,10 @@ class Speaker:
         with self._generation_lock:
             return self._generation
 
-    async def say(self, text: str) -> bool:
+    async def say(self, text: str, on_first_sentence: Optional[Callable[[], None]] = None) -> bool:
         """文ごとに Pi へ送る。途中で止められたら False を返す。
 
+        `on_first_sentence` は、Pi が最初の文を再生キューへ入れた時に呼ぶ（応答時間の計測用）。
         送信の失敗は例外のまま返す。呼び出し元が画面に出す。
         """
         generation = self.generation
@@ -78,10 +79,12 @@ class Speaker:
         async with self._order:
             if not self._stop_done.is_set():
                 await asyncio.to_thread(self._stop_done.wait, STOP_WAIT_SEC)
-            for sentence in split_sentences(text):
+            for index, sentence in enumerate(split_sentences(text)):
                 if self.generation != generation:
                     return False
                 await self._client.speak(sentence)
+                if index == 0 and on_first_sentence:
+                    on_first_sentence()
         return self.generation == generation
 
     def interrupt(self) -> None:
