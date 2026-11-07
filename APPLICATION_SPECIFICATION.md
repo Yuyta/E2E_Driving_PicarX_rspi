@@ -80,8 +80,9 @@ flowchart TD
 - `python/src/agents/graph.py`（Gemini の Agent）
 - `python/src/agents/local_agent.py`（ローカル LLM の Agent）
 - `python/src/memory/store.py`、`python/src/memory/events.py`（記憶）
-- `python/src/voice/speaker.py`（発話）、`python/src/voice/listener.py`（音声入力）
-- `python/src/vision/local_vlm.py`（カメラ画像の認識）
+- `python/src/voice/speaker.py`（発話）、`python/src/voice/breath.py`（読点の追加）、`python/src/voice/listener.py`（音声入力）
+- `python/src/vision/local_vlm.py`、`python/src/tools/vision_tool.py`（カメラ画像の認識）
+- `python/src/metrics/turn_timing.py`、`python/src/metrics/turn_report.py`（応答時間の計測）
 
 ### 2.2 Raspberry Pi側
 
@@ -134,17 +135,17 @@ Pi の実行ファイルは API サーバーだけを起動する（`./picar-x-r
 | Gemini Pro | `gemini-3.1-pro-preview` | 高度な推論 |
 | Ollama Local | `ollama/qwen3.5:4b-text` | ローカルLLM（PC の CPU で実行）。Gemini が使えない時の代替。`qwen3.5:4b` を取得後、`uv run python -m src.llm_setup` で作成する |
 
-モデル変更時はLangGraphを再生成する。
+モデル変更時はLangGraphを再生成する。起動時の選択欄には、既定のモデル（Flash-Lite）を表示する。
 
 既定モデルは Gemini で、チャット内容は Gemini API へ送信される（意図した利用。ROADMAP の D-3）。
 
-Gemini APIが503 `UNAVAILABLE` となった場合は、以下の順で復旧を試みる。
+Gemini への要求は20秒で打ち切り、ライブラリの中では再試行しない。Gemini が答えられない時は、次の順で切り替える。
 
-1. LangChainの内部再試行
-2. 3秒待機後の再試行
-3. `gemini-3.5-flash-lite` へのフォールバック
+1. 混雑（503）、応答なし、無料枠の上限（429）の時は、`gemini-3.5-flash-lite` で答え直す。Flash-Lite を選んでいる時はこの段階を飛ばす
+2. それでも答えられない時と、通信断や API キーの誤りの時は、ローカル LLM で答える。チャット欄に「Geminiが使えないため、ローカルLLMで応答します」と出す
+3. 切り替えはその会話だけ。次の会話は、選んでいるモデルから試し直す
 
-429 `RESOURCE_EXHAUSTED` はAPIクォータ超過であり、アプリケーション側ではクォータを増加できない。
+429 `RESOURCE_EXHAUSTED` はAPIクォータ超過であり、アプリケーション側ではクォータを増加できない。Agent 全体の待ち時間の上限は、Gemini が60秒、ローカル LLM が120秒。
 
 ### 3.3 チャット処理
 
@@ -187,6 +188,52 @@ Gemini 3.xの応答がテキストブロック配列の場合は、`type == "tex
 ### 3.5 チャット履歴エラー対策
 
 LLM呼び出し失敗時は、未完了のユーザー発話を会話履歴から削除する。これにより、失敗後の再送信でGeminiのfunction call turn順序が壊れることを防ぐ。
+
+### 3.6 見る質問
+
+「何が見える？」など、今見えている物を聞かれた時の流れ。画像は PC の外へ出さない。
+
+1. GUI が、決まった言い回しで見る質問かを判定する（`is_look_question`）。「何が見える」「何が映ってる」「周りの様子どう」「カメラに〜」「映ったもの」「写っている物」などが当たる。「さっき」「昨日」など過去の話は記憶で答えるので外す
+2. 当たれば、すぐに「見てみます。」と話す（相づち）。普通の会話の相づちは、違和感が大きかったので入れない（2026-11-07）
+3. 同時に、Gemini の判断を待たずに見始める（`LocalVision.prefetch`）。「進んでから」「曲がって」など動いてから見る頼みごとでは、動く前の画像になるので先に見ない。先に見た結果は20秒以内に使われなければ捨てる
+4. Pi から画像を1枚取り（320×240、JPEG）、PC の Ollama で動く VLM（`qwen3.5:4b`）に渡す。指示は「日本語の1〜2文で、写っている物だけを答え、はっきりしない物は『よく分からない』と言う」
+5. Gemini の場合は、`look` ツールの結果として説明の文章だけを渡し、Gemini が返事を作る。ローカル LLM の場合は、LLM を通さず VLM の文をそのまま返事にする
+
+VLM は読み込みに約5.6秒かかるので、GUI の起動時に読み込み、30分残す（`LocalVision.warm_up`）。メモリを約3.2GB 使う。読み込みは見る時と同じ `num_ctx` で行う。違う値だと、見る時に Ollama が読み込み直す。Gemini の `look`、ローカル LLM の Agent、GUI の先読みは、同じ `LocalVision` を使う。
+
+VLM は細い物を見落とすので、走行してよいかの判断には使わない。
+
+### 3.7 音声入力
+
+- 「🎤 押して話す」を押している間だけ PC のマイクで録音し、離すとローカルの Whisper（`small`、CPU）で文字にする。音声はファイルに保存しない
+- 短すぎる録音と小さすぎる音は、文字起こしをせずに知らせる
+- Whisper には、よく使う言い回しを手がかり（`initial_prompt`）として渡す。手がかりがないと「止まって」が「ご視聴ありがとうございました。」になることがあった。聞き取れない時に手がかりの文がそのまま出ることがあるので、手がかりに動く指示は入れない（「止まって」、見る質問、電池の質問だけ）
+- Whisper のモデルは GUI の起動時に別スレッドで読み込む
+
+### 3.8 応答時間の計測
+
+GUI は会話1回ごとに、入力が終わった時（送信、または「🎤 押して話す」を離した時）からの時間を記録する。
+
+| 記録 | 意味 |
+|---|---|
+| 文字起こし | 音声入力の時だけ |
+| 相づち | 「見てみます。」が流れ始めた時 |
+| 停止 | 「止まって」で停止指令が Pi に届いた時 |
+| 返事の作成 | Agent が返事の文章を作り終えた時 |
+| 返事の流れ始め | Pi が返事の最初の文を音声にして再生キューへ入れた時 |
+
+- 各回の値はチャット欄に `[Time]` として出す
+- 会話の内容は保存しない。種類（`llm`、`look`、`stop`、`speech_command`）、実際に答えたモデル、入力の種類、時間だけを `python/data/turn_timings/timings.jsonl`（git の追跡外）に追記する
+- 集計は `uv run python -m src.metrics.turn_report`。種類、モデル、入力ごとに中央値と90パーセンタイルを出す
+
+目標（2026-11-07 決定）:
+
+| 種類 | 目標 | 実測（2026-11-07） |
+|---|---|---|
+| 見る質問の「見てみます。」、停止 | 0.5秒以内 | 0.2秒 |
+| 文字入力の会話 | 返事の流れ始めの中央値が5秒以内 | 4.7秒（Gemini Flash-Lite） |
+| 音声入力の会話 | 中央値6秒以内、遅くても8秒以内 | 5.5秒、最大6.9秒 |
+| 見る質問 | 8秒以内 | 8.2秒 |
 
 ## 4. カメラ仕様
 
@@ -415,6 +462,8 @@ uv run ruff format --check .
 uv run ruff check .
 uv run pytest tests/ -v
 ```
+
+テストは本物の記憶 DB と応答時間の記録に書き込まない（`python/tests/conftest.py` で一時ファイルに向ける）。GUI のテストは、VLM の読み込みと先読みを偽物に置き換え、Ollama と Pi に接続しない。
 
 Rust は `.github/workflows/rust-ci.yml` で以下を実行する（Raspberry Pi 5 向けのクロスビルドを含む）。
 
