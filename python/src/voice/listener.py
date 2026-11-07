@@ -23,6 +23,12 @@ MIN_PEAK = 0.005
 # 内蔵マイクの音が小さいので、ピークがこの値になるまで大きくする
 TARGET_PEAK = 0.5
 MAX_GAIN = 30.0
+# よく使う言い回しを手がかりとして渡す。手がかりがないと「止まって」が
+# 「ご視聴ありがとうございました。」になることがあった（2026-11-07、合成音声で確認）。
+# 聞き取れない時に手がかりの文がそのまま出ることがあるので、動く指示は入れない
+INITIAL_PROMPT = (
+    "ロボットへの話しかけ。何が見える？前に映っているものを教えて。止まって。電池どう？"
+)
 
 VOICE_EXTRA_HINT = "音声入力には `uv sync --extra voice` が必要です"
 TOO_SHORT = "短すぎて聞き取れませんでした。ボタンを押したまま話してください。"
@@ -129,7 +135,11 @@ class Transcriber:
             return Transcript("", problem)
         self.load()
         segments, _ = self._model.transcribe(
-            normalize(audio), language="ja", beam_size=1, vad_filter=True
+            normalize(audio),
+            language="ja",
+            beam_size=1,
+            vad_filter=True,
+            initial_prompt=INITIAL_PROMPT,
         )
         text = "".join(segment.text for segment in segments).strip()
         seconds = len(audio) / SAMPLE_RATE

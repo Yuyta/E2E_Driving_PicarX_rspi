@@ -46,6 +46,9 @@ def vlm(reply="青い箱が見えます。", error=None):
         "周りの様子どう？",
         "カメラに何か映ってる？",
         "ドアは見えますか",
+        "前に映ったものを教えて",
+        "カメラに写っている物は何？",
+        "今映ってるもの教えて",
     ],
 )
 def test_questions_about_what_is_visible_are_detected(text):

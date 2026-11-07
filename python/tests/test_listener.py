@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from src.voice.listener import (
+    INITIAL_PROMPT,
     MAX_GAIN,
     MAX_SECONDS,
     NOT_HEARD,
@@ -133,3 +134,15 @@ def test_model_is_loaded_once_and_can_be_chosen_by_environment(monkeypatch):
     transcriber.load()
     transcriber.transcribe(speech())
     assert loaded == ["large-v3-turbo"]
+
+
+def test_transcriber_gives_whisper_common_phrases_but_no_motion_commands():
+    from src.vision.local_vlm import MOTION_WORDS
+
+    whisper = FakeWhisper("止まって")
+    Transcriber("small", model_factory=lambda name: whisper).transcribe(speech(peak=0.026))
+    prompt = whisper.received[1]["initial_prompt"]
+    assert prompt == INITIAL_PROMPT
+    assert "止まって" in prompt
+    # 聞き取れない時に手がかりの文がそのまま出ても、車が動き出さないようにする
+    assert not MOTION_WORDS.search(prompt)
