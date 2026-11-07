@@ -5,7 +5,7 @@ use crate::api::handlers::RobotHardware;
 use crate::api::models::DriveDirection;
 use crate::picarx::Picarx;
 use crate::sensor_monitor::{SensorMonitor, SensorSnapshot};
-use crate::tts::{TtsEngine, detect_language, generate_tts_file};
+use crate::tts::{detect_language, generate_tts_file};
 
 /// 実機 PiCar-X ハードウェア制御実装
 pub struct PiCarHardware {
@@ -65,8 +65,8 @@ impl RobotHardware for PiCarHardware {
     fn speak(&self, text: &str) -> Result<(), String> {
         let epoch = self.speech_epoch.load(Ordering::SeqCst);
         let lang = detect_language(text);
-        let wav_path = generate_tts_file(text, lang, TtsEngine::Default)
-            .map_err(|e| format!("TTS生成エラー: {}", e))?;
+        let wav_path =
+            generate_tts_file(text, lang).map_err(|e| format!("TTS生成エラー: {}", e))?;
 
         // 生成中に発話の停止が来ていたら再生しない。停止と同じロックの中で確かめる
         let result = {

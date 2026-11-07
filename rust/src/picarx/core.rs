@@ -328,15 +328,6 @@ impl Picarx {
         }
     }
 
-    pub fn forward(&mut self, speed: i32) {
-        self.set_motor_speed(0, speed);
-        self.set_motor_speed(1, speed);
-    }
-
-    pub fn backward(&mut self, speed: i32) {
-        self.forward(-speed);
-    }
-
     pub fn stop(&mut self) {
         self.set_motor_speed(0, 0);
         self.set_motor_speed(1, 0);
@@ -473,13 +464,6 @@ impl Picarx {
 
         // 実機では進行方向に向かって A0 が右、A2 が左。戻り値は [左, 中央, 右] に揃える
         Ok([a2 & ADC_MASK, a1 & ADC_MASK, a0 & ADC_MASK])
-    }
-
-    pub fn get_distance(&mut self) -> f64 {
-        self.ultrasonic
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .read_distance()
     }
 
     /// 超音波センサーへの参照。`Picarx` のロックを持たずに測定するために使う。

@@ -12,7 +12,7 @@
 - カメラ画像の自動取得とGUI表示
 - Raspberry Pi側のローカルTTSによる音声再生
 
-Python GUI は電池などの状態を毎ターン Agent へ渡し、会話、人物の事実、車体の出来事を SQLite に保存する。音声入力は PC の内蔵マイクによる「押して話す」方式で、ローカルの Whisper で文字にする（車体にはマイクがない）。目標の仕様は [§14](#14-会話-agent-の目標仕様未実装) に記載する。
+Python GUI は電池などの状態を毎ターン Agent へ渡し、会話、人物の事実、車体の出来事を SQLite に保存する。音声入力は PC の内蔵マイクによる「押して話す」方式で、ローカルの Whisper で文字にする（車体にはマイクがない）。目標の仕様は [§13](#13-会話-agent-の目標仕様未実装) に記載する。
 
 > [!NOTE]
 > - プロジェクト全体の開発ロードマップ・進捗状況は [ROADMAP.md](ROADMAP.md) を参照してください。
@@ -39,7 +39,7 @@ flowchart TD
     subgraph Pi["Raspberry Pi (Rust / Axum Server :8080)"]
         API["Axum HTTP API (/api/*)"]
         Safety["安全ガード<br>(発進時の超音波チェック / 前進拒否)"]
-        TTS["TTS モジュール (tts.rs)<br>(Open JTalk / eSpeak / Piper Plus)"]
+        TTS["TTS モジュール (tts.rs)<br>(Open JTalk / eSpeak)"]
         Cam["カメラ (rpicam-still)"]
         HW["PiCar-X 実機ハードウェア<br>(モーター / サーボ / センサー / スピーカー)"]
     end
@@ -98,12 +98,7 @@ flowchart TD
 - `rust/src/api/hardware.rs`
 - `rust/src/tts.rs`
 
-動作モードは次の2つ。
-
-| モード | 起動 | 内容 |
-|---|---|---|
-| API サーバー（既定） | `./picar-x-rust` | Python GUI と E2E が接続する。Python 側の LLM を使用 |
-| 旧 Rust GUI | `./picar-x-rust --gui` | Pi 上の GUI。Rust 内の LLM クライアント、会話メモリ（§13）、押して話す録音を使用 |
+Pi の実行ファイルは API サーバーだけを起動する（`./picar-x-rust`）。Python GUI と E2E が接続し、LLM は Python 側で動く。旧 Rust GUI（`--gui`）とその LLM、会話メモリ、Pi での録音は 2026-11-07 に削除した。
 
 ハードウェアの初期化に失敗すると、API サーバーはエラーで終了する。開発用にモックで起動する場合は `PICARX_ALLOW_MOCK=1` を明示する。
 
@@ -283,71 +278,37 @@ GUIから以下の操作を実行できる。
 
 ## 8. TTS仕様
 
-### 8.1 エンジン種別
+### 8.1 エンジン
 
-| エンジン | 定数 | 言語 | 品質 |
-|---|---|---|---|
-| Default (標準) | `TtsEngine::Default` | 日本語 → Open JTalk / 英語 → eSpeak-ng | 標準 |
-| PiperPlus (高品質) | `TtsEngine::PiperPlus` | 日本語・英語を含む6言語 | 高品質 (Tsukuyomi-chan モデル) |
-
-エンジンは Rust GUI 側のラジオボタンで切り替えられる。Python GUI 側からは現在選択不可（§12参照）。
+日本語を含む文は Open JTalk、それ以外は eSpeak NG で音声にする。Open JTalk の声は、`mei` が入っていれば `mei`、なければ `nitech-jp-atr503-m001` を使う。Piper Plus の選択は旧 Rust GUI とともに削除した（2026-11-07）。
 
 ### 8.2 処理経路
-
-Python GUI からの経路:
 
 ```text
 PC GUI
   -> POST /api/audio/speak
   -> Rust detect_language()
   -> Rust generate_tts_file()
-  -> open_jtalk または espeak-ng (Default エンジン固定)
+  -> open_jtalk または espeak-ng
   -> 生成中に /api/audio/stop が来ていれば捨てる
   -> PiCar-X の play_file()（再生キューへ追加し、完了を待たずに返る）
   -> スピーカー
-
-PC 側の `Speaker` は返事を文に分けて順に送る。短すぎる文は前の文につなげ、句点のない長い文は読点で切る。
 ```
 
-Rust GUI 内での非同期TTS処理（別スレッド）:
-
-```text
-LLM返答受信
-  -> std::thread::spawn
-    -> detect_language() で ja / en 判定
-    -> generate_tts_file() で /tmp/picarx_tts_<nanoseconds>.wav 生成
-       [Default]  : open_jtalk (ja) または espeak-ng (en)
-       [PiperPlus]: piper-plus --model <tsukuyomi.onnx> --text <本文> (§8.3)
-    -> play_file() でブロッキング再生
-    -> 一時ファイル削除
-```
-
-音声生成・再生・削除は `std::thread::spawn` による別スレッドで非同期実行し、GUI描画をブロックしない。
+PC 側の `Speaker` は返事を文に分けて順に送る。短すぎる文は前の文につなげ、句点のない長い文は読点で切る。Open JTalk はひと息が30モーラ前後を超えると音が伸びるので、送る前に助詞の後ろへ読点を足す（`python/src/voice/breath.py`）。
 
 ### 8.3 実装詳細 (`rust/src/tts.rs`)
 
 ```rust
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TtsEngine {
-    Default,    // Open JTalk (ja) / eSpeak-ng (en)
-    PiperPlus,  // Piper Plus: Tsukuyomi-chan 6言語高品質モデル
-}
-
 pub fn detect_language(text: &str) -> &'static str;
 // 日本語文字（ひらがな・カタカナ・漢字）が含まれれば "ja"、それ以外は "en"
 
-pub fn generate_tts_file(text: &str, lang: &str, engine: TtsEngine)
+pub fn generate_tts_file(text: &str, lang: &str)
     -> Result<PathBuf, Box<dyn Error + Send + Sync>>;
-// PiperPlus の場合: /usr/local/share/piper-plus/ 配下の実行ファイルを探索
-//   --model models/tsukuyomi.onnx --config models/config.json
-//   --text <本文> --language ja-en-zh-es-fr-pt --speaker 0
-//   --noise-scale 0.667 --length-scale 1.5 --output_file <path>
 // 一時ファイルパス: /tmp/picarx_tts_<nanoseconds>.wav
 ```
 
 ### 8.4 Raspberry Pi 実機セットアップ
-
-#### デフォルトエンジン
 
 ```bash
 sudo apt-get install -y \
@@ -356,30 +317,6 @@ sudo apt-get install -y \
   open-jtalk-mecab-naist-jdic \
   hts-voice-nitech-jp-atr503-m001
 ```
-
-#### Piper Plus (Tsukuyomi-chan 高品質モデル)
-
-> [!NOTE]
-> `tsukuyomi` は日本語・英語を含む6言語対応の多言語モデルのため、1つのモデルで日英両言語に対応できる。
-
-```bash
-# Piper Plus 展開
-sudo mkdir -p /usr/local/share/piper-plus
-cd /usr/local/share/piper-plus
-sudo curl -L -o piper.tar.gz \
-  https://github.com/ayutaz/piper-plus/releases/latest/download/piper-linux-arm64.tar.gz
-sudo tar xzf piper.tar.gz
-
-# Tsukuyomi-chan モデル取得
-sudo mkdir -p /usr/local/share/piper-plus/models
-cd /usr/local/share/piper-plus/models
-sudo curl -L -o tsukuyomi.onnx \
-  https://huggingface.co/ayousanz/piper-plus-tsukuyomi-chan/resolve/main/tsukuyomi-chan-6lang-fp16.onnx
-sudo curl -L -o config.json \
-  https://huggingface.co/ayousanz/piper-plus-tsukuyomi-chan/resolve/main/config.json
-```
-
-現行コードは `--noise-scale 0.667` と `--length-scale 1.5` を固定で渡す。旧版の本書はモデル向けの推奨値を `0.5` としていたが、現行値との整合は未確認である。
 
 ### 8.5 TTSエラー
 
@@ -449,7 +386,7 @@ Raspberry Pi に SSH 接続し、送信されたバイナリを実行します�
 ```bash
 ./picar-x-rust
 ```
-APIサーバーとして起動する場合、`--gui` は付けません。起動時に `/opt/picar-x/picar-x.conf` からサーボ校正オフセットが自動適用されます。
+起動時に `/opt/picar-x/picar-x.conf` からサーボ校正オフセットが自動適用されます。
 
 ### 10.2 PC
 
@@ -493,145 +430,20 @@ cargo nextest run --locked --release --profile ci
 - Assistantの通常返信は毎回Pi側TTSで再生する。
 - Gemini無料枠の429 `RESOURCE_EXHAUSTED` はアプリケーションでは解決できない。
 - Rust APIサーバーはPi上のカメラコマンド、TTSエンジン、PiCar-Xハードウェアに依存する。
-- TTSエンジン切り替えUIは旧Rust GUIには存在するが、Python GUIからは現在選択できない。
 - `/api/audio/listen` はスタブであり、Pi では録音しない。音声入力は PC のマイクで行う（車載マイクは ROADMAP の M6）。
-- カメラの画像は PC のローカル VLM（`qwen3.5:4b`）で認識し、約10秒かかる。細い物を見落とすので、走行の安全の判断には使わない。Gemini の Agent には `look` ツールで説明の文章だけを渡す。
+- カメラの画像は PC のローカル VLM（`qwen3.5:4b`）で認識し、約7秒かかる。VLM は GUI の起動時に読み込み、30分残す。細い物を見落とすので、走行の安全の判断には使わない。Gemini の Agent には `look` ツールで説明の文章だけを渡す。
 - Agent は現在地と学習状況を参照できない（M4、M5）。
-- 旧 Rust GUI（`--gui`）とその LLM は反射ループを通さずにモーターを動かす。廃止の計画は ROADMAP の M2 にある。
 
-## 13. 会話メモリ機能（旧 Rust GUI のみ）
-
-> [!IMPORTANT]
-> 本機能が動作するのは **旧 Rust GUI（`--gui`）の Gemini プロバイダーのみ** である。Python GUI と API サーバーからは使用しない。Ollama は単発リクエストのまま。
-
-Brain 側への一本化を計画している（§14.4、ROADMAP の M2）。
-
-### 13.1 概要
-
-| 機能 | 内容 |
-|---|---|
-| 会話履歴 | 直近メッセージを SQLite に保存し、コンテキストとして Gemini に渡す |
-| 会話要約 | 未要約メッセージが12件以上になると Gemini で自動要約・統合 |
-| 長期記憶 | ユーザー名・ロボット名・速度設定などをキーバリューで永続保存 |
-| DBファイル | `./picarx_memory.db`（実行ファイルと同じディレクトリ） |
-
-### 13.2 SQLite テーブル定義
-
-```sql
-CREATE TABLE IF NOT EXISTS conversations (
-    id TEXT PRIMARY KEY,
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    conversation_id TEXT NOT NULL,
-    role TEXT NOT NULL CHECK(role IN ('user', 'assistant')),
-    content TEXT NOT NULL,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    summarized INTEGER NOT NULL DEFAULT 0,
-    FOREIGN KEY (conversation_id) REFERENCES conversations(id)
-);
-
-CREATE TABLE IF NOT EXISTS conversation_summaries (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    conversation_id TEXT NOT NULL UNIQUE,
-    summary TEXT NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now')),
-    FOREIGN KEY (conversation_id) REFERENCES conversations(id)
-);
-
-CREATE TABLE IF NOT EXISTS memories (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    key TEXT NOT NULL UNIQUE,
-    value TEXT NOT NULL,
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-```
-
-### 13.3 モジュール構成 (`rust/src/memory/`)
-
-| ファイル | 役割 |
-|---|---|
-| `mod.rs` | `pub mod model, repository, summarizer` |
-| `model.rs` | `Message`, `ConversationSummary`, `Memory` 構造体定義 |
-| `repository.rs` | SQLite CRUD 操作（`MemoryRepository`） |
-| `summarizer.rs` | 自動要約ロジック（未要約12件以上でトリガー） |
-
-依存クレート: `rusqlite = { version = "0.34", features = ["bundled"] }`
-（`bundled` により Pi 上でもシステム SQLite 不要）
-
-### 13.4 Gemini レスポンスへの `memory_updates` 追加
-
-```rust
-// CommandListPayload に追加
-#[serde(default)]
-memory_updates: Option<serde_json::Map<String, Value>>,
-```
-
-Gemini `responseSchema` の `memory_updates` は `required` に含めず optional。
-キー形式はドット記法（例: `"user.name"`, `"robot.name"`, `"robot.default_speed"`）。
-
-### 13.5 `memory_updates` バリデーション規則
-
-| チェック | 詳細 |
-|---|---|
-| キーのホワイトリスト | `user.name`, `robot.name`, `robot.default_speed`, `robot.max_speed`, `user_preferences.*`, `behavior.*` のみ許可 |
-| 値の型チェック | `speed` 系は数値かつ 0〜100 の範囲内 / `name` 系は文字列かつ50文字以内 |
-| `null` 値 | 対応するキーの長期記憶を削除 |
-| 不正なキー | ログ出力して無視（処理は続行） |
-
-### 13.6 Gemini へのコンテキスト注入フォーマット
-
-```text
-[System Prompt] (既存 SYSTEM_PROMPT + Memory Rules 追記)
-
---- Long-term Memory ---
-{
-  "user.name": "太郎",
-  "robot.name": "ピカちゃん",
-  "robot.default_speed": 30
-}
-
---- Conversation Summary ---
-ユーザー（太郎）はロボット（ピカちゃん）に前進・後退の基本操作を指示した。
-
---- Recent Conversation ---
-[User]: 右に曲がって
-[Assistant]: はい、右に曲がります！
----
-
-User request: さっきと同じように前に進んで
-```
-
-### 13.7 SYSTEM_PROMPT への追記内容
-
-```text
-Memory and Personalization Rules:
-- If a "Long-term Memory" section is provided in the context, use names and preferences stored there.
-- If the user tells you their name, robot's name, or any persistent preference, include a "memory_updates" object.
-- memory_updates format: { "key": "value" } where key uses dot notation (e.g. "user.name", "robot.name").
-- To delete a memory, set its value to null.
-- Only include memory_updates when the user provides new persistent information.
-```
-
-追記はプロンプト末尾に行い、既存のコマンド生成指示には一切手を加えない。
-
-### 13.8 会話初期化
-
-- アプリ起動ごとに新しい `conversation_id` を UUID で生成。
-- 長期記憶 (`memories` テーブル) は会話をまたいで永続化。
-
-## 14. 会話 Agent の目標仕様（未実装）
+## 13. 会話 Agent の目標仕様（未実装）
 
 > [!NOTE]
 > 実施順序と完了条件は [ROADMAP.md](ROADMAP.md)、全体構成は [agentic_ai_architecture_policy.md](agentic_ai_architecture_policy.md) を参照する。
 
-### 14.1 目的
+### 13.1 目的
 
 走行判断とは別の会話 Agent が、自分の状況、学習状況、会話の内容と履歴を総合して応答する。
 
-### 14.2 Agent が参照する情報
+### 13.2 Agent が参照する情報
 
 | 情報 | 取得元 | 現状 | 計画 |
 |---|---|---|---|
@@ -644,7 +456,7 @@ Memory and Personalization Rules:
 | 今いる場所 | 場所グラフ | なし | M4 |
 | 使用中のモデル、介入率、上達度 | レジストリ、走行記録 | 実走の指標なし | M3、M5 |
 
-### 14.3 応答の組み立て
+### 13.3 応答の組み立て
 
 1. 発話を受け取り、すぐに短い相づちを返す
 2. 状態ストアから現在の状態を短いテキストにする
@@ -655,34 +467,34 @@ Memory and Personalization Rules:
 
 現在の状態はツール呼び出しに頼らず毎ターン注入する。不明な値や古い値は「不明」と伝え、推測で答えない。
 
-### 14.4 記憶
+### 13.4 記憶
 
-- **保存先**: Brain 側の SQLite に一本化する。§13 のスキーマを出発点とする
+- **保存先**: Brain 側の SQLite に一本化する。`python/src/memory/store.py` で実装済み
 - **検索**: FTS5（日本語はトリグラムを想定、要検証）と新しさで検索する
 - **要約**: 夜間などの空き時間に行う
 - **人物の事実**: 出所と日時を持ち、ユーザーが確認と削除をできるようにする
 
-### 14.5 安全境界
+### 13.5 安全境界
 
 - LLM の出力は意図（`go_to`、`explore`、`return`、`look`、`stop`、`say`）に限定する
 - 速度や時間を LLM に直接指定させない
 - Body は意図を拒否でき、拒否の理由を Agent に返す
 - 「止まって」などの停止指示は LLM を介さずに即時処理する
 
-### 14.6 対話の進め方
+### 13.6 対話の進め方
 
 - 最初は停止して聞く方式か押して話す方式を使う（モーター音と自声への対策）
 - ロボットの発話中に話しかけられた場合は発話を止める
 - 脳へ接続できない時は、定型の応答で状況を伝える
 
-### 14.7 LLM
+### 13.7 LLM
 
 - Gemini Flash-Lite を既定とし、使えない時は PC のローカル LLM で応答する。Flash を選んだ時は、混雑、応答なし（20秒）、無料枠の上限で Flash-Lite へ切り替える。無料枠の上限はモデルごとで、`gemini-3.8-flash` は1日20回
 - PC は GPU なしの Core i7-1255U、メモリ 16GB。ローカルのモデルと量子化レベルは応答時間の実測で選ぶ
 - 小さなモデルに対応するため、応答形式は最小限にする
 - 応答を文単位で音声合成し、待ち時間を短く感じさせる
 
-### 14.8 プライバシー
+### 13.8 プライバシー
 
 - 室内画像、音声、会話、記憶 DB は git に追加しない
 - 画像や音声など、新しい種類のデータをクラウドへ送る機能は、追加前に確認する（ROADMAP の D-3）

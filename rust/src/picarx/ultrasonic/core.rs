@@ -21,10 +21,6 @@ const TRIG_PULSE_US: u64 = 10;
 // 音速 (m/s, 常温)
 const SOUND_SPEED_M_S: f64 = 343.3;
 
-// 測定リトライ設定
-const RETRY_COUNT: u32 = 10;
-const RETRY_DELAY_MS: u64 = 5;
-
 /// `ECHO_TIMEOUT_MS` の間に音が往復できる距離。これより遠い物は測れない
 pub const FAR_DISTANCE_CM: f64 = 343.0;
 
@@ -128,18 +124,6 @@ impl Ultrasonic {
         let cm = (during * SOUND_SPEED_M_S / 2.0) * 100.0;
 
         EchoReading::Distance((cm * 100.0).round() / 100.0)
-    }
-
-    pub fn read_distance(&mut self) -> f64 {
-        // リトライし、成功したらその値を返す
-        for _ in 0..RETRY_COUNT {
-            if let EchoReading::Distance(dist) = self.read_once() {
-                return dist;
-            }
-            // 少しだけ休む（次のパルスとの混信を防ぐため）
-            thread::sleep(Duration::from_millis(RETRY_DELAY_MS));
-        }
-        -1.0
     }
 
     /// リトライなしで1回だけ計測する(最大でもECHO_TIMEOUT_MS程度しかブロックしない)。

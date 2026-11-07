@@ -16,7 +16,7 @@
   cd <project_root>/rust
   RUSTFLAGS="-C target-cpu=native" cargo run --release
   ```
-  - `RUSTFLAGS="-C target-cpu=native"` は、ndarray simd命令による高速化のためのおまじない
+  - `RUSTFLAGS="-C target-cpu=native"` は、実機の CPU 向けに最適化するための指定
 - ホストPCでクロスコンパイルし、その実行ファイルをRaspberry Piに転送 : 推奨
   ```bash
   cd <project_root>/rust/build
@@ -42,19 +42,13 @@ make lint MODEL=5
 make test MODEL=5  # クロス環境でUnitTestバイナリをコンパイル
 ```
 
-## 環境変数 (LLM連携)
+## 環境変数
 
-自然言語プロンプトからロボットへの命令を生成するため、LAN上の別ホストPCで動かした[Ollama](https://ollama.com/)サーバーに接続します。実行前に以下の環境変数を設定してください(未設定の場合は既定値が使われます)。
+Pi の実行ファイルは API サーバーだけを起動します。LLM、記憶、音声入力は PC の Python 側で動きます（旧 Rust GUI と Rust 内の LLM は 2026-11-07 に削除）。
 
-| 環境変数 | 説明 | デフォルト |
+| 環境変数 | 説明 | 既定値 |
 |---|---|---|
-| `OLLAMA_URL` | Ollamaサーバーのアドレス。ホスト名/IPのみ、`host:port`、完全なURL(`http://host:port/api/chat`)のいずれの形式でも指定可能 | `127.0.0.1` (ポート`11434`, パス`/api/chat`を自動補完) |
-| `OLLAMA_MODEL` | 使用するOllamaのモデル名 | `llama3.1` |
-
-```bash
-export OLLAMA_URL=192.0.2.129        # Ollamaサーバーが動いているホストPCのIP
-export OLLAMA_MODEL=mistral:7b-instruct
-```
-
-起動時に実際に接続を試みるURLが `[LLM] Ollama接続先: ...` としてログ出力されるので、設定ミスがあれば確認できます。
-
+| `PICARX_API_TOKEN` | API のトークン。PC 側と同じ値にする。未設定だと起動しない | なし（必須） |
+| `PORT` | API サーバーのポート | `8080` |
+| `PICARX_ALLOW_MOCK` | `1` の時、ハードウェアの初期化に失敗してもモックで起動する。開発用 | 無効 |
+| `PICARX_DISABLE_CLIFF_GUARD` | `1` の時、段差検知を無効にする。車輪を浮かせて試す時など、落下の恐れがない時だけ使う | 無効 |
