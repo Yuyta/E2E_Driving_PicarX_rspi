@@ -23,7 +23,7 @@ from src.agents.body_context import REASON_TEXT, answer_state_question
 from src.llm_factory import LLMFactory
 from src.memory.store import get_memory_store
 from src.tools.drive_tool import drive_backward, drive_forward, steer_wheels, stop_moving
-from src.vision.local_vlm import LocalVision, is_look_question
+from src.vision.local_vlm import is_look_question, shared_vision
 
 MOTION_SPEED = 50  # 実機では速度50前後でないと動きが弱い
 SHORT_MS = 500
@@ -325,7 +325,7 @@ class LocalAgent:
 
     async def _look(self, text: str) -> Reply | str:
         if self._vision is None:
-            self._vision = LocalVision()
+            self._vision = shared_vision()
         result = await self._vision.describe(text)
         if result.ok:
             return result.text

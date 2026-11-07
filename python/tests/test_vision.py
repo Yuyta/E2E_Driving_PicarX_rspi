@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -6,6 +7,7 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from src.agents.local_agent import LocalAgent
+from src.llm_factory import OLLAMA_NUM_CTX
 from src.memory.store import MemoryStore
 from src.tools import ALL_TOOLS
 from src.vision.local_vlm import (
@@ -139,3 +141,65 @@ async def test_local_agent_keeps_error_details_out_of_speech():
     ][-1]
     assert "timeout" in message.content
     assert message.additional_kwargs["speech"] == CAMERA_FAILED
+
+
+class Clock:
+    def __init__(self):
+        self.now = 100.0
+
+    def __call__(self):
+        return self.now
+
+
+@pytest.mark.asyncio
+async def test_prefetched_look_is_used_by_the_next_describe():
+    camera, llm = Camera(), vlm()
+    vision = LocalVision(client=camera, llm=llm)
+    assert vision.prefetch("何が見える？")
+    result = await vision.describe("前方に見える物")
+    assert (result.ok, result.text) == (True, "青い箱が見えます。")
+    # 先に見た1回だけで、もう一度は見ない
+    assert (camera.calls, llm.ainvoke.await_count) == (1, 1)
+    # 使った結果は捨てる。次は見直す
+    await vision.describe("何が見える？")
+    assert camera.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_old_prefetched_look_is_not_used():
+    clock = Clock()
+    camera = Camera()
+    vision = LocalVision(client=camera, llm=vlm(), clock=clock)
+    vision.prefetch("何が見える？")
+    await asyncio.sleep(0.01)
+    clock.now += 30
+    await vision.describe("何が見える？")
+    assert camera.calls == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["前に進んでから何が見えるか教えて", "右に曲がって何が見える？"])
+async def test_requests_to_move_first_are_not_prefetched(text):
+    camera = Camera()
+    vision = LocalVision(client=camera, llm=vlm())
+    assert not vision.prefetch(text)
+    await vision.describe(text)
+    assert camera.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_warm_up_loads_the_vlm_and_keeps_it():
+    http = AsyncMock()
+    http.post = AsyncMock(return_value=httpx.Response(200, request=httpx.Request("POST", "x")))
+    assert await LocalVision(http=http).warm_up()
+    body = http.post.await_args.kwargs["json"]
+    assert (body["model"], body["keep_alive"]) == ("qwen3.5:4b", "30m")
+    # 見る時と同じ文脈の長さで読み込まないと、見る時に読み込み直しになる
+    assert body["options"]["num_ctx"] == OLLAMA_NUM_CTX
+
+
+@pytest.mark.asyncio
+async def test_warm_up_failure_does_not_raise():
+    http = AsyncMock()
+    http.post = AsyncMock(side_effect=httpx.ConnectError("ollama down"))
+    assert not await LocalVision(http=http).warm_up()

@@ -34,7 +34,7 @@ from src.metrics import turn_timing
 from src.metrics.turn_timing import ACK_AUDIO, REPLY_AUDIO, REPLY_READY, STOPPED, TurnTiming
 from src.models import DriveDirection
 from src.picarx_client.client import PicarxClient
-from src.vision.local_vlm import ACKNOWLEDGEMENT, is_look_question
+from src.vision.local_vlm import ACKNOWLEDGEMENT, is_look_question, shared_vision
 from src.voice.breath import preload as preload_breath
 from src.voice.listener import VOICE_EXTRA_HINT, Recorder, Transcriber
 from src.voice.speaker import Speaker
@@ -79,6 +79,7 @@ class PicarxMainWindow(QMainWindow):
         self._init_ui()
         self._init_timer()
         self._init_voice()
+        self._warm_up_vision()
 
     def _init_ui(self):
         central_widget = QWidget(self)
@@ -480,6 +481,8 @@ class PicarxMainWindow(QMainWindow):
             # 画像の認識に約10秒かかるので、先に返事をしておく
             self.chat_history.append(f"<b>Assistant:</b> {ACKNOWLEDGEMENT}")
             self._async_call(self._say(ACKNOWLEDGEMENT, timing, ACK_AUDIO))
+            # Gemini が look を使うと決める前に見始める
+            self._async_call(self._prefetch_look(text))
 
         async def task():
             try:
@@ -520,6 +523,14 @@ class PicarxMainWindow(QMainWindow):
                 self._finish_turn_timing(timing, ok=False)
 
         self._async_call(task())
+
+    def _warm_up_vision(self):
+        """見る質問の VLM は読み込みに約5.6秒かかるので、起動時に読み込んでおく"""
+        self._async_call(shared_vision().warm_up())
+
+    @staticmethod
+    async def _prefetch_look(text):
+        shared_vision().prefetch(text)
 
     async def _say(self, text, timing=None, mark=None):
         """発話はすべて Speaker を通す。読み上げに失敗しても会話は続ける。"""

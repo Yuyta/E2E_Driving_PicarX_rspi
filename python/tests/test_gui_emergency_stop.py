@@ -45,6 +45,9 @@ def window():
     client.get_ultrasonic = AsyncMock(return_value=100.0)
     client.get_camera_snapshot = AsyncMock(side_effect=RuntimeError("no camera"))
     client.speak = AsyncMock(return_value=True)
+    # VLM の読み込みと先読みは、本物の Ollama と Pi に行かないよう偽物にする
+    vision_patch = patch("src.gui.app.shared_vision")
+    vision_patch.start().return_value.warm_up = AsyncMock(return_value=True)
     # Whisper の読み込みはテストごとに行わない。音声のテストは偽物を入れる
     with (
         patch("src.gui.app.PicarxClient", return_value=client),
@@ -54,6 +57,7 @@ def window():
     win.poll_timer.stop()
     win.camera_timer.stop()
     yield win, client, app
+    vision_patch.stop()
     win.close()
     # Linux では、ウィジェットを Python の終了処理に任せるとクラッシュする
     win.deleteLater()
@@ -461,3 +465,17 @@ def test_model_selector_shows_the_model_actually_used(window):
 
     assert win.model_combo.currentData() == settings.default_model
     assert win.current_model == settings.default_model
+
+
+def test_look_questions_start_looking_before_the_llm_decides(window):
+    win, client, app = window
+    from src.gui import app as gui_app
+
+    with (
+        patch("src.agents.graph.create_agent_graph"),
+        patch.object(win, "_invoke_agent_with_recovery", AsyncMock(side_effect=TimeoutError)),
+    ):
+        win._start_agent_turn("何が見える？")
+        vision = gui_app.shared_vision.return_value
+        assert wait_until(lambda: vision.prefetch.called, app)
+    vision.prefetch.assert_called_once_with("何が見える？")
