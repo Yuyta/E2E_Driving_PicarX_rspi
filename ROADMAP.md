@@ -348,6 +348,7 @@ PC のローカル VLM（`qwen3.5:4b`、画像処理部あり）を、生成し�
 - `llm_agent/`、`memory/`、`sample/`（旧 GUI、RC コントローラ）、`audio_input.rs`、旧 GUI のフォント（`rust/assets/`）、`rust/GeminiAPI_implementation_policy.md`
 - 旧 GUI だけが使っていたコード: 安全の確認を通らない `Picarx::forward`、`backward`、`get_distance`、再試行付きの `Ultrasonic::read_distance`、カメラの `RpiCamera`
 - TTS の Piper Plus の選択。Open JTalk と eSpeak NG だけにした
+- Pi に残っていた旧 GUI の会話の記録 `~/picarx_memory.db`。利用者が削除した（2026-11-07）
 - 依存の `eframe`、`ureq`、`rusqlite`、`uuid`、`ndarray`。ビルド用イメージの `libx11-dev` と `libssl-dev`
 - 仕様書の §13（旧 GUI の会話メモリ）。§14 は §13 になった
 
@@ -356,7 +357,6 @@ PC のローカル VLM（`qwen3.5:4b`、画像処理部あり）を、生成し�
 残り:
 
 - カメラのパンとチルトの API は、M4 の見回しで足す。サーボを動かすコード（`set_cam_pan_angle` など）は残っている
-- Pi に残る `picarx_memory.db` の扱い（PC へ移すか削除するか）は利用者が決める。コードからは使わない
 
 **完了条件**: 「電池どう？」に実測値で答える。再起動後も前回の話題を答えられる。Gemini が使えない時もローカル LLM で応答する。応答時間を計測し、0.5秒以内の相づちと、本回答の開始までの目標を決める。
 
