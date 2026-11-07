@@ -1,4 +1,4 @@
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from src.token_optimizer import TokenOptimizer
 
@@ -40,3 +40,21 @@ def test_compress_history_long():
     compressed = optimizer.compress_history(messages)
     assert len(compressed) < len(messages)
     assert "【過去の対話要約】" in compressed[0].content
+
+
+def test_compress_history_keeps_tool_calls_with_their_results():
+    optimizer = TokenOptimizer()
+    call = AIMessage(content="", tool_calls=[{"name": "stop_moving", "args": {}, "id": "x"}])
+    messages = [HumanMessage(content="質問"), AIMessage(content="回答")] * 3 + [
+        HumanMessage(content="止まって"),
+        call,
+        ToolMessage(content="停止完了", tool_call_id="x"),
+        AIMessage(content="停止しました"),
+        HumanMessage(content="次"),
+        AIMessage(content="はい"),
+        HumanMessage(content="最新"),
+    ]
+    compressed = optimizer.compress_history(messages)
+    assert "【過去の対話要約】" in compressed[0].content
+    assert isinstance(compressed[1], HumanMessage)
+    assert not any(isinstance(message, ToolMessage) for message in compressed)

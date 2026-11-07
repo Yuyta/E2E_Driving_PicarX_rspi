@@ -127,6 +127,10 @@ class CameraStatus(BaseModel):
     error: Optional[str] = None
 
 
+class AudioStatus(BaseModel):
+    speaking: bool = False
+
+
 class RobotStatus(BaseModel):
     """`/api/status` の応答"""
 
@@ -139,6 +143,8 @@ class RobotStatus(BaseModel):
     cliff: CliffStatus
     reflex: ReflexStatus
     camera: CameraStatus
+    # 古い Pi のバイナリは返さない
+    audio: AudioStatus = AudioStatus()
     latest_event_id: int
 
 

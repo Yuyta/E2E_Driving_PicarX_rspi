@@ -1,15 +1,10 @@
 import operator
-from typing import Annotated, List, Optional, TypedDict
+from typing import Annotated, List, TypedDict
 
 from langchain_core.messages import BaseMessage
 
 
 class AgentState(TypedDict):
-    """LangGraphマルチエージェント全体で共有する状態"""
+    """会話 Agent の状態。車体の状態と記憶は毎ターン取得するので持たない"""
 
     messages: Annotated[List[BaseMessage], operator.add]
-    distance_cm: Optional[float]
-    grayscale: Optional[List[int]]
-    snapshot_base64: Optional[str]
-    current_agent: str
-    is_finished: bool

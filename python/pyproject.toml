@@ -13,6 +13,7 @@ dependencies = [
     "langgraph>=0.2.0",
     "pillow>=10.0.0",
     "pydantic>=2.7.0",
+    "pyopenjtalk-plus>=0.4.1.post10",
     "pyside6>=6.7.0",
     "python-dotenv>=1.0.0",
 ]
@@ -23,6 +24,12 @@ dev = [
     "pytest-asyncio>=0.23.0",
     "respx>=0.21.0",
     "ruff>=0.5.0",
+]
+# PC のマイクによる音声入力。音声はローカルの Whisper で文字にし、クラウドへ送らない
+voice = [
+    "faster-whisper>=1.1.0",
+    "numpy>=1.26.0",
+    "sounddevice>=0.5.0",
 ]
 e2e = [
     "torch>=2.2.0",

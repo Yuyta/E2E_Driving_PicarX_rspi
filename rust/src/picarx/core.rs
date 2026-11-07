@@ -328,15 +328,6 @@ impl Picarx {
         }
     }
 
-    pub fn forward(&mut self, speed: i32) {
-        self.set_motor_speed(0, speed);
-        self.set_motor_speed(1, speed);
-    }
-
-    pub fn backward(&mut self, speed: i32) {
-        self.forward(-speed);
-    }
-
     pub fn stop(&mut self) {
         self.set_motor_speed(0, 0);
         self.set_motor_speed(1, 0);
@@ -475,13 +466,6 @@ impl Picarx {
         Ok([a2 & ADC_MASK, a1 & ADC_MASK, a0 & ADC_MASK])
     }
 
-    pub fn get_distance(&mut self) -> f64 {
-        self.ultrasonic
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .read_distance()
-    }
-
     /// 超音波センサーへの参照。`Picarx` のロックを持たずに測定するために使う。
     pub fn ultrasonic_handle(&self) -> Arc<Mutex<Ultrasonic>> {
         Arc::clone(&self.ultrasonic)
@@ -546,7 +530,6 @@ impl Picarx {
     ///
     /// 再生はrodioの内部ミキサースレッドで行われるため、この関数は音の再生完了を待たずに
     /// 即座に返る（メインループ/入力処理をブロックしない）。
-    #[allow(dead_code)] // 公開ハードウェア機能。現行サンプルではトーン再生を使用。
     pub fn play_file<P: AsRef<Path>>(
         &mut self,
         file_path: P,
@@ -561,6 +544,16 @@ impl Picarx {
         self.audio_player.append(source);
 
         Ok(())
+    }
+
+    /// 再生中の音と、キューに残っている音をすべて止める
+    pub fn stop_audio(&mut self) {
+        self.audio_player.stop();
+    }
+
+    /// 再生中またはキューに残っている音があるか
+    pub fn is_playing_audio(&self) -> bool {
+        !self.audio_player.empty()
     }
 }
 

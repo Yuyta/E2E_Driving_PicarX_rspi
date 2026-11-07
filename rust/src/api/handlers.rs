@@ -1,8 +1,8 @@
 use crate::api::models::{
-    ApiResponse, BatteryStatus, BlockedStatus, CameraSnapshotResponse, CameraStatus, CliffStatus,
-    DistanceStatus, DriveDirection, EventsQuery, EventsResponse, FloorStatus, GrayscaleResponse,
-    ListenResponse, MotionStatus, MoveCommand, ReflexStatus, SensorsStatus, SpeakCommand,
-    StatusResponse, SteerCommand, UltrasonicResponse,
+    ApiResponse, AudioStatus, BatteryStatus, BlockedStatus, CameraSnapshotResponse, CameraStatus,
+    CliffStatus, DistanceStatus, DriveDirection, EventsQuery, EventsResponse, FloorStatus,
+    GrayscaleResponse, ListenResponse, MotionStatus, MoveCommand, ReflexStatus, SensorsStatus,
+    SpeakCommand, StatusResponse, SteerCommand, UltrasonicResponse,
 };
 use crate::rpi_camera::{CameraHub, FRAME_HEIGHT, FRAME_WIDTH, Frame};
 #[cfg(test)]
@@ -45,7 +45,11 @@ pub trait RobotHardware: Send + Sync {
     fn steer(&self, angle: i32) -> Result<(), String>;
     fn stop(&self) -> Result<(), String>;
     fn sensors(&self) -> SensorSnapshot;
+    /// 音声を生成して再生キューへ追加する。再生の完了は待たない
     fn speak(&self, text: &str) -> Result<(), String>;
+    /// 再生中と生成中の発話をすべて止める
+    fn stop_speech(&self) -> Result<(), String>;
+    fn is_speaking(&self) -> bool;
     fn listen(&self) -> Result<String, String>;
 }
 
@@ -265,6 +269,7 @@ fn unknown_sensor(message: &str) -> Response {
 
 fn build_status(state: &AppState, now: Instant) -> StatusResponse {
     let sensors = state.hardware.sensors();
+    let speaking = state.hardware.is_speaking();
     let safety = state.safety();
     let cliff = safety.cliff();
 
@@ -338,6 +343,7 @@ fn build_status(state: &AppState, now: Instant) -> StatusResponse {
             frame_age_ms: camera.frame_age.map(millis),
             error: state.camera.last_error(),
         },
+        audio: AudioStatus { speaking },
         latest_event_id: safety.latest_event_id(),
     }
 }
@@ -411,8 +417,18 @@ pub async fn speak_handler(
     State(state): State<Arc<AppState>>,
     Json(cmd): Json<SpeakCommand>,
 ) -> impl IntoResponse {
-    // 実機側ローカルで音声合成(TTS)＆再生
-    match state.hardware.speak(&cmd.text) {
+    // 音声合成は数百ミリ秒かかるので、非同期の処理を止めないよう別スレッドで行う
+    let result = tokio::task::spawn_blocking(move || state.hardware.speak(&cmd.text))
+        .await
+        .unwrap_or_else(|error| Err(format!("音声合成の処理が異常終了しました: {error}")));
+    match result {
+        Ok(_) => (StatusCode::OK, Json(ApiResponse::ok())),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::err(e))),
+    }
+}
+
+pub async fn stop_speech_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    match state.hardware.stop_speech() {
         Ok(_) => (StatusCode::OK, Json(ApiResponse::ok())),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::err(e))),
     }

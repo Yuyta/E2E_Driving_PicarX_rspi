@@ -5,7 +5,6 @@ import respx
 from src.config import settings
 from src.tools.drive_tool import drive_forward, stop_moving
 from src.tools.sensor_tool import read_distance
-from src.tools.voice_tool import speak_text
 
 
 @pytest.mark.asyncio
@@ -20,9 +19,6 @@ async def test_tools_execution():
     respx.get(f"{settings.robot_base_url}/api/sensor/ultrasonic").mock(
         return_value=httpx.Response(200, json={"distance_cm": 25.0})
     )
-    respx.post(f"{settings.robot_base_url}/api/audio/speak").mock(
-        return_value=httpx.Response(200, json={"status": "ok"})
-    )
 
     # 1. Drive tool
     res_drive = await drive_forward.ainvoke({"speed": 30, "duration_ms": 500})
@@ -35,7 +31,3 @@ async def test_tools_execution():
     # 3. Sensor tool
     res_sensor = await read_distance.ainvoke({})
     assert "25.0cm" in res_sensor
-
-    # 4. Voice tool
-    res_voice = await speak_text.ainvoke({"text": "テスト発話"})
-    assert "テスト発話" in res_voice

@@ -40,8 +40,16 @@ class TokenOptimizer:
 
         # 直近 N ターンを残し、それ以前を要約に置換
         keep_count = settings.max_history_turns // 2
-        older_messages = messages[:-keep_count]
-        recent_messages = messages[-keep_count:]
+        split = len(messages) - keep_count
+        # ツール呼び出しと結果を切り離さないよう、発言の位置で分ける
+        while split < len(messages) and not isinstance(messages[split], HumanMessage):
+            split += 1
+        if split == len(messages):
+            split = len(messages) - keep_count
+            while split > 0 and not isinstance(messages[split], HumanMessage):
+                split -= 1
+        older_messages = messages[:split]
+        recent_messages = messages[split:]
 
         summary_points = []
         for msg in older_messages:

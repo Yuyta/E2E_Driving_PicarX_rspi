@@ -1,15 +1,18 @@
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::api::handlers::RobotHardware;
 use crate::api::models::DriveDirection;
 use crate::picarx::Picarx;
 use crate::sensor_monitor::{SensorMonitor, SensorSnapshot};
-use crate::tts::{TtsEngine, detect_language, generate_tts_file};
+use crate::tts::{detect_language, generate_tts_file};
 
 /// 実機 PiCar-X ハードウェア制御実装
 pub struct PiCarHardware {
     px: Arc<Mutex<Picarx>>,
     sensor_monitor: SensorMonitor,
+    /// 発話を止めるたびに増やす。生成中だった音声を再生しないために使う
+    speech_epoch: AtomicU64,
 }
 
 impl PiCarHardware {
@@ -18,7 +21,11 @@ impl PiCarHardware {
         let px = Arc::new(Mutex::new(px));
         let sensor_monitor = SensorMonitor::spawn(Arc::clone(&px));
 
-        Ok(Self { px, sensor_monitor })
+        Ok(Self {
+            px,
+            sensor_monitor,
+            speech_epoch: AtomicU64::new(0),
+        })
     }
 
     fn car(&self) -> std::sync::MutexGuard<'_, Picarx> {
@@ -56,19 +63,36 @@ impl RobotHardware for PiCarHardware {
     }
 
     fn speak(&self, text: &str) -> Result<(), String> {
+        let epoch = self.speech_epoch.load(Ordering::SeqCst);
         let lang = detect_language(text);
-        let wav_path = generate_tts_file(text, lang, TtsEngine::Default)
-            .map_err(|e| format!("TTS生成エラー: {}", e))?;
+        let wav_path =
+            generate_tts_file(text, lang).map_err(|e| format!("TTS生成エラー: {}", e))?;
 
-        // 旧Rust GUIと同じPiCar-X固有の音声出力経路を使用する。
-        self.car()
-            .play_file(&wav_path, 1.0)
-            .map_err(|error| format!("音声ファイル再生エラー: {error}"))?;
+        // 生成中に発話の停止が来ていたら再生しない。停止と同じロックの中で確かめる
+        let result = {
+            let mut car = self.car();
+            if self.speech_epoch.load(Ordering::SeqCst) == epoch {
+                car.play_file(&wav_path, 1.0)
+                    .map_err(|error| format!("音声ファイル再生エラー: {error}"))
+            } else {
+                Ok(())
+            }
+        };
+        // 再生はファイルを開いた後なので、ここで消しても続く
         if let Err(error) = std::fs::remove_file(&wav_path) {
             eprintln!("音声一時ファイル削除エラー: {error}");
         }
+        result
+    }
 
+    fn stop_speech(&self) -> Result<(), String> {
+        self.speech_epoch.fetch_add(1, Ordering::SeqCst);
+        self.car().stop_audio();
         Ok(())
+    }
+
+    fn is_speaking(&self) -> bool {
+        self.car().is_playing_audio()
     }
 
     fn listen(&self) -> Result<String, String> {
