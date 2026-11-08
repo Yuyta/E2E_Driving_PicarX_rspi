@@ -19,12 +19,17 @@ try:
     from ..evaluation.metrics import predict_all, steering_metrics
     from . import provenance
     from .dataset import DrivingDataset
-    from .train import TrainingError, fit, load_params
+    from .train import TrainingError, fit, load_params, tolerate_console_encoding
 except ImportError:
     from src.e2e.evaluation.metrics import predict_all, steering_metrics
     from src.e2e.training import provenance
     from src.e2e.training.dataset import DrivingDataset
-    from src.e2e.training.train import TrainingError, fit, load_params
+    from src.e2e.training.train import (
+        TrainingError,
+        fit,
+        load_params,
+        tolerate_console_encoding,
+    )
 
 
 def cross_validate(data_dir, params: Optional[Dict[str, Any]] = None, log=print) -> Dict[str, Any]:
@@ -67,6 +72,7 @@ def cross_validate(data_dir, params: Optional[Dict[str, Any]] = None, log=print)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
+    tolerate_console_encoding()
     parser = argparse.ArgumentParser(description="Leave-one-session-out cross-validation")
     parser.add_argument("--data_dir", type=str, nargs="+", required=True)
     parser.add_argument("--config", type=str, default=None, help="TOML file with parameters")

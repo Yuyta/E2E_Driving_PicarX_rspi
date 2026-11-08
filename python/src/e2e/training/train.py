@@ -212,6 +212,8 @@ def export_onnx(model: SmallDrivingCNN, onnx_path: Path) -> None:
         input_names=["input"],
         output_names=["steering"],
         dynamic_axes={"input": {0: "batch_size"}, "steering": {0: "batch_size"}},
+        # 新しい exporter は dynamic_axes を非推奨とし、cp932 の端末で落ちる絵文字を出力する
+        dynamo=False,
     )
     strip_export_debug_info(onnx_path)
 
@@ -287,7 +289,15 @@ def train(data_dir, output_model_dir, params: Optional[Dict[str, Any]] = None) -
     return metadata
 
 
+def tolerate_console_encoding() -> None:
+    """Windows の cp932 の端末で表示できない文字があっても、学習を止めない"""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(errors="replace")
+
+
 def main(argv: Optional[List[str]] = None) -> int:
+    tolerate_console_encoding()
     parser = argparse.ArgumentParser(description="Train PiCar-X E2E Steering Model")
     parser.add_argument(
         "--data_dir",
