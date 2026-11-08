@@ -212,9 +212,9 @@ def export_onnx(model: SmallDrivingCNN, onnx_path: Path) -> None:
         input_names=["input"],
         output_names=["steering"],
         dynamic_axes={"input": {0: "batch_size"}, "steering": {0: "batch_size"}},
-        # 新しい exporter は dynamic_axes を非推奨とし、cp932 の端末で落ちる絵文字を出力する
-        dynamo=False,
     )
+    # 新しい exporter（既定）は進捗に絵文字を出す。cp932 の端末では main() で置き換えて表示する。
+    # 旧 exporter（dynamo=False）は AdaptiveAvgPool2d の 7x10 -> 2x2 を出力できないので使わない
     strip_export_debug_info(onnx_path)
 
 
