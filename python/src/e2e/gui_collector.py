@@ -105,7 +105,7 @@ class E2ECollectorWindow(QMainWindow):
 
         # 指令と実際の動きの食い違いの検出（ROADMAP の M3）
         self.command_state = CommandState(time.time())
-        self.motion_monitor = MotionMonitor(on_sustained=self._on_motion_mismatch)
+        self.motion_monitor = MotionMonitor.from_config(on_sustained=self._on_motion_mismatch)
 
         # 保存先設定
         self.output_base = Path("data/raw")

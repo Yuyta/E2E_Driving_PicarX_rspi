@@ -298,6 +298,8 @@ PiCar-X には車輪の回転数を測るセンサーがないので、カメラ
   - 同じ食い違いが1秒続くと「続いている」とする
   - しきい値はすべて提案値で、床に印を付けたコースとわざと空転させる試験で校正する
 - **監視 (`motion/monitor.py`)**: 送った指令を期限（TTL）を含めて追い（`CommandState`）、続いた食い違いを一度だけ知らせる。収集 GUI と自律走行で共通に使う。記憶には種類 `motion_mismatch` の出来事として残す。
+- **設定 (`configs/motion.toml`)**: しきい値、水平画角、速度と軸距。収集 GUI と自律走行が起動時に読む。実機の計測（`src.e2e.m3_check`）で校正する。
+- **実機の計測 (`m3_check.py`)**: 場面（静止、人が横切る、押される、直進、旋回、車輪を浮かせる）ごとに推定値と判定を記録し、`calibrate` で設定の値を提案する。手順は ROADMAP の M3。
 - **記録の解析 (`motion/analyze.py`)**: 記録したセッションを後から解析し、`data/derived/motion/<session_id>.jsonl` に書く（セッションは追記のみなので書き換えない）。旧形式の記録は指令の期限が分からないので、`no_motion` が多く出る。
 
 ---
@@ -362,7 +364,7 @@ PiCarX/
 ├── E2E_SPECIFICATION.md           # 本仕様書
 ├── python/
 │   ├── pyproject.toml             # uv / Python 依存関係定義 (e2e, dev)
-│   ├── configs/train.toml         # 学習の設定
+│   ├── configs/                   # train.toml（学習）、motion.toml（動きの判定）
 │   ├── data/                      # 走行データ（git 管理外）
 │   │   ├── raw/<session_id>/      # images/, labels.jsonl, manifest.json
 │   │   ├── processed/clean_vX/    # labels.jsonl（raw を参照）, bad_cases.jsonl, cleaning_report.json
@@ -407,6 +409,7 @@ PiCarX/
 | **モデルオフライン評価** | `uv run python -m src.e2e.evaluation.evaluate --data_dir data/raw --model_path models/v004/best_model.pth` |
 | **MLOps レジストリ確認** | `uv run python -m src.e2e.registry.compare` |
 | **実機自律走行** | `uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --speed 35` |
+| **動きの実機計測** | `uv run python -m src.e2e.m3_check run --scenario still`（走る場面は `--i-understand-the-car-will-move`） |
 | **記録の動きの解析** | `uv run python -m src.e2e.motion.analyze --data_dir data/raw/<session_id>` |
 | **介入イベント一覧確認** | `uv run python -m src.e2e.dataset.disengagement_manager --list` |
 | **Rustクロスコンパイル** | `cd rust/build; make build MODEL=5` (ローカルPC Docker上。基準機種は Pi 5) |

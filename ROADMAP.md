@@ -155,7 +155,7 @@ Pi へ新しいバイナリを配置してから、PC の `python/` で実行す
 | 1 | 状態と反射ループ | `uv run python -m src.e2e.m1_check status` | 20Hz 以上。電池とセンサーが実測値 |
 | 2 | カメラ | `uv run python -m src.e2e.m1_check camera` | 10fps 以上 |
 | 3 | 切断時の停止 | 広い床で `uv run python -m src.e2e.m1_check ttl --i-understand-the-car-will-move` | 理由 `ttl_expired`、TTL + 100ms 以内 |
-| 4 | Wi-Fi 切断 | 走行中に PC の Wi-Fi を切る | TTL（400ms）以内に停止 |
+| 4 | Wi-Fi 切断 | 広い床で `uv run python -m src.e2e.m1_check wifi --i-understand-the-car-will-move`。走り出したら PC の Wi-Fi を切り、止まったら戻す | 理由 `ttl_expired`。期限から 100ms 以内（最後の指令から TTL 400ms + 100ms 以内） |
 | 5 | 障害物の停止 | 低速で壁へ向けて走行し、`uv run python -m src.e2e.m1_check events` | `obstacle` で停止、100ms 以下 |
 | 6 | 段差の停止 | **落下防止措置つき** で段差へ低速で近づけ、同じく `events` を確認 | `cliff` で停止し、車輪が段差の手前に残る |
 | 7 | 床の種類 | よく使う部屋の明るい床を低速で走らせる（`--disable_stuck`） | 段差でない場所で止まらない。想定外の床で止まった時は安全に待機し、再校正で再開できる |
@@ -426,11 +426,24 @@ PiCar-X には車輪の回転数を測るセンサーがないので、今は「
 - 学習: 食い違いの印が付いたフレームを外す。外した数は `metadata.json` に残る
 - 記録の解析: `src.e2e.motion.analyze`。今の150フレーム（約1fps）では、フレームの間隔が長すぎて追跡できないことが多い（3割以上）。10fps での再収集が必要なことを裏付けた
 
-実機での残り:
-1. 静止、前進、左右の旋回で、画像の動きの大きさと向きの変化を測り、しきい値（動いたとみなす大きさ、曲がりの速さ）を決める
-2. 床に印を付けたコースで、推定した向きの変化を実測と比べ、水平画角を校正する。速度と軸距を測り、曲がる量の比較を有効にする
-3. 車輪を浮かせる、じゅうたんで引っかける試験で、`no_motion` が1秒程度で出て止まることを確かめる
-4. 停止中に車体を手で押す試験と、前を人が横切る試験で、`uncommanded_motion` が前者だけで出ることを確かめる
+##### 実機での確認手順
+
+PC の `python/` で実行する。記録は `data/m3_checks/` に保存される（画像は含まない）。校正した値は `configs/motion.toml` に書く。Pi のバイナリは M2 から変更なし。
+
+準備: 電池を充電する。模様のある床（ラグ、家具の脚が見える場所）で、前方に 1.5m 以上の空き。手順6のために正面に壁。床にテープでスタート位置と車の向きの線を引く。
+
+| 順 | 確認 | 手順 | 合格基準 |
+|---|---|---|---|
+| 1 | 静止 | `uv run python -m src.e2e.m3_check run --scenario still`。車にも周りにも触れない | 印なし |
+| 2 | 人が横切る | `run --scenario walk`。計測中に人がカメラの前を横切る | 印なし |
+| 3 | 押される | `run --scenario push`。計測中に車体を手でゆっくり2秒ほど押し続ける | `uncommanded_motion` が続く |
+| 4 | 直進 | `run --scenario forward --seconds 3 --i-understand-the-car-will-move` | 印なし。舵0での曲がり癖を記録 |
+| 5 | 旋回 | `run --scenario left --seconds 2 ...`、`right` も。走行後に、テープの線に対して実際に曲がった角度を分度器で測る | 印なし。左は向きの変化が負、右は正 |
+| 6 | 壁へ直進 | 壁の約1.2m 手前から `run --scenario forward --seconds 3 --note wall ...`。Pi が 15cm で止める | 超音波の接近速度が記録される（速度の校正に使う） |
+| 7 | 車輪を浮かせる | 車体を持ち上げて静止させ、`run --scenario lifted ...`。指を車輪から離す | `no_motion` が2.5秒以内に続き、車が止まる |
+| 8 | 校正 | `uv run python -m src.e2e.m3_check calibrate --still <1,2の記録> --moving <4,5の記録> --push <3の記録> --turn <5の記録> --measured_deg <実測> --straight <4の記録> --wall <6の記録>` | 提案された値を `configs/motion.toml` に書く |
+| 9 | 再確認 | 校正後に 2、4、7 をもう一度 | すべて合格 |
+| 10 | 引っかかり（任意） | じゅうたんの端などで車輪が空転する場所へ `forward` | `no_motion` で止まる |
 
 #### データとモデルの管理（2026-11-08 追加）
 

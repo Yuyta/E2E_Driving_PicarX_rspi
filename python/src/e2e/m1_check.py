@@ -5,8 +5,9 @@
     uv run python -m src.e2e.m1_check events
     uv run python -m src.e2e.m1_check ttl --i-understand-the-car-will-move
     uv run python -m src.e2e.m1_check approach --speed 50 --i-understand-the-car-will-move
+    uv run python -m src.e2e.m1_check wifi --i-understand-the-car-will-move
 
-`ttl` と `approach` 以外は車両を動かさない。
+`ttl`、`approach`、`wifi` 以外は車両を動かさない。
 """
 
 import argparse
@@ -14,6 +15,8 @@ import json
 import statistics
 import time
 from typing import List, Optional
+
+import httpx
 
 from src.models import DriveDirection, SafetyEvent
 from src.picarx_client.client import PicarxClient
@@ -163,6 +166,71 @@ def check_approach(client: PicarxClient, speed: int, seconds: float) -> bool:
     return refused
 
 
+WIFI_TEST_SPEED = 20
+WIFI_RECONNECT_TIMEOUT_SEC = 180.0
+
+
+def check_wifi(client: PicarxClient, seconds: float) -> bool:
+    """走行中に PC の Wi-Fi を切り、Pi が TTL で止めたことを再接続後に確かめる。
+
+    Pi は TTL の期限から実際に止めるまでの時間を `stop_latency_ms` に記録する。
+    最後に届いた指令から止まるまでの時間は TTL + `stop_latency_ms`。
+    """
+    before = client.get_status_sync().latest_event_id
+    print(f"速度 {WIFI_TEST_SPEED}、TTL {APPROACH_TTL_MS}ms で最大 {seconds:.0f} 秒前進を続けます")
+    print("走り出したら PC の Wi-Fi を切ってください。車が止まったら Wi-Fi を戻してください")
+    disconnected = False
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        try:
+            if not client.move_sync(
+                DriveDirection.FORWARD, speed=WIFI_TEST_SPEED, ttl_ms=APPROACH_TTL_MS
+            ):
+                print(f"Pi が前進を拒否しました: {client.get_status_sync().blocked.forward}")
+                client.stop_sync()
+                return False
+        except httpx.HTTPError:
+            disconnected = True
+            break
+        time.sleep(APPROACH_PERIOD_SEC)
+
+    if not disconnected:
+        client.stop_sync()
+        print("判定: 未実施（時間内に通信が切れませんでした）")
+        return False
+
+    print("通信が切れました。Wi-Fi を戻すのを待っています...")
+    reconnect_deadline = time.monotonic() + WIFI_RECONNECT_TIMEOUT_SEC
+    events = None
+    while time.monotonic() < reconnect_deadline:
+        try:
+            client.stop_sync()
+            events = client.get_events_sync(after=before).events
+            break
+        except httpx.HTTPError:
+            time.sleep(1.0)
+    if events is None:
+        print(f"判定: 不明（{WIFI_RECONNECT_TIMEOUT_SEC:.0f}秒以内に再接続できません）")
+        return False
+
+    stops = [
+        e
+        for e in events
+        if e.kind == "reflex_stop" and e.reason == "ttl_expired" and e.direction == "forward"
+    ]
+    if not stops:
+        print("判定: 不合格（Pi の ttl_expired の停止記録がありません）")
+        return False
+    latency = stops[0].stop_latency_ms or 0.0
+    passed = latency <= TTL_MARGIN_MS
+    print(
+        f"Pi が ttl_expired で停止: 期限から {latency:.1f} ms、"
+        f"最後の指令から約 {APPROACH_TTL_MS + latency:.0f} ms"
+    )
+    print(f"判定: {'合格' if passed else '不合格'}（期限から {TTL_MARGIN_MS:.0f} ms 以内）")
+    return passed
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="M1 の完了条件を実機で計測する")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -186,6 +254,14 @@ def main() -> int:
         required=True,
         help="車両が連続で前進することを了承する",
     )
+    wifi = sub.add_parser("wifi", help="走行中の Wi-Fi 切断で止まることを確認する（車両が動く）")
+    wifi.add_argument("--seconds", type=float, default=30.0)
+    wifi.add_argument(
+        "--i-understand-the-car-will-move",
+        action="store_true",
+        required=True,
+        help="車両が連続で前進することを了承する",
+    )
     args = parser.parse_args()
 
     client = PicarxClient(timeout=3.0)
@@ -197,6 +273,8 @@ def main() -> int:
         passed = check_events(client)
     elif args.command == "approach":
         passed = check_approach(client, args.speed, args.seconds)
+    elif args.command == "wifi":
+        passed = check_wifi(client, args.seconds)
     else:
         passed = check_ttl(client)
     return 0 if passed else 1

@@ -5,8 +5,10 @@
 同じ食い違いでは知らせない。
 """
 
-from dataclasses import dataclass
-from typing import Callable, Optional, Tuple
+import tomllib
+from dataclasses import dataclass, fields
+from pathlib import Path
+from typing import Callable, Optional, Tuple, Union
 
 import numpy as np
 
@@ -95,7 +97,41 @@ class MonitorUpdate:
         }
 
 
+DEFAULT_CONFIG = Path(__file__).resolve().parents[3] / "configs" / "motion.toml"
+TRACKER_KEYS = ("interval_s", "hfov_deg", "moving_px_s", "max_distance_cm", "max_approach_cm_s")
+
+
+def load_motion_config(
+    path: Union[str, Path, None] = None,
+) -> Tuple[MotionTracker, CheckerConfig]:
+    """`configs/motion.toml` から推定と判定の設定を読む。ファイルがなければ既定値"""
+    path = Path(path) if path else DEFAULT_CONFIG
+    if not path.exists():
+        return MotionTracker(), CheckerConfig()
+    with open(path, "rb") as f:
+        data = tomllib.load(f)
+
+    tracker_values = data.get("tracker", {})
+    unknown = set(tracker_values) - set(TRACKER_KEYS)
+    checker_values = data.get("checker", {})
+    unknown |= set(checker_values) - {f.name for f in fields(CheckerConfig)}
+    if unknown:
+        raise ValueError(f"Unknown keys in {path}: {sorted(unknown)}")
+    if "turn_ratio_range" in checker_values:
+        checker_values["turn_ratio_range"] = tuple(checker_values["turn_ratio_range"])
+    return MotionTracker(**tracker_values), CheckerConfig(**checker_values)
+
+
 class MotionMonitor:
+    @classmethod
+    def from_config(
+        cls,
+        path: Union[str, Path, None] = None,
+        on_sustained: Optional[Callable[[str, "MonitorUpdate"], None]] = None,
+    ) -> "MotionMonitor":
+        tracker, config = load_motion_config(path)
+        return cls(tracker=tracker, config=config, on_sustained=on_sustained)
+
     def __init__(
         self,
         tracker: Optional[MotionTracker] = None,

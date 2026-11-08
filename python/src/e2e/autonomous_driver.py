@@ -102,7 +102,7 @@ class RemoteAutonomousDriver:
         # 有効な時は、空転を見て脱出操作をする旧スタック検知は使わない
         self.enable_motion_check = enable_motion_check
         self.command_state = CommandState(time.time())
-        self.motion_monitor = MotionMonitor()
+        self.motion_monitor = MotionMonitor.from_config()
         self.last_motion_update = None
         self.enable_mapping = enable_mapping
 

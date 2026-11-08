@@ -1,0 +1,25 @@
+# 指令と実際の動きの食い違いの検出の設定（ROADMAP の M3）
+# 実機の計測（src.e2e.m3_check）で校正した値をここに書く。未校正の値は提案値。
+# 収集 GUI と自律走行が起動時に読む。
+
+[tracker]
+interval_s = 0.3          # 比べるフレームの時間差
+hfov_deg = 53.5           # カメラの水平画角。未校正（OV5647 の値）
+moving_px_s = 4.0         # 画像が動いたとみなす動きの大きさ（ピクセル/秒）。未校正
+max_distance_cm = 150.0
+max_approach_cm_s = 100.0
+
+[checker]
+min_check_speed = 20
+settle_s = 0.5
+min_turn_steer_deg = 15.0
+straight_steer_deg = 3.0
+min_turn_rate_dps = 8.0
+straight_max_rate_dps = 15.0  # 未校正。舵0でも左へ寄る癖（M1）を測ってから決める
+still_cm_s = 2.0
+uncommanded_min_inliers = 0.6
+uncommanded_px_s = 8.0        # 未校正
+sustain_s = 1.0
+# 校正したら書く（どちらかが未設定なら、曲がる量ではなく向きの符号だけを確かめる）
+# speed_cm_s_per_unit = 0.0
+# wheelbase_cm = 0.0
