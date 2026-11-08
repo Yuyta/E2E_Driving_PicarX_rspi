@@ -1,104 +1,207 @@
 """
 Training and ONNX Export Script for PiCar-X
+
+学習は CPU で決定的に行い、同じデータと設定なら同じ指標になるようにする（ROADMAP の M3）。
+分割はセッション単位で、検証用のセッションを学習に混ぜない。
+
+使い方:
+    uv run python -m src.e2e.training.train --data_dir data/raw --output_dir models/v006
+    uv run python -m src.e2e.training.train --config configs/train.toml --data_dir data/raw ...
 """
 
 import argparse
 import json
+import os
+import random
+import sys
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset
 
 try:
+    import tomllib
+except ModuleNotFoundError:  # Python 3.10 以前
+    tomllib = None
+
+try:
+    from ..evaluation.metrics import inference_time_ms, predict_all, steering_metrics
+    from . import provenance
     from .dataset import DrivingDataset
     from .model import SmallDrivingCNN
     from .onnx_utils import strip_export_debug_info
 except ImportError:
+    from src.e2e.evaluation.metrics import inference_time_ms, predict_all, steering_metrics
+    from src.e2e.training import provenance
     from src.e2e.training.dataset import DrivingDataset
     from src.e2e.training.model import SmallDrivingCNN
     from src.e2e.training.onnx_utils import strip_export_debug_info
 
+INPUT_HEIGHT = 120
+INPUT_WIDTH = 160
+NORMALIZE_MEAN = [0.485, 0.456, 0.406]
+NORMALIZE_STD = [0.229, 0.224, 0.225]
 
-def train(data_dir, output_model_dir, epochs=15, batch_size=32, lr=1e-3):
-    output_dir = Path(output_model_dir)
-    output_dir.mkdir(parents=True, exist_ok=True)
+DEFAULT_PARAMS: Dict[str, Any] = {
+    "epochs": 15,
+    "batch_size": 32,
+    "lr": 1e-3,
+    "seed": 42,
+    # 検証に使うセッション。空なら名前順で最後のセッション
+    "val_sessions": [],
+}
 
-    print(f"Loading dataset from: {data_dir}")
-    full_dataset = DrivingDataset(data_dir)
-    total_len = len(full_dataset)
-    session_names = [s.name for s in full_dataset.session_dirs]
-    print(f"Loaded {len(session_names)} session(s): {', '.join(session_names)}")
-    print(f"Total samples: {total_len}")
 
-    if total_len == 0:
-        print("Error: Dataset is empty.")
-        return
+class TrainingError(RuntimeError):
+    """学習を始められない、または結果が信用できない時"""
 
-    # Train / Val 分割 (80% / 20%)
-    val_len = int(total_len * 0.2)
-    train_len = total_len - val_len
-    train_set, val_set = random_split(full_dataset, [train_len, val_len])
 
-    train_loader = DataLoader(train_set, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_set, batch_size=batch_size, shuffle=False)
+def load_params(
+    config_path: Optional[str] = None, overrides: Optional[Dict[str, Any]] = None
+) -> Dict[str, Any]:
+    """既定値、設定ファイル、コマンドラインの順に上書きする"""
+    params = dict(DEFAULT_PARAMS)
+    if config_path:
+        if tomllib is None:
+            raise TrainingError("Reading a TOML config needs Python 3.11 or later")
+        with open(config_path, "rb") as f:
+            loaded = tomllib.load(f)
+        unknown = set(loaded) - set(DEFAULT_PARAMS)
+        if unknown:
+            raise TrainingError(f"Unknown keys in {config_path}: {sorted(unknown)}")
+        params.update(loaded)
+    for key, value in (overrides or {}).items():
+        if value is not None:
+            params[key] = value
+    params["val_sessions"] = list(params["val_sessions"])
+    return params
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
 
-    model = SmallDrivingCNN().to(device)
+def set_seed(seed: int) -> torch.Generator:
+    """乱数を固定する"""
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    generator = torch.Generator()
+    generator.manual_seed(seed)
+    return generator
+
+
+@contextmanager
+def deterministic():
+    """学習の間だけ決定的なアルゴリズムに限る。終わったら元の設定に戻す"""
+    previous = torch.are_deterministic_algorithms_enabled()
+    torch.use_deterministic_algorithms(True)
+    try:
+        yield
+    finally:
+        torch.use_deterministic_algorithms(previous)
+
+
+def split_by_session(
+    dataset: DrivingDataset, val_sessions: Sequence[str]
+) -> Tuple[List[int], List[int], List[str]]:
+    """セッション単位で学習と検証に分ける。どちらかが空なら学習しない"""
+    all_sessions = sorted({s["session_id"] for s in dataset.samples})
+    if not val_sessions:
+        if len(all_sessions) < 2:
+            raise TrainingError(
+                "Session-based validation needs at least 2 sessions, "
+                f"found {len(all_sessions)}: {all_sessions}"
+            )
+        val_sessions = [all_sessions[-1]]
+    unknown = sorted(set(val_sessions) - set(all_sessions))
+    if unknown:
+        raise TrainingError(f"Validation sessions not in the dataset: {unknown}")
+
+    val_set = set(val_sessions)
+    train_idx = [i for i, s in enumerate(dataset.samples) if s["session_id"] not in val_set]
+    val_idx = [i for i, s in enumerate(dataset.samples) if s["session_id"] in val_set]
+    if not train_idx or not val_idx:
+        raise TrainingError("Training and validation sets must both be non-empty")
+    return train_idx, val_idx, sorted(val_set)
+
+
+def fit(
+    dataset: DrivingDataset,
+    train_idx: Sequence[int],
+    val_idx: Optional[Sequence[int]],
+    params: Dict[str, Any],
+    log=print,
+) -> Tuple[SmallDrivingCNN, List[Dict[str, float]], Optional[float]]:
+    """学習する。検証データがあれば検証損失が最良の重みを、なければ最後の重みを返す"""
+    with deterministic():
+        return _fit(dataset, train_idx, val_idx, params, log)
+
+
+def _fit(dataset, train_idx, val_idx, params, log):
+    generator = set_seed(int(params["seed"]))
+    model = SmallDrivingCNN()
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=lr)
+    optimizer = optim.Adam(model.parameters(), lr=float(params["lr"]))
 
-    best_val_loss = float("inf")
-    history = []
+    train_loader = DataLoader(
+        Subset(dataset, list(train_idx)),
+        batch_size=int(params["batch_size"]),
+        shuffle=True,
+        generator=generator,
+        num_workers=0,
+    )
+    val_loader = (
+        DataLoader(Subset(dataset, list(val_idx)), batch_size=int(params["batch_size"]))
+        if val_idx
+        else None
+    )
+
+    epochs = int(params["epochs"])
+    best_val_loss: Optional[float] = None
+    best_state = None
+    history: List[Dict[str, float]] = []
 
     for epoch in range(1, epochs + 1):
         model.train()
         train_loss = 0.0
         for images, steerings, _ in train_loader:
-            images = images.to(device)
-            steerings = steerings.unsqueeze(1).to(device)
-
+            steerings = steerings.unsqueeze(1)
             optimizer.zero_grad()
-            outputs = model(images)
-            loss = criterion(outputs, steerings)
+            loss = criterion(model(images), steerings)
             loss.backward()
             optimizer.step()
-
             train_loss += loss.item() * images.size(0)
+        train_loss /= len(train_idx)
 
-        train_loss /= train_len
+        entry = {"epoch": epoch, "train_loss": train_loss}
+        if val_loader is not None:
+            model.eval()
+            val_loss = 0.0
+            with torch.no_grad():
+                for images, steerings, _ in val_loader:
+                    loss = criterion(model(images), steerings.unsqueeze(1))
+                    val_loss += loss.item() * images.size(0)
+            val_loss /= len(val_idx)
+            entry["val_loss"] = val_loss
+            if best_val_loss is None or val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_state = {k: v.clone() for k, v in model.state_dict().items()}
+            log(f"Epoch [{epoch:02d}/{epochs:02d}] Train: {train_loss:.4f} | Val: {val_loss:.4f}")
+        else:
+            log(f"Epoch [{epoch:02d}/{epochs:02d}] Train: {train_loss:.4f}")
+        history.append(entry)
 
-        # Validation
-        model.eval()
-        val_loss = 0.0
-        with torch.no_grad():
-            for images, steerings, _ in val_loader:
-                images = images.to(device)
-                steerings = steerings.unsqueeze(1).to(device)
-                outputs = model(images)
-                loss = criterion(outputs, steerings)
-                val_loss += loss.item() * images.size(0)
-
-        val_loss /= max(val_len, 1)
-
-        log_msg = f"Epoch [{epoch:02d}/{epochs:02d}] Train: {train_loss:.4f} | Val: {val_loss:.4f}"
-        print(log_msg)
-        history.append({"epoch": epoch, "train_loss": train_loss, "val_loss": val_loss})
-
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            torch.save(model.state_dict(), output_dir / "best_model.pth")
-
-    # ONNXエクスポート
-    print("\nExporting model to ONNX...")
-    model.load_state_dict(torch.load(output_dir / "best_model.pth"))
+    if best_state is not None:
+        model.load_state_dict(best_state)
     model.eval()
+    return model, history, best_val_loss
 
-    dummy_input = torch.randn(1, 3, 120, 160, device=device)
-    onnx_path = output_dir / "model.onnx"
+
+def export_onnx(model: SmallDrivingCNN, onnx_path: Path) -> None:
+    dummy_input = torch.zeros(1, 3, INPUT_HEIGHT, INPUT_WIDTH)
     torch.onnx.export(
         model,
         dummy_input,
@@ -111,26 +214,80 @@ def train(data_dir, output_model_dir, epochs=15, batch_size=32, lr=1e-3):
         dynamic_axes={"input": {0: "batch_size"}, "steering": {0: "batch_size"}},
     )
     strip_export_debug_info(onnx_path)
-    print(f"✓ ONNX model saved at: {onnx_path}")
 
-    # メタデータ保存
+
+def train(data_dir, output_model_dir, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    params = load_params(overrides=params) if params is not None else load_params()
+    output_dir = Path(output_model_dir)
+
+    print(f"Loading dataset from: {data_dir}")
+    dataset = DrivingDataset(data_dir)
+    if len(dataset) == 0:
+        raise TrainingError("Dataset is empty")
+
+    train_idx, val_idx, val_sessions = split_by_session(dataset, params["val_sessions"])
+    train_sessions = sorted({dataset.samples[i]["session_id"] for i in train_idx})
+    print(f"Train sessions: {', '.join(train_sessions)} ({len(train_idx)} samples)")
+    print(f"Validation sessions: {', '.join(val_sessions)} ({len(val_idx)} samples)")
+
+    model, history, best_val_loss = fit(dataset, train_idx, val_idx, params)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(model.state_dict(), output_dir / "best_model.pth")
+    print("\nExporting model to ONNX...")
+    export_onnx(model, output_dir / "model.onnx")
+
+    preds = predict_all(model, dataset, val_idx)
+    validation = steering_metrics(
+        preds,
+        [dataset.samples[i]["steering"] for i in val_idx],
+        [dataset.samples[i]["session_id"] for i in val_idx],
+    )
+
     metadata = {
         "model_version": output_dir.name,
-        "epochs": epochs,
-        "batch_size": batch_size,
+        "epochs": params["epochs"],
+        "batch_size": params["batch_size"],
         "best_val_loss": best_val_loss,
-        "input_shape": [1, 3, 120, 160],
+        "input_shape": [1, 3, INPUT_HEIGHT, INPUT_WIDTH],
         "output": "steering (-1.0 to 1.0)",
-        "sessions": session_names,
-        "total_samples": total_len,
+        "sessions": train_sessions + val_sessions,
+        "total_samples": len(dataset),
+        "params": params,
+        "split": {
+            "method": "session",
+            "train_sessions": train_sessions,
+            "val_sessions": val_sessions,
+            "train_samples": len(train_idx),
+            "val_samples": len(val_idx),
+        },
+        "preprocessing": {
+            "resize_hw": [INPUT_HEIGHT, INPUT_WIDTH],
+            "normalize_mean": NORMALIZE_MEAN,
+            "normalize_std": NORMALIZE_STD,
+            "color": "RGB",
+        },
+        # 検証セッションはモデルの選択にも使うので、偏りのない比較には交差検証を使う
+        "validation_metrics": validation,
+        "inference_ms_pc": inference_time_ms(model),
+        "data": {
+            "fingerprint": provenance.data_fingerprint(dataset.samples),
+            "sessions": provenance.session_records(dataset.source_session_dirs),
+        },
+        "code": provenance.git_state(),
+        "environment": provenance.environment(),
+        "history": history,
     }
     with open(output_dir / "metadata.json", "w", encoding="utf-8") as f:
-        json.dump(metadata, f, indent=2)
+        json.dump(metadata, f, indent=2, ensure_ascii=False)
+        f.write("\n")
 
+    print(f"Validation MAE: {validation['steering_mae']} (±{validation['steering_mae_deg']}°)")
     print(f"✓ Training finished. Metadata saved at: {output_dir / 'metadata.json'}")
+    return metadata
 
 
-if __name__ == "__main__":
+def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Train PiCar-X E2E Steering Model")
     parser.add_argument(
         "--data_dir",
@@ -142,10 +299,34 @@ if __name__ == "__main__":
     parser.add_argument(
         "--output_dir", type=str, required=True, help="Output directory for trained model"
     )
-    parser.add_argument("--epochs", type=int, default=15, help="Number of training epochs")
-    parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
-    parser.add_argument("--lr", type=float, default=1e-3, help="Learning rate")
+    parser.add_argument("--config", type=str, default=None, help="TOML file with parameters")
+    parser.add_argument("--epochs", type=int, default=None)
+    parser.add_argument("--batch_size", type=int, default=None)
+    parser.add_argument("--lr", type=float, default=None)
+    parser.add_argument("--seed", type=int, default=None)
+    parser.add_argument(
+        "--val_sessions", type=str, nargs="+", default=None, help="Session IDs for validation"
+    )
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    params = load_params(
+        args.config,
+        {
+            "epochs": args.epochs,
+            "batch_size": args.batch_size,
+            "lr": args.lr,
+            "seed": args.seed,
+            "val_sessions": args.val_sessions,
+        },
+    )
     data_input = args.data_dir[0] if len(args.data_dir) == 1 else args.data_dir
-    train(data_input, args.output_dir, args.epochs, args.batch_size, args.lr)
+    try:
+        train(data_input, args.output_dir, params)
+    except TrainingError as e:
+        print(f"Error: {e}")
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

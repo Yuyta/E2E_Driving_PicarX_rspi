@@ -95,18 +95,33 @@ class DrivingDataset(Dataset):
 
                     frame_name = record.get("frame", "")
 
-                    # 画像ファイルパスの解決
-                    img_path = images_dir / frame_name
-                    if not img_path.exists() and (s_dir / frame_name).exists():
-                        img_path = s_dir / frame_name
+                    # クリーナーの出力は画像を複製せず、元のセッションを `source_dir` で参照する
+                    source_dir = record.get("source_dir")
+                    if source_dir:
+                        origin_dir = (s_dir / source_dir).resolve()
+                        img_path = origin_dir / "images" / frame_name
+                        if not img_path.exists() and (origin_dir / frame_name).exists():
+                            img_path = origin_dir / frame_name
+                    else:
+                        origin_dir = s_dir
+                        img_path = images_dir / frame_name
+                        if not img_path.exists() and (s_dir / frame_name).exists():
+                            img_path = s_dir / frame_name
 
                     self.samples.append(
                         {
                             "image_path": img_path,
                             "steering": float(record.get("steering", 0.0)),
                             "throttle": float(record.get("throttle", 0.0)),
-                            "session_id": s_dir.name,
-                            "session_dir": s_dir,
+                            # 分割と集計は元のセッション単位で行う。
+                            # 画像を複製していた旧形式の出力は cleaned_meta から元を読む
+                            "session_id": (
+                                origin_dir.name
+                                if source_dir
+                                else record.get("cleaned_meta", {}).get("original_session")
+                                or s_dir.name
+                            ),
+                            "session_dir": origin_dir,
                             "raw_record": record,
                         }
                     )
@@ -136,6 +151,11 @@ class DrivingDataset(Dataset):
         throttle = torch.tensor(sample["throttle"], dtype=torch.float32)
 
         return image, steering, throttle
+
+    @property
+    def source_session_dirs(self) -> List[Path]:
+        """サンプルの元になったセッション（クリーナーの出力なら参照先の元データ）"""
+        return sorted({sample["session_dir"] for sample in self.samples})
 
     def get_sample_info(self, idx: int) -> Dict[str, Any]:
         """サンプルの画像パスやメタデータを取得"""

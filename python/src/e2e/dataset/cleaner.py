@@ -6,7 +6,7 @@ PiCar-X Dataset Cleaner (Outlier & Bad-Data Filter)
 
 import argparse
 import json
-import shutil
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -26,6 +26,14 @@ try:
     import onnxruntime as ort
 except ImportError:
     ort = None
+
+
+def _relative_or_absolute(target: Path, start: Path) -> str:
+    """出力先から元のセッションへの相対パス。ドライブが違うなど相対にできなければ絶対パス"""
+    try:
+        return Path(os.path.relpath(target, start)).as_posix()
+    except ValueError:
+        return target.as_posix()
 
 
 class DatasetCleaner:
@@ -117,6 +125,7 @@ class DatasetCleaner:
             item = {
                 "index": i,
                 "session_id": info["session_id"],
+                "session_dir": info["session_dir"],
                 "image_path": img_path,
                 "target_steering": target_steering,
                 "pred_steering": pred_steering,
@@ -174,8 +183,7 @@ class DatasetCleaner:
         データを検査・フィルタリングし、クリーンなデータセットとレポートを出力
         """
         out_p = Path(output_dir)
-        out_images_dir = out_p / "images"
-        out_images_dir.mkdir(parents=True, exist_ok=True)
+        out_p.mkdir(parents=True, exist_ok=True)
 
         analyzed = self.analyze_dataset(data_dir)
         clean_samples, bad_samples = self.filter_samples(analyzed)
@@ -193,22 +201,16 @@ class DatasetCleaner:
 
         print("\nWriting cleaned dataset...")
 
-        # クリーンデータの保存 (画像コピー & labels.jsonl 作成)
+        # クリーンデータの保存。画像は複製せず、元のセッションを参照する labels.jsonl だけを書く
+        # （元のデータを唯一の正とする。ROADMAP の M3）
         labels_file = out_p / "labels.jsonl"
         with open(labels_file, "w", encoding="utf-8") as f_clean:
-            for new_idx, item in enumerate(clean_samples):
-                src_img = item["image_path"]
-                # 衝突防止のため session_id をプレフィックスに付与
-                dst_frame_name = f"{item['session_id']}_{src_img.name}"
-                dst_img = out_images_dir / dst_frame_name
-
-                # 画像をコピー
-                if src_img.resolve() != dst_img.resolve():
-                    shutil.copy2(src_img, dst_img)
-
-                # レコード構築
+            for item in clean_samples:
                 new_record = dict(item["raw_record"])
-                new_record["frame"] = dst_frame_name
+                new_record["frame"] = Path(item["image_path"]).name
+                new_record["source_dir"] = _relative_or_absolute(
+                    Path(item["session_dir"]).resolve(), out_p.resolve()
+                )
                 new_record["cleaned_meta"] = {
                     "original_session": item["session_id"],
                     "pred_steering": round(item["pred_steering"], 4),

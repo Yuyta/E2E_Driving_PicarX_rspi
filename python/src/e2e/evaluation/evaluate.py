@@ -1,18 +1,23 @@
 """
 Evaluation Script for PiCar-X E2E Steering Model
-MAE (Mean Absolute Error) および 予測結果の統計を算出する
+舵角の MAE（全体と左、直進、右の別）、予測の舵角の変化量、推論時間を算出する。
+
+指定したデータ全体で評価するので、学習に使ったデータを含めると良く見える。
+モデルの比較には交差検証（`src.e2e.training.cross_validate`）を使う。
 """
 
 import argparse
+import json
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader
 
 try:
     from ..training.dataset import DrivingDataset
     from ..training.model import SmallDrivingCNN
+    from .metrics import inference_time_ms, predict_all, steering_metrics
 except ImportError:
+    from src.e2e.evaluation.metrics import inference_time_ms, predict_all, steering_metrics
     from src.e2e.training.dataset import DrivingDataset
     from src.e2e.training.model import SmallDrivingCNN
 
@@ -22,48 +27,41 @@ def evaluate(data_dir, model_path):
     print(f"Dataset: {data_dir}")
 
     dataset = DrivingDataset(data_dir)
-    loader = DataLoader(dataset, batch_size=32, shuffle=False)
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    model = SmallDrivingCNN().to(device)
-    model.load_state_dict(torch.load(model_path, map_location=device))
+    model = SmallDrivingCNN()
+    model.load_state_dict(torch.load(model_path, map_location="cpu"))
     model.eval()
 
-    total_mae = 0.0
-    total_samples = 0
-
-    with torch.no_grad():
-        for images, steerings, _ in loader:
-            images = images.to(device)
-            steerings = steerings.unsqueeze(1).to(device)
-            predictions = model(images)
-
-            mae = torch.abs(predictions - steerings).sum().item()
-            total_mae += mae
-            total_samples += images.size(0)
-
-    avg_mae = total_mae / max(total_samples, 1)
-    # 角度（度数法）への換算（最大舵角35度の場合）
-    avg_mae_deg = avg_mae * 35.0
+    indices = list(range(len(dataset)))
+    preds = predict_all(model, dataset, indices)
+    detail = steering_metrics(
+        preds,
+        [dataset.samples[i]["steering"] for i in indices],
+        [dataset.samples[i]["session_id"] for i in indices],
+    )
 
     metrics = {
-        "total_samples": total_samples,
-        "steering_mae_normalized": round(avg_mae, 4),
-        "steering_mae_degrees": round(avg_mae_deg, 2),
+        "total_samples": detail["samples"],
+        "steering_mae_normalized": detail["steering_mae"],
+        "steering_mae_degrees": detail["steering_mae_deg"],
+        "steering_mae_by_direction": detail["steering_mae_by_direction"],
+        "samples_by_direction": detail["samples_by_direction"],
+        "steering_change": detail["steering_change"],
+        "inference_ms_pc": inference_time_ms(model),
+        "data_dir": str(data_dir),
     }
 
     print("\n--- Evaluation Results ---")
-    print(f"Total Samples : {metrics['total_samples']}")
-    print(f"Steering MAE  : {metrics['steering_mae_normalized']} (Normalized -1.0 to 1.0)")
-    print(f"Steering MAE  : ±{metrics['steering_mae_degrees']}° (Degrees)")
-    model_dir = Path(model_path).parent
-    eval_file = model_dir / "eval_metrics.json"
-    try:
-        import json
-        with open(eval_file, "w", encoding="utf-8") as f:
-            json.dump(metrics, f, indent=2)
-    except Exception:
-        pass
+    print(f"Total Samples  : {metrics['total_samples']}")
+    print(f"Steering MAE   : {metrics['steering_mae_normalized']} (Normalized -1.0 to 1.0)")
+    print(f"Steering MAE   : ±{metrics['steering_mae_degrees']}° (Degrees)")
+    print(f"By direction   : {metrics['steering_mae_by_direction']}")
+    print(f"Steering change: {metrics['steering_change']}")
+    print(f"Inference (PC) : {metrics['inference_ms_pc']} ms")
+
+    eval_file = Path(model_path).parent / "eval_metrics.json"
+    with open(eval_file, "w", encoding="utf-8") as f:
+        json.dump(metrics, f, indent=2, ensure_ascii=False)
+        f.write("\n")
 
     return metrics
 
