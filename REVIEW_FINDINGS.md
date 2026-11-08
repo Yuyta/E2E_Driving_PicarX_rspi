@@ -63,11 +63,11 @@
 | LRN-1 | S2 | 介入データのラベルがモデル自身の出力。承認すると失敗を正解として学習する | `python/src/e2e/autonomous_driver.py:582-588`, `python/src/e2e/dataset/disengagement_manager.py:88,217` | 人の修正操作を記録する方式に変更。それまで承認機能は使わない | M3 |
 | LRN-2 | S2 | E2E モデルは舵角のみで、目的地の概念がない | `python/src/e2e/training/model.py` | E2E は短距離の走行に限定。行き先は上位層が担当 | M4, M5 |
 | LRN-3 | S2 | データが少なく偏っている（[§1](#1-実測で判明した仕様との差)）。1fps で収集されている | `python/data/raw` | 10fps 以上で再収集。左右反転で補強 | M3 |
-| LRN-4 | S3 | MAE が走行性能を示さない。評価手順が学習データを含み、隣接フレームが学習と検証に分かれる | `python/src/e2e/training/train.py:40`, `python/src/e2e/evaluation/evaluate.py:24` | セッション単位で分割し、シードを固定。主指標は「10分あたりの介入回数」 | M3 |
+| LRN-4 | S3 | MAE が走行性能を示さない。評価手順が学習データを含み、隣接フレームが学習と検証に分かれる | `python/src/e2e/training/train.py:40`, `python/src/e2e/evaluation/evaluate.py:24` | セッション単位で分割し、シードを固定。セッションが少ない間は1セッションを抜いて評価する。主指標は「10分あたりの介入回数」 | M3 |
 | LRN-5 | S3 | クリーナーはモデルと合わないフレームを除くため、数値が良く見えやすい | `python/src/e2e/dataset/cleaner.py` | 改善の判断は実走の指標で行う | M3 |
 | LRN-6 | S3 | 収集データに距離と速度が入らない。`throttle` は前進指令後に停止しても 0.5 のまま | `python/src/e2e/gui_collector.py:259-265,277` | 距離と電池電圧、カメラと超音波から推定した実際の動きを保存し、指令と食い違うフレームに印を付ける（ROADMAP の M3）。停止中フレームの扱いを決める | M3 |
 | LRN-7 | S3 | 塞がり判定がない | — | 超音波を自動ラベルにした補助出力を追加 | M3 |
-| LRN-8 | S3 | 学習の再現性がない（シード未固定、データ拡張なし）。`v003` の Val Loss が 0.0 | `train.py:40`, `python/models/v003/metadata.json` | シード固定。検証件数0の場合は学習を失敗扱いにする | M3 |
+| LRN-8 | S3 | 学習の再現性がない（シード未固定、データ拡張なし）。`v003` の Val Loss が 0.0 | `train.py:40`, `python/models/v003/metadata.json` | シード固定。検証件数0の場合は学習を失敗扱いにする。使ったデータ、コード、環境、設定を `metadata.json` に記録する | M3 |
 
 ## 5. 会話 Agent
 
