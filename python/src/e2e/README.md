@@ -79,30 +79,41 @@ uv run python -m src.e2e.gui_collector
   - `images/`: カメラ画像 (`frame_000000.jpg` ... 160x120ピクセル)
   - `labels.jsonl`: 各フレームのタイムスタンプ、ステアリング正規化値（-1.0〜+1.0）、速度
 
+### 収集の後に行うこと
+走行データはセッション単位で追記のみとし、書き換えません。収集が終わったら、マニフェスト（ファイルのハッシュの一覧）を作り、バックアップします。
+```powershell
+uv run python -m src.e2e.dataset.manifest --data_dir data/raw            # 新しいセッションに manifest.json を作る
+uv run python -m src.e2e.dataset.manifest --data_dir data/raw --verify   # 変わっていないか確かめる
+cd ..; powershell -ExecutionPolicy Bypass -File scripts\backup.ps1       # D:\PiCarX-backup へ複製（GUI を閉じてから）
+```
+
 ---
 
 ## ステップ 2: モデル学習 & ONNXエクスポート (PC)
 
 収集した走行ログをもとに、画像からステアリング角度を予測する軽量CNNを学習します。
-**過去の全走行データ（`data/raw`）の一括統合学習**、または特定セッションの個別学習が可能です。
+学習は CPU で決定的に行い、同じデータと設定なら同じ結果になります。検証はセッション単位で行うので、**2セッション以上が必要**です。
 
 ### 実行コマンド (PowerShell)
 
 #### 過去の全走行データをまとめて学習する場合 (推奨)
 ```powershell
-uv run python -m src.e2e.training.train --data_dir data/raw --output_dir models/v004 --epochs 15
+uv run python -m src.e2e.training.train --config configs/train.toml --data_dir data/raw --output_dir models/v006
 ```
+- 設定は `configs/train.toml`（エポック数、バッチサイズ、学習率、シード、検証セッション）。`--epochs` などの引数で上書きできます
+- 検証セッションの指定がなければ、名前順で最後のセッションを検証に使います。`--val_sessions <session_id>` で指定できます
+- 複数フォルダを指定したい場合は `--data_dir data/raw/session1 data/raw/session2` のようにスペース区切りで複数指定できます
 
-#### 特定のセッションのみを学習する場合
+#### モデルや設定を比べる場合（交差検証）
+セッションを1つずつ抜いて学習し、抜いたセッションで評価します。学習に使っていない場面での誤差なので、比較にはこちらを使います。
 ```powershell
-uv run python -m src.e2e.training.train --data_dir data/raw/<session_id> --output_dir models/<version> --epochs 15
+uv run python -m src.e2e.training.cross_validate --config configs/train.toml --data_dir data/raw --output data/cv/baseline.json
 ```
-※ 複数フォルダを指定したい場合は `--data_dir data/raw/session1 data/raw/session2` のようにスペース区切りで複数指定できます。
 
 ### 生成物
-- `models/v004/best_model.pth` : PyTorchモデル重み
-- `models/v004/model.onnx` : 実機配信用ONNXモデル
-- `models/v004/metadata.json` : 最良検証損失、ハイパーパラメータ、読み込んだセッション一覧の記録
+- `models/v006/best_model.pth` : PyTorchモデル重み
+- `models/v006/model.onnx` : 実機配信用ONNXモデル
+- `models/v006/metadata.json` : 設定、分割、前処理、検証の指標に加え、使ったデータのハッシュ、git のコミット、環境（ライブラリの版、`uv.lock` のハッシュ）の記録
 
 ---
 
@@ -123,10 +134,12 @@ uv run python -m src.e2e.dataset.cleaner --data_dir data/raw --model models/v003
 - `--top_k_percent` : 誤差が大きい上位K%を除外する場合に指定（例: `--top_k_percent 5.0`）
 - `--output_dir` : クリーン化されたデータセットの出力先
 
+出力先には画像を複製せず、元のセッションを参照する `labels.jsonl` だけを書きます。元のデータ（`data/raw`）を移動したり消したりすると読めなくなります。
+モデルと合わないフレームを除くので、クリーニング後の MAE は良く見えます。改善の判断には交差検証と実走の介入回数を使います。
+
 ### クリーニング後の再学習
-厳選された良質データセットを用いて、より高精度な新モデルを学習します：
 ```powershell
-uv run python -m src.e2e.training.train --data_dir data/processed/clean_v1 --output_dir models/v004 --epochs 15
+uv run python -m src.e2e.training.train --config configs/train.toml --data_dir data/processed/clean_v1 --output_dir models/v006
 ```
 
 ---

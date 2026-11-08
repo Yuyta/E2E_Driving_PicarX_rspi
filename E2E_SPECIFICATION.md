@@ -128,7 +128,8 @@ PC上でカメラ映像をリアルタイム確認しながら手動操縦し、
 - **クラス**: `DrivingDataset(Dataset)`
 - **仕様**:
   - 引数 `data_dir` に「単一セッション」「複数セッションのリスト」「親ディレクトリ (`data/raw`, `data/processed`)」のいずれを指定しても、配下の `labels.jsonl` を自動探索して1つのデータセットに結合。
-  - 各画像のパスをセッションごとに正しく解決。
+  - 各画像のパスをセッションごとに正しく解決。クリーナーの出力のように `source_dir` を持つレコードは、参照先の元のセッションから画像を読む。
+  - 各サンプルの `session_id` は元のセッション（分割と集計に使う）。画像を複製していた旧形式の出力は `cleaned_meta.original_session` を使う。
   - 前処理パイプライン:
     1. リサイズ: 120×160 ピクセル (H×W)
     2. Tensor 変換: `[0.0, 1.0]`
@@ -145,8 +146,8 @@ PC上でカメラ映像をリアルタイム確認しながら手動操縦し、
      - またはワーストパーセンタイル (`--top_k_percent`) に該当するフレーム
      これらを「操作遅れ」「衝突後の混乱」「手ブレノイズ」として除外。
 - **出力アーティファクト**: `python/data/processed/<output_dir>/`
-  - `images/`: セッションID接頭辞を付与したユニークな画像コピー
-  - `labels.jsonl`: クリーニング済みの正常ラベル
+  - 画像は複製しない（元のデータを唯一の正とする）
+  - `labels.jsonl`: クリーニング済みの正常ラベル。各レコードの `source_dir` は元のセッションへの相対パス（相対にできなければ絶対パス）
   - `bad_cases.jsonl`: 除外されたフレーム一覧と除外理由（デバッグ・分析用）
   - `cleaning_report.json`: 除外率、前後MAEの定量的改善レポート
   - `metadata.json`: レジストリ互換の統計メタデータ
@@ -181,12 +182,15 @@ CPU推論を想定した4層の軽量CNN（推論時間の実測値は未記録�
 #### 4.3.2 学習仕様 (`training/train.py`)
 - **損失関数**: Mean Squared Error (MSE Loss)
 - **最適化**: Adam (`lr=1e-3`)
-- **データ分割**: Train 80% / Validation 20%（フレーム単位のランダム分割、シード未固定）
+- **設定**: `python/configs/train.toml`（エポック数、バッチサイズ、学習率、シード、検証セッション）。コマンドラインの引数で上書きできる
+- **再現性**: シードを固定し、CPU で決定的なアルゴリズムだけを使う。同じデータと設定なら同じ指標になる
+- **データ分割**: セッション単位。検証セッションの指定がなければ名前順で最後のセッション。セッションが1つしかない、または検証が空なら学習しない
+- **交差検証** (`training/cross_validate.py`): セッションを1つずつ抜いて学習し（エポック数は固定、最後の重み）、抜いたセッションで評価する。モデルの比較はこの値で行う
 - **データ拡張**: なし
 - **エクスポート**:
   - 最良検証ロスの重み: `best_model.pth`
   - ONNX 形式: `model.onnx` (Opset 17, 入出力動的バッチ対応)
-  - メタデータ: `metadata.json` (エポック数、バッチサイズ、使用セッション一覧、最良Val Loss)
+  - メタデータ: `metadata.json`。エポック数、バッチサイズ、最良Val Loss、使用セッション一覧に加え、設定、分割、前処理（入力の大きさ、正規化の値）、検証セッションでの指標、PC での推論時間、データのハッシュ（学習サンプルの中身から計算）と各セッションのマニフェストのハッシュ、git のコミットと未コミットの変更の有無、環境（Python、PyTorch などの版、`uv.lock` のハッシュ）、学習の経過
   - ONNX 出力後にスタックトレース情報を除去する（ローカルのパスが残るのを防ぐため）
 
 ---
@@ -194,7 +198,7 @@ CPU推論を想定した4層の軽量CNN（推論時間の実測値は未記録�
 ### 4.4 オフライン評価 & MLOps レジストリ (`evaluation/`, `registry/`)
 
 - **オフライン評価 (`evaluate.py`)**:
-  - 平均絶対誤差 (MAE) を正規化スケールおよび実角度（±◯度）で算出。
+  - 平均絶対誤差 (MAE) を正規化スケールおよび実角度（±◯度）で算出。左（-0.15 未満）、直進、右（0.15 超）の別の MAE、隣り合うフレームの予測の差の平均（ふらつき）、PC での推論時間も出す（`evaluation/metrics.py`）。
   - 評価結果を `eval_metrics.json` に自動出力。
   - 指定したディレクトリの全フレームで評価する。学習に使ったデータを指定すると、その分も評価に含まれる（`v004` は学習データ全150件で評価）。走行性能の指標としては使わない。
 - **データセットレジストリ (`registry/dataset.py`)**:
@@ -202,7 +206,11 @@ CPU推論を想定した4層の軽量CNN（推論時間の実測値は未記録�
 - **モデルレジストリ (`registry/models.py`)**:
   - 保存済みモデルのバージョン、エポック数、検証損失、MAE、ONNX/PTH成果物の有無を走査。
 - **MLOps 比較 CLI (`registry/compare.py`)**:
-  - `uv run python -m src.e2e.registry.compare` でターミナル上に Rawデータセット、Processedデータセット、モデル性能を表形式で一覧表示。
+  - `uv run python -m src.e2e.registry.compare` でターミナル上に Rawデータセット、Processedデータセット、モデル性能を表形式で一覧表示。モデルの表には、データのハッシュと git のコミットの先頭も出す。
+- **マニフェスト (`dataset/manifest.py`)**:
+  - 走行データはセッション単位で追記のみとする。各セッションに `manifest.json`（ファイルごとの SHA256 と大きさ、全体のハッシュ）を作り、`--verify` で変更、欠落、追加を検出する。`metadata.json` は集計から作り直せるので対象外。既存のマニフェストは書き換えない。
+- **バックアップ (`scripts/backup.ps1`)**:
+  - `python/data`、`python/models`、`data` を robocopy で `D:\PiCarX-backup`（環境変数 `PICARX_BACKUP_DIR` で変更可）へ複製する。複製先のファイルは消さない。記憶 DB があるので GUI を閉じてから実行する。`-RestoreTo <フォルダ>` で戻す。
 
 ---
 
@@ -304,12 +312,9 @@ PiCar-X実機のサーボモーターギア個体差（数度の傾き）を吸�
 ### 計画中の機能
 Pi 上の推論（旧 Phase 4）は ROADMAP の M3 に統合した。現時点で性能を実測していないので、達成値は完了条件で管理する。
 
-データとモデルの管理も M3 で次のように変える（詳細は [ROADMAP.md の M3](ROADMAP.md)）。いずれも未実装で、本書の §4 は現行の動作を記載している。
+データとモデルの管理は M3 で進めている（詳細は [ROADMAP.md の M3](ROADMAP.md)）。マニフェスト、バックアップ、画像を複製しないクリーナー、再現できる学習、交差検証は実装した（§4.2〜4.4）。次は未実装。
 
-- 走行データはセッション単位で追記のみとし、セッションごとにハッシュの一覧（マニフェスト）を作る。走行データ、モデル、記憶 DB は `robocopy` で D ドライブ（別の物理ディスク）へ複製する
-- クリーナーは画像をコピーせず、`data/raw` を参照する `labels.jsonl` だけを出力する（§4.2.2 の `images/` は出力しなくなる）
-- 学習の設定（シード、閾値、エポック数）をファイルにまとめる。`metadata.json` に git のコミット、データのマニフェストのハッシュ、`uv.lock` のハッシュ、前処理の設定、PyTorch のバージョンを追加する
-- 分割はセッション単位とし、セッションが少ない間は1セッションを抜いて評価する。舵角の MAE を全体と左、直進、右の別に出し、舵角の変化量と推論時間も測る。使用中のモデルより悪いモデルは採用しない
+- 使用中のモデルより悪いモデルは採用しない（同じデータで両方の設定の交差検証を行って比べる）。使用中のモデルの版を記録する
 - 介入の記録にセッション、モデルの版、データの版を入れ、モデル別の介入率を集計する
 - Pi へ送るモデルには、SHA256、入力の大きさ、正規化の値を書いたマニフェストを付ける。Pi は確認してから読み込み、版ごとのフォルダとリンクの張り替えで切り替え、前の版へ戻せるようにする
 
@@ -326,24 +331,25 @@ PiCarX/
 ├── E2E_SPECIFICATION.md           # 本仕様書
 ├── python/
 │   ├── pyproject.toml             # uv / Python 依存関係定義 (e2e, dev)
+│   ├── configs/train.toml         # 学習の設定
 │   ├── data/                      # 走行データ（git 管理外）
-│   │   ├── raw/<session_id>/      # images/, labels.jsonl
-│   │   ├── processed/clean_vX/    # images/, labels.jsonl, bad_cases.jsonl, cleaning_report.json
+│   │   ├── raw/<session_id>/      # images/, labels.jsonl, manifest.json
+│   │   ├── processed/clean_vX/    # labels.jsonl（raw を参照）, bad_cases.jsonl, cleaning_report.json
 │   │   └── disengagements/<id>/   # images/, labels.jsonl, event.json
 │   ├── models/vXXX/               # best_model.pth, model.onnx, metadata.json, eval_metrics.json
 │   ├── src/e2e/
 │   │   ├── README.md              # 操作マニュアル
 │   │   ├── autonomous_driver.py   # 自律走行
 │   │   ├── gui_collector.py       # データ収集 GUI
-│   │   ├── dataset/               # cleaner.py, disengagement_manager.py
-│   │   ├── evaluation/            # evaluate.py
+│   │   ├── dataset/               # cleaner.py, disengagement_manager.py, manifest.py
+│   │   ├── evaluation/            # evaluate.py, metrics.py
 │   │   ├── mapping/               # occupancy_grid.py, visualizer.py
 │   │   ├── registry/              # compare.py, dataset.py, models.py
 │   │   ├── cycle_profiler.py      # 走行ループの周期の内訳
 │   │   ├── m1_check.py            # M1 の完了条件を実機で計測
 │   │   ├── safety/                # body_status.py, speed_limiter.py, stuck_detector.py,
 │   │   │                          # trajectory_tracker.py, watchdog.py
-│   │   └── training/              # dataset.py, model.py, train.py
+│   │   └── training/              # dataset.py, model.py, train.py, cross_validate.py, provenance.py
 │   └── tests/                     # ユニットテスト
 └── rust/src/
     ├── api/                       # HTTP API
@@ -360,7 +366,10 @@ PiCarX/
 | 目的 | コマンド (PowerShell) |
 |---|---|
 | **データ収集GUI起動** | `uv run python -m src.e2e.gui_collector` |
-| **生データ全結合学習** | `uv run python -m src.e2e.training.train --data_dir data/raw --output_dir models/v004 --epochs 25` |
+| **マニフェストの作成と確認** | `uv run python -m src.e2e.dataset.manifest --data_dir data/raw`（確認は `--verify`） |
+| **生データ全結合学習** | `uv run python -m src.e2e.training.train --config configs/train.toml --data_dir data/raw --output_dir models/v006` |
+| **交差検証（1セッションを抜いて評価）** | `uv run python -m src.e2e.training.cross_validate --config configs/train.toml --data_dir data/raw --output data/cv/<名前>.json` |
+| **バックアップ** | `powershell -ExecutionPolicy Bypass -File scriptsackup.ps1`（リポジトリのルートで実行） |
 | **データクリーニング (外れ値除外)** | `uv run python -m src.e2e.dataset.cleaner --data_dir data/raw --model models/v004/model.onnx --threshold 0.4 --output_dir data/processed/clean_v2` |
 | **クリーンデータでの再学習** | `uv run python -m src.e2e.training.train --data_dir data/processed/clean_v2 --output_dir models/v005 --epochs 25` |
 | **モデルオフライン評価** | `uv run python -m src.e2e.evaluation.evaluate --data_dir data/raw --model_path models/v004/best_model.pth` |
