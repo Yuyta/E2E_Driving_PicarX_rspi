@@ -111,12 +111,20 @@ PC上でカメラ映像をリアルタイム確認しながら手動操縦し、
       "timestamp": 1729000000.123,
       "frame": "frame_000001.jpg",
       "steering": -0.2857,
-      "throttle": 0.5
+      "throttle": 0.5,
+      "distance_cm": 42.3,
+      "command": {"speed": 40, "steering_deg": -10.0, "since_s": 1.2, "camera_moving": false},
+      "motion": {"yaw_rate_dps": -6.1, "expansion_rate": 0.08, "edge_flow_px_s": 14.2,
+                 "image_moving": true, "approach_cm_s": 9.8, "...": "..."},
+      "motion_check": {"flags": []}
     }
     ```
     - `steering` は最大舵角 ±35° を基準に `-1.0` (最大左折) 〜 `+1.0` (最大右折) に正規化。
-    - `throttle` は `W` キーで `0.5`、`S` キーで `0.0` になる。`W` は 600ms の移動指令のため、移動後に停止していても `0.5` のまま記録される。
-    - 距離と実際の動きは保存しない。M3 で、カメラの画像の動きと超音波の距離から実際の動きを推定し、指令と食い違うフレーム（空転、引っかかり、滑り）に印を付けて保存する予定（ROADMAP の M3）。PiCar-X には車輪の回転数を測るセンサーがない。
+    - `throttle` は前進の指令が有効な間だけ `0.5`、それ以外は `0.0`。`W` は 600ms の移動指令なので、期限が切れて止まった後は `0.0` になる（2026-11-08 から。それ以前の記録は止まった後も `0.5`）。
+    - `distance_cm` は超音波の距離。何も捉えていない時は `null`。
+    - `command` はそのフレームの時点で有効な指令（期限を含む）、`motion` はカメラの画像の動きと超音波から推定した実際の動き、`motion_check` は指令との食い違い（§4.7）。食い違いのあるフレームは学習から外す。
+    - 電池電圧と床センサーの値はまだ保存しない（M3 の再収集で追加する）。
+- **食い違いが続いた時**: 同じ食い違いが1秒続くと、走行を止めて画面に表示し、記憶に「走行を止めた」出来事として残す。
 - **収集周期**: `CameraWorker` は約12Hzの設計だが、記録された実測のフレーム間隔は中央値で約1秒（2026-11-03 時点、旧方式）。カメラを常時配信に変えた後（M1）の収集周期は未計測。M3 で 10fps 以上で集め直す。
 
 ---
@@ -221,7 +229,7 @@ CPU推論を想定した4層の軽量CNN（推論時間の実測値は未記録�
   1. `/api/camera/stream` の新しいフレームを待つ（処理が遅れても古いフレームは溜まらない）
   2. `/api/status` で Pi の状態を確認
   3. Pi が前進を拒否していれば、理由に応じて脱出または待機（`safety/body_status.py`）
-  4. スタック検知
+  4. 指令と実際の動きの食い違いの検出（§4.7）。食い違いが1秒続くと止まり、介入（`motion_mismatch`）と記憶の出来事として記録して走行を終える。`--disable_motion_check` を付けた時だけ、旧スタック検知（後退と車体振りで脱出）を使う
   5. 120×160 に変換し、ONNX Runtime でステアリング角を推論
   6. 速度リミッターで速度を決定し、介入バッファを更新
   7. `/api/drive/steer` と `/api/drive/move`（TTL 400ms）を送信。受け付けられた移動だけ軌跡と地図に反映
@@ -247,7 +255,8 @@ CPU推論を想定した4層の軽量CNN（推論時間の実測値は未記録�
 | 通信状態の記録 | PC (Python) | 通信失敗時 | 停止は Pi の TTL が行う。PC 側は記録のみ |
 | 速度リミッター | PC (Python) | ループごと | |
 | 直前軌跡の後退 | PC (Python) | 段差検知時、行き止まり時 | 記録のない範囲へは後退しない。履歴がなければ待機する |
-| スタック検知 | PC (Python) | ループごと | 8フレーム前との比較を15回。10fps なら約2秒の計算 |
+| 指令と実際の動きの食い違い | PC (Python) | ループごと | 約0.3秒前のフレームと比べる。1秒続くと止まって走行を終える。しきい値は実機で未校正 |
+| 旧スタック検知 | PC (Python) | ループごと | `--disable_motion_check` の時だけ。8フレーム前との比較を15回 |
 | Ctrl+C / `Q` キー | PC (Python) | 受信時 | 舵を0に戻してモーターを停止（通常停止） |
 
 ---
@@ -268,6 +277,28 @@ PiCar-X実機のサーボモーターギア個体差（数度の傾き）を吸�
   set_dir_servo_angle(angle + dir_offset);
   ```
   これにより、Rustサーバー起動直後からカメラが正確に真正面を向き、直進操舵のズレが排除される。
+
+---
+
+### 4.7 指令と実際の動きの食い違いの検出 (`motion/`)
+
+PiCar-X には車輪の回転数を測るセンサーがないので、カメラの画像の動きと超音波の距離から実際の動きを推定し、指令と比べる（ROADMAP の M3）。
+
+- **画像の動き (`motion/estimator.py`)**: 160×120 のグレースケールで特徴点を追跡し（Lucas-Kanade、行きと帰りで戻らない点を除く）、平行移動 + 拡大 + 回転のモデルを RANSAC で当てはめる。人など一部だけの動きは外れ値になる。
+  - 約0.3秒前のフレームと比べ、毎秒の値に直す（周期によらず同じしきい値を使うため）
+  - 向きの変化（度/秒）: 景色の横のずれ × 水平画角 / 160。右回りが正。水平画角は 53.5°（OV5647 の値。未校正）
+  - 拡大の速さ: 前進で正。単眼なので距離（cm）は分からない
+  - 超音波の距離の変化: 150cm 以内で、変化が毎秒 100cm 以下の時だけ使う
+  - 特徴点が12個未満、または追跡できない時は「不明」
+  - PC で1フレーム約1.3ms
+- **食い違いの判定 (`motion/checker.py`)**: 指令が変わってから0.5秒は判定しない。カメラを動かしている間も判定しない。
+  - `no_motion`: 速度20以上の指令なのに、画像が動かず、超音波の距離も変わらない（超音波が使えなければ画像だけで判断）。画像が不明で超音波も使えなければ不明
+  - `turn_mismatch`: 舵角15°以上で逆向きに毎秒8°より速く曲がった。舵角3°以下で毎秒15°より速く曲がった。後退では向きを反転して比べる。速度と軸距を校正した後は、自転車モデルで想定した量と比べ、0.5〜2倍の外なら食い違い
+  - `uncommanded_motion`: 停止中に、特徴点の60%以上がそろって動いた（景色全体が動いた）。超音波の距離が変わらなければカメラだけが動いたとみなして不明にする
+  - 同じ食い違いが1秒続くと「続いている」とする
+  - しきい値はすべて提案値で、床に印を付けたコースとわざと空転させる試験で校正する
+- **監視 (`motion/monitor.py`)**: 送った指令を期限（TTL）を含めて追い（`CommandState`）、続いた食い違いを一度だけ知らせる。収集 GUI と自律走行で共通に使う。記憶には種類 `motion_mismatch` の出来事として残す。
+- **記録の解析 (`motion/analyze.py`)**: 記録したセッションを後から解析し、`data/derived/motion/<session_id>.jsonl` に書く（セッションは追記のみなので書き換えない）。旧形式の記録は指令の期限が分からないので、`no_motion` が多く出る。
 
 ---
 
@@ -304,7 +335,7 @@ PiCar-X実機のサーボモーターギア個体差（数度の傾き）を吸�
 5. **Phase 3.5: 占有格子 (`mapping/occupancy_grid.py`, `mapping/visualizer.py`)**: 推測航法と前方超音波から 2D 地図を作り、時間で減衰させる。
    - **既知のバグ**: 右操舵で地図上は左に曲がる（左右反転）。
    - **制限**: エンコーダーと IMU がなく、スリップによるズレが蓄積する。地図の保存と読込はできない（画像保存のみ）。
-6. **Phase 3.6: スタック検知 (`safety/stuck_detector.py`)**: 画像の変化が小さい状態が続くと、後退、ウィグル、迂回前進を実行する。
+6. **Phase 3.6: スタック検知 (`safety/stuck_detector.py`)**: 画像の変化が小さい状態が続くと、後退、ウィグル、迂回前進を実行する。既定では指令と実際の動きの食い違いの検出（§4.7）に置き換え、`--disable_motion_check` の時だけ使う。
    - **制限**: 検知までの時間は周期に比例する（10fps で約2秒の計算。実機未確認）。
 
 ---
@@ -344,6 +375,7 @@ PiCarX/
 │   │   ├── dataset/               # cleaner.py, disengagement_manager.py, manifest.py
 │   │   ├── evaluation/            # evaluate.py, metrics.py
 │   │   ├── mapping/               # occupancy_grid.py, visualizer.py
+│   │   ├── motion/                # estimator.py, checker.py, monitor.py, analyze.py
 │   │   ├── registry/              # compare.py, dataset.py, models.py
 │   │   ├── cycle_profiler.py      # 走行ループの周期の内訳
 │   │   ├── m1_check.py            # M1 の完了条件を実機で計測
@@ -375,6 +407,7 @@ PiCarX/
 | **モデルオフライン評価** | `uv run python -m src.e2e.evaluation.evaluate --data_dir data/raw --model_path models/v004/best_model.pth` |
 | **MLOps レジストリ確認** | `uv run python -m src.e2e.registry.compare` |
 | **実機自律走行** | `uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --speed 35` |
+| **記録の動きの解析** | `uv run python -m src.e2e.motion.analyze --data_dir data/raw/<session_id>` |
 | **介入イベント一覧確認** | `uv run python -m src.e2e.dataset.disengagement_manager --list` |
 | **Rustクロスコンパイル** | `cd rust/build; make build MODEL=5` (ローカルPC Docker上。基準機種は Pi 5) |
 | **Rustラズパイ送信** | `cd rust/build; make deploy RPI_HOST=pi@<IP> RPI_DIR=/home/pi/` |

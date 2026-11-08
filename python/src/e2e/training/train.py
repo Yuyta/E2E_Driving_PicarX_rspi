@@ -275,6 +275,8 @@ def train(data_dir, output_model_dir, params: Optional[Dict[str, Any]] = None) -
         "data": {
             "fingerprint": provenance.data_fingerprint(dataset.samples),
             "sessions": provenance.session_records(dataset.source_session_dirs),
+            # 指令と実際の動きが食い違ったので学習から外したフレーム
+            "skipped_motion_mismatch": dataset.skipped_motion_mismatch,
         },
         "code": provenance.git_state(),
         "environment": provenance.environment(),

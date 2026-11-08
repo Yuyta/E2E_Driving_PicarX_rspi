@@ -34,6 +34,7 @@ try:
     from .dataset.disengagement_manager import DisengagementBuffer
     from .mapping.occupancy_grid import OccupancyGridMap
     from .mapping.visualizer import MapVisualizer
+    from .motion.monitor import CommandState, MotionMonitor, describe, record_motion_event
     from .safety.body_status import BodyAction, cliff_sensors, decide_action
     from .safety.speed_limiter import SpeedLimiter
     from .safety.stuck_detector import StuckDetector
@@ -44,6 +45,12 @@ except ImportError:
     from src.e2e.dataset.disengagement_manager import DisengagementBuffer
     from src.e2e.mapping.occupancy_grid import OccupancyGridMap
     from src.e2e.mapping.visualizer import MapVisualizer
+    from src.e2e.motion.monitor import (
+        CommandState,
+        MotionMonitor,
+        describe,
+        record_motion_event,
+    )
     from src.e2e.safety.body_status import BodyAction, cliff_sensors, decide_action
     from src.e2e.safety.speed_limiter import SpeedLimiter
     from src.e2e.safety.stuck_detector import StuckDetector
@@ -76,6 +83,7 @@ class RemoteAutonomousDriver:
         stuck_motion_threshold=4.0,
         stuck_duration_frames=15,
         enable_stuck_detection=True,
+        enable_motion_check=True,
         enable_mapping=True,
         grid_size=200,
         cell_size_m=0.05,
@@ -90,6 +98,12 @@ class RemoteAutonomousDriver:
         self.log_dir = Path(log_dir)
         self.reverse_duration_ms = reverse_duration_ms
         self.enable_stuck_detection = enable_stuck_detection
+        # 指令と実際の動きの食い違いの検出（ROADMAP の M3）。続いたら止まって記録する。
+        # 有効な時は、空転を見て脱出操作をする旧スタック検知は使わない
+        self.enable_motion_check = enable_motion_check
+        self.command_state = CommandState(time.time())
+        self.motion_monitor = MotionMonitor()
+        self.last_motion_update = None
         self.enable_mapping = enable_mapping
 
         print(f"Loading ONNX Model from: {model_path}")
@@ -174,14 +188,19 @@ class RemoteAutonomousDriver:
         except httpx.HTTPError:
             self.watchdog.record_error()
             return False
+        signed = -speed if direction == DriveDirection.BACKWARD else speed
+        if moved:
+            now = time.time()
+            self.command_state.steer(steer, now)
+            self.command_state.move(signed, duration_ms / 1000.0, now)
         if moved and self.grid_map:
-            signed = -speed if direction == DriveDirection.BACKWARD else speed
             self.grid_map.update_odometry(
                 speed=signed, steer_angle_deg=steer, duration_ms=duration_ms
             )
         return moved
 
     def _stop_quietly(self) -> None:
+        self.command_state.stop(time.time())
         try:
             self.client.stop_sync()
         except httpx.HTTPError:
@@ -295,6 +314,23 @@ class RemoteAutonomousDriver:
         self.stuck_detector.reset()
         print("[UNSTUCK COMPLETED] Resuming autonomous driving.\n")
 
+    def _stop_for_motion_mismatch(self, update) -> None:
+        """食い違いが続いた。止まり、介入として記録し、会話の Agent が答えられるよう記憶に残す"""
+        flag = update.newly_sustained
+        self._stop_quietly()
+        print(f"\n[MOTION MISMATCH] {describe(flag)} {update.check.details}")
+        saved_path = self.buffer.save_event(
+            trigger="motion_mismatch",
+            output_base_dir=self.log_dir,
+            model_name=self.model_path,
+            note=f"{flag}: {update.check.details.get(flag, '')}",
+        )
+        if saved_path:
+            print(f"[DISENGAGEMENT LOGGED] Saved to: {saved_path}")
+        _, summary = record_motion_event(flag, update)
+        print(f"[MEMORY] {summary}")
+        print("Autonomous driving stopped. Check the car, then start again.")
+
     def _log_event_once(self, flag: str, trigger: str, note: str) -> None:
         """危険が続く間に同じ介入を何度も記録しない"""
         if getattr(self, flag):
@@ -343,7 +379,13 @@ class RemoteAutonomousDriver:
             if self.enable_stuck_detection
             else "DISABLED"
         )
+        if self.enable_motion_check:
+            stuck_status = "REPLACED by the motion check"
         print(f"Stuck Auto-Recovery Guard: {stuck_status}")
+        motion_status = "ACTIVE (stop on sustained mismatch)"
+        if not self.enable_motion_check:
+            motion_status = "DISABLED"
+        print(f"Command vs Motion Check: {motion_status}")
         map_status = (
             f"ACTIVE (Grid: {self.grid_map.width}x{self.grid_map.height}, "
             f"Resolution: {self.grid_map.cell_size * 100:.0f}cm)"
@@ -465,9 +507,21 @@ class RemoteAutonomousDriver:
                     continue
 
                 # ----------------------------------------------------
-                # 4. Phase 3.6: スタック（引っかかり・空転）検知 & 自動脱出
+                # 4. 指令と実際の動きの食い違い（M3）。続いたら止まって走行を終える
                 # ----------------------------------------------------
-                if self.enable_stuck_detection:
+                if self.enable_motion_check:
+                    seen = distance if not status.sensors.distance.far else None
+                    update = self.motion_monitor.update(
+                        frame, now, seen, self.command_state.at(now)
+                    )
+                    if update is not None:
+                        self.last_motion_update = update
+                        if update.newly_sustained:
+                            self._stop_for_motion_mismatch(update)
+                            break
+
+                # Phase 3.6: 旧スタック検知 & 自動脱出（食い違いの検出を無効にした時だけ）
+                if self.enable_stuck_detection and not self.enable_motion_check:
                     if self.stuck_detector.update(
                         frame, motor_speed=self.speed_limiter.min_speed
                     ):
@@ -513,6 +567,9 @@ class RemoteAutonomousDriver:
                     except httpx.HTTPError:
                         moved = False
                         self.watchdog.record_error()
+                if moved:
+                    self.command_state.steer(steer_angle, now)
+                    self.command_state.move(dynamic_speed, MOVE_TTL_MS / 1000.0, now)
 
                 # Pi が受け付けた移動だけを軌跡と地図に反映する
                 if moved:
@@ -630,6 +687,11 @@ def main():
         help="Disable visual stuck detection and auto-recovery",
     )
     parser.add_argument(
+        "--disable_motion_check",
+        action="store_true",
+        help="Disable the command vs motion check (uses the old stuck recovery instead)",
+    )
+    parser.add_argument(
         "--no_gui",
         action="store_true",
         help="Disable real-time 2D map visualizer window (headless mode)",
@@ -685,6 +747,7 @@ def main():
         stuck_motion_threshold=args.stuck_threshold,
         stuck_duration_frames=args.stuck_frames,
         enable_stuck_detection=not args.disable_stuck,
+        enable_motion_check=not args.disable_motion_check,
         enable_mapping=not args.no_gui,
         grid_size=args.grid_size,
         cell_size_m=args.cell_size,

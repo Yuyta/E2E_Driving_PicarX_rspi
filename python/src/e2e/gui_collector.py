@@ -26,8 +26,18 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.e2e.motion.monitor import (
+    CommandState,
+    MonitorUpdate,
+    MotionMonitor,
+    describe,
+    record_motion_event,
+)
 from src.models import DriveDirection
 from src.picarx_client.client import PicarxClient
+
+# W キーで送る走行指令の期限。キーを押し続けると繰り返し送られる
+MOVE_TTL_MS = 600
 
 # OpenCV (保存時のフォーマット変換・リサイズ用)
 try:
@@ -92,6 +102,10 @@ class E2ECollectorWindow(QMainWindow):
         self.current_throttle = 0.0  # 0.0 ~ 1.0
         self.max_steering_angle = 35.0
         self.drive_speed = 40
+
+        # 指令と実際の動きの食い違いの検出（ROADMAP の M3）
+        self.command_state = CommandState(time.time())
+        self.motion_monitor = MotionMonitor(on_sustained=self._on_motion_mismatch)
 
         # 保存先設定
         self.output_base = Path("data/raw")
@@ -164,6 +178,11 @@ class E2ECollectorWindow(QMainWindow):
         telem_layout.addWidget(QLabel("Obstacle Dist:"), 2, 0)
         self.lbl_dist = QLabel("-- cm")
         telem_layout.addWidget(self.lbl_dist, 2, 1)
+
+        telem_layout.addWidget(QLabel("Motion Check:"), 3, 0)
+        self.lbl_motion = QLabel("--")
+        self.lbl_motion.setWordWrap(True)
+        telem_layout.addWidget(self.lbl_motion, 3, 1)
         right_layout.addWidget(telem_group)
 
         # 速度設定
@@ -224,6 +243,8 @@ class E2ECollectorWindow(QMainWindow):
 
     def _emergency_stop(self):
         self.current_throttle = 0.0
+        self.command_state.stop(time.time())
+        self.command_state.steer(0, time.time())
         self.current_steering = 0
         self.lbl_speed.setText("0")
         self.lbl_steer.setText("0° (0.00)")
@@ -241,41 +262,81 @@ class E2ECollectorWindow(QMainWindow):
 
     @Slot(bytes, float)
     def _on_frame_received(self, img_bytes: bytes, distance: float):
-        if distance < 900.0:
-            self.lbl_dist.setText(f"{distance:.1f} cm")
+        now = time.time()
+        distance_cm = distance if distance < 900.0 else None
+        if distance_cm is not None:
+            self.lbl_dist.setText(f"{distance_cm:.1f} cm")
 
         qimg = QImage()
         if qimg.loadFromData(img_bytes, "JPEG"):
             self.camera_label.setPixmap(QPixmap.fromImage(qimg))
 
-        if self.is_recording:
-            self._save_sample(img_bytes)
+        img = None
+        if cv2 is not None and np is not None:
+            img = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
 
-    def _save_sample(self, img_bytes: bytes):
+        update = None
+        if img is not None:
+            update = self.motion_monitor.update(
+                img, now, distance_cm, self.command_state.at(now)
+            )
+            if update is not None:
+                self._show_motion(update)
+
+        if self.is_recording:
+            self._save_sample(img_bytes, img, now, distance_cm, update)
+
+    def _show_motion(self, update: MonitorUpdate) -> None:
+        check = update.check
+        if check.flags:
+            text = " / ".join(describe(flag) for flag in check.flags)
+            self.lbl_motion.setStyleSheet("color: #d9534f; font-weight: bold;")
+        else:
+            text = f"OK (unknown: {check.unknown})" if check.unknown else "OK"
+            self.lbl_motion.setStyleSheet("")
+        sample = update.sample
+        self.lbl_motion.setText(
+            f"{text}<br><small>yaw {sample.yaw_rate_dps:+.0f}°/s, "
+            f"flow {sample.edge_flow_px_s:.0f}px/s</small>"
+        )
+
+    def _on_motion_mismatch(self, flag: str, update: MonitorUpdate) -> None:
+        """食い違いが続いた。走行を止め、記憶に残す（ROADMAP の M3）"""
+        self.current_throttle = 0.0
+        self.command_state.stop(time.time())
+        self.lbl_speed.setText("0")
+        try:
+            self.client.stop_sync()
+        except Exception as exc:
+            self.lbl_dist.setText(f"STOP FAILED: {exc}")
+        _, summary = record_motion_event(flag, update)
+        print(f"[MOTION MISMATCH] {summary} {update.check.details}")
+
+    def _save_sample(self, img_bytes, img, now, distance_cm, update):
         filename = f"frame_{self.frame_count:06d}.jpg"
         filepath = self.images_dir / filename
 
-        if cv2 is not None and np is not None:
-            nparr = np.frombuffer(img_bytes, np.uint8)
-            img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-            if img is not None:
-                resized = cv2.resize(img, (160, 120))
-                cv2.imwrite(str(filepath), resized)
-            else:
-                with open(filepath, "wb") as f:
-                    f.write(img_bytes)
+        if img is not None:
+            cv2.imwrite(str(filepath), cv2.resize(img, (160, 120)))
         else:
             with open(filepath, "wb") as f:
                 f.write(img_bytes)
 
+        command = self.command_state.at(now)
         steering_norm = self.current_steering / self.max_steering_angle
         record = {
             "index": self.frame_count,
-            "timestamp": time.time(),
+            "timestamp": now,
             "frame": filename,
             "steering": round(steering_norm, 4),
-            "throttle": round(self.current_throttle, 4),
+            # 指令の期限が切れて止まった後は 0 にする（LRN-6）
+            "throttle": 0.5 if command.speed > 0 else 0.0,
+            "distance_cm": None if distance_cm is None else round(distance_cm, 1),
         }
+        if update is not None:
+            record.update(update.to_record())
+        else:
+            record["command"] = command.to_record()
 
         with open(self.labels_file, "a", encoding="utf-8") as f:
             f.write(json.dumps(record) + "\n")
@@ -289,11 +350,13 @@ class E2ECollectorWindow(QMainWindow):
         if key == Qt.Key_W:
             self.current_throttle = 0.5
             self.lbl_speed.setText(str(self.drive_speed))
-            self.client.move_sync(DriveDirection.FORWARD, self.drive_speed, 600)
+            if self.client.move_sync(DriveDirection.FORWARD, self.drive_speed, MOVE_TTL_MS):
+                self.command_state.move(self.drive_speed, MOVE_TTL_MS / 1000.0, time.time())
 
         elif key == Qt.Key_S:
             self.current_throttle = 0.0
             self.lbl_speed.setText("0")
+            self.command_state.stop(time.time())
             self.client.stop_sync()
 
         elif key == Qt.Key_A:
@@ -301,17 +364,20 @@ class E2ECollectorWindow(QMainWindow):
             norm = self.current_steering / self.max_steering_angle
             self.lbl_steer.setText(f"{self.current_steering}° ({norm:+.2f})")
             self.client.steer_sync(self.current_steering)
+            self.command_state.steer(self.current_steering, time.time())
 
         elif key == Qt.Key_D:
             self.current_steering = min(35, self.current_steering + 10)
             norm = self.current_steering / self.max_steering_angle
             self.lbl_steer.setText(f"{self.current_steering}° ({norm:+.2f})")
             self.client.steer_sync(self.current_steering)
+            self.command_state.steer(self.current_steering, time.time())
 
         elif key == Qt.Key_X:
             self.current_steering = 0
             self.lbl_steer.setText("0° (0.00)")
             self.client.steer_sync(0)
+            self.command_state.steer(0, time.time())
 
         elif key == Qt.Key_R:
             self._toggle_recording()

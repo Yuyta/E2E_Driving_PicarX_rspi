@@ -65,15 +65,19 @@ class DrivingDataset(Dataset):
         data_dir: Union[str, Path, Sequence[Union[str, Path]]],
         transform=None,
         include_excluded: bool = False,
+        include_motion_mismatch: bool = False,
     ):
         """
         Args:
             data_dir: 単一セッションフォルダ、親フォルダ (data/raw)、またはそのリスト
             transform: torchvision 変換パイプライン
             include_excluded: False の場合、exclude: true のデータ（未承認の介入データ等）を除外
+            include_motion_mismatch: False の場合、指令と実際の動きが食い違ったフレーム
+                （`motion_check.flags` が空でないもの。空転、滑りなど）を除外
         """
         self.session_dirs = resolve_session_dirs(data_dir)
         self.samples: List[Dict[str, Any]] = []
+        self.skipped_motion_mismatch = 0
 
         for s_dir in self.session_dirs:
             labels_file = s_dir / "labels.jsonl"
@@ -91,6 +95,13 @@ class DrivingDataset(Dataset):
                         record.get("exclude", False)
                         or record.get("exclude_from_training", False)
                     ):
+                        continue
+
+                    # 指令と実際の動きが食い違ったフレームは、誤った操作の例になるので学習に使わない
+                    if not include_motion_mismatch and (record.get("motion_check") or {}).get(
+                        "flags"
+                    ):
+                        self.skipped_motion_mismatch += 1
                         continue
 
                     frame_name = record.get("frame", "")
