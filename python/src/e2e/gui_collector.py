@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from PySide6.QtCore import Qt, QThread, Signal, Slot
+from PySide6.QtCore import QEvent, Qt, QThread, QTimer, Signal, Slot
 from PySide6.QtGui import QImage, QKeyEvent, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -38,6 +38,15 @@ from src.picarx_client.client import PicarxClient
 
 # W キーで送る走行指令の期限。キーを押し続けると繰り返し送られる
 MOVE_TTL_MS = 600
+# W を押している間、この間隔で走行指令を送り直す。キーの自動の連打（オートリピート）は、
+# 走りながら A や D を押すと OS が止めてしまうので使わない
+# （2026-11-09 の収集では、そのせいで走行中のフレームが16%だった）
+DRIVE_RESEND_MS = 100
+# A/D を押している間は舵を一定の速さで切り、離すと同じ速さで中央へ戻す。
+# 押し続けると一瞬で最大角になる操作では、舵角が最大か0に偏った（2026-11-09）
+MAX_STEER_DEG = 35
+STEER_RATE_DPS = 60.0
+STEER_TICK_MS = 50
 # 配信のフレームを待つ時間。届かなければ待ち直す
 FRAME_TIMEOUT_SEC = 1.0
 
@@ -137,6 +146,19 @@ class E2ECollectorWindow(QMainWindow):
         self.camera_worker = CameraWorker(self.client)
         self.camera_worker.frame_received.connect(self._on_frame_received)
         self.camera_worker.start()
+
+        self._drive_held = False
+        self.drive_timer = QTimer(self)
+        self.drive_timer.setInterval(DRIVE_RESEND_MS)
+        self.drive_timer.timeout.connect(self._send_drive)
+
+        self._steer_left = False
+        self._steer_right = False
+        self._steer_value = 0.0
+        self.steer_timer = QTimer(self)
+        self.steer_timer.setInterval(STEER_TICK_MS)
+        self.steer_timer.timeout.connect(self._update_steer)
+        self.steer_timer.start()
 
     def _init_ui(self):
         central_widget = QWidget(self)
@@ -257,7 +279,75 @@ class E2ECollectorWindow(QMainWindow):
                 "background-color: #d9534f; color: white; font-weight: bold; padding: 10px;"
             )
 
+    def _send_drive(self) -> None:
+        """W を押している間、前進の指令を送り続ける。Pi が拒否したら送るのをやめる"""
+        if not self._drive_held:
+            return
+        self.current_throttle = 0.5
+        self.lbl_speed.setText(str(self.drive_speed))
+        try:
+            accepted = self.client.move_sync(DriveDirection.FORWARD, self.drive_speed, MOVE_TTL_MS)
+        except Exception as exc:
+            self.lbl_dist.setText(f"MOVE FAILED: {exc}")
+            accepted = False
+        if accepted:
+            self.command_state.move(self.drive_speed, MOVE_TTL_MS / 1000.0, time.time())
+        else:
+            self._release_drive(send_stop=False)
+
+    def _release_drive(self, send_stop: bool = True) -> None:
+        """前進をやめる。W を離した時、S、食い違い、ウィンドウから操作が移った時に呼ぶ"""
+        self._drive_held = False
+        self.drive_timer.stop()
+        self.current_throttle = 0.0
+        self.lbl_speed.setText("0")
+        self.command_state.stop(time.time())
+        if send_stop:
+            try:
+                self.client.stop_sync()
+            except Exception as exc:
+                self.lbl_dist.setText(f"STOP FAILED: {exc}")
+
+    def _update_steer(self) -> None:
+        """押しているキーの向きへ舵を近づける。どちらも押していなければ中央へ戻す"""
+        if self._steer_left and not self._steer_right:
+            target = -MAX_STEER_DEG
+        elif self._steer_right and not self._steer_left:
+            target = MAX_STEER_DEG
+        else:
+            target = 0
+        step = STEER_RATE_DPS * STEER_TICK_MS / 1000.0
+        if self._steer_value < target:
+            self._steer_value = min(target, self._steer_value + step)
+        else:
+            self._steer_value = max(target, self._steer_value - step)
+        angle = round(self._steer_value)
+        if angle != self.current_steering:
+            self._apply_steer(angle)
+
+    def _apply_steer(self, angle: int) -> None:
+        self.current_steering = angle
+        norm = angle / self.max_steering_angle
+        self.lbl_steer.setText(f"{angle}° ({norm:+.2f})")
+        try:
+            self.client.steer_sync(angle)
+        except Exception as exc:
+            self.lbl_dist.setText(f"STEER FAILED: {exc}")
+        self.command_state.steer(angle, time.time())
+
+    def _release_keys(self) -> None:
+        """押しているキーをすべて離したことにする（操作が別のウィンドウへ移った時など）"""
+        self._steer_left = False
+        self._steer_right = False
+        if self._drive_held:
+            self._release_drive()
+
     def _emergency_stop(self):
+        self._steer_left = False
+        self._steer_right = False
+        self._steer_value = 0.0
+        self._drive_held = False
+        self.drive_timer.stop()
         self.current_throttle = 0.0
         self.command_state.stop(time.time())
         self.command_state.steer(0, time.time())
@@ -326,6 +416,9 @@ class E2ECollectorWindow(QMainWindow):
 
     def _on_motion_mismatch(self, flag: str, update: MonitorUpdate) -> None:
         """食い違いが続いた。走行を止め、記憶に残す（ROADMAP の M3）"""
+        # W を押したままでも走り出さない。もう一度押し直すまで止まったまま
+        self._drive_held = False
+        self.drive_timer.stop()
         self.current_throttle = 0.0
         self.command_state.stop(time.time())
         self.lbl_speed.setText("0")
@@ -373,36 +466,26 @@ class E2ECollectorWindow(QMainWindow):
         key = event.key()
 
         if key == Qt.Key_W:
-            self.current_throttle = 0.5
-            self.lbl_speed.setText(str(self.drive_speed))
-            if self.client.move_sync(DriveDirection.FORWARD, self.drive_speed, MOVE_TTL_MS):
-                self.command_state.move(self.drive_speed, MOVE_TTL_MS / 1000.0, time.time())
+            if not event.isAutoRepeat() and not self._drive_held:
+                self._drive_held = True
+                self._send_drive()
+                if self._drive_held:
+                    self.drive_timer.start()
 
         elif key == Qt.Key_S:
-            self.current_throttle = 0.0
-            self.lbl_speed.setText("0")
-            self.command_state.stop(time.time())
-            self.client.stop_sync()
+            self._release_drive()
 
         elif key == Qt.Key_A:
-            self.current_steering = max(-35, self.current_steering - 10)
-            norm = self.current_steering / self.max_steering_angle
-            self.lbl_steer.setText(f"{self.current_steering}° ({norm:+.2f})")
-            self.client.steer_sync(self.current_steering)
-            self.command_state.steer(self.current_steering, time.time())
+            if not event.isAutoRepeat():
+                self._steer_left = True
 
         elif key == Qt.Key_D:
-            self.current_steering = min(35, self.current_steering + 10)
-            norm = self.current_steering / self.max_steering_angle
-            self.lbl_steer.setText(f"{self.current_steering}° ({norm:+.2f})")
-            self.client.steer_sync(self.current_steering)
-            self.command_state.steer(self.current_steering, time.time())
+            if not event.isAutoRepeat():
+                self._steer_right = True
 
         elif key == Qt.Key_X:
-            self.current_steering = 0
-            self.lbl_steer.setText("0° (0.00)")
-            self.client.steer_sync(0)
-            self.command_state.steer(0, time.time())
+            self._steer_value = 0.0
+            self._apply_steer(0)
 
         elif key == Qt.Key_R:
             self._toggle_recording()
@@ -410,7 +493,29 @@ class E2ECollectorWindow(QMainWindow):
         else:
             super().keyPressEvent(event)
 
+    def keyReleaseEvent(self, event: QKeyEvent):
+        key = event.key()
+        if event.isAutoRepeat():
+            return
+        if key == Qt.Key_W:
+            if self._drive_held:
+                self._release_drive()
+        elif key == Qt.Key_A:
+            self._steer_left = False
+        elif key == Qt.Key_D:
+            self._steer_right = False
+        else:
+            super().keyReleaseEvent(event)
+
+    def changeEvent(self, event):
+        # 別のウィンドウへ操作が移るとキーを離したことが届かないので、その時点で離したことにする
+        if event.type() == QEvent.ActivationChange and not self.isActiveWindow():
+            self._release_keys()
+        super().changeEvent(event)
+
     def closeEvent(self, event):
+        self.steer_timer.stop()
+        self._release_keys()
         self.camera_worker.stop()
         super().closeEvent(event)
 
