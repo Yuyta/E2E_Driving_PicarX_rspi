@@ -128,7 +128,7 @@ PC上でカメラ映像をリアルタイム確認しながら手動操縦し、
     - `distance_cm` は超音波の距離。何も捉えていない時は `null`。反射が戻らず遠いと Pi が判断した時は `distance_far` が `true`。
     - `floor` は床センサーの値（左、中央、右）、`battery_v` は電池電圧。どちらも Pi の `/api/status` から、フレームごとに1回読む。読めなかった時は `null`（2026-11-09 から）。
     - `stream_seq` はカメラの常時配信の通し番号。収集はこの配信（約15fps）を使う。番号が飛んでいれば、その間のフレームを取りこぼしている。
-    - `command` はそのフレームの時点で有効な指令（期限を含む）、`motion` はカメラの画像の動きと超音波から推定した実際の動き、`motion_check` は指令との食い違い（§4.7）。食い違いのあるフレームは学習から外す。
+    - `command` はそのフレームの時点で有効な指令（期限を含む）、`motion` はカメラの画像の動きと超音波から推定した実際の動き、`motion_check` は指令との食い違い（§4.7）。食い違いのあるフレームは学習から外す。前進の指令がなく止まっていたフレーム（`command.speed` か `throttle` が 0）も学習から外す。止まっている間の舵角は、その景色でどう曲がるかの手本にならないため（2026-11-10 から。外した数は `metadata.json` の `skipped_stopped`）。
     - 電池電圧と床センサーの値はまだ保存しない（M3 の再収集で追加する）。
 - **食い違いが続いた時**: 同じ食い違いが1秒続くと、走行を止めて画面に表示し、記憶に「走行を止めた」出来事として残す。
 - **収集周期**: `CameraWorker` は約12Hzの設計だが、記録された実測のフレーム間隔は中央値で約1秒（2026-11-03 時点、旧方式）。カメラを常時配信に変えた後（M1）の収集周期は未計測。M3 で 10fps 以上で集め直す。
@@ -406,6 +406,7 @@ PiCarX/
 | 目的 | コマンド (PowerShell) |
 |---|---|
 | **データ収集GUI起動** | `uv run python -m src.e2e.gui_collector` |
+| **収集したセッションの確認** | `uv run python -m src.e2e.dataset.session_report --data_dir data/raw`（fps、走行中の割合、左右と舵角の偏り、食い違いの印、取りこぼし） |
 | **マニフェストの作成と確認** | `uv run python -m src.e2e.dataset.manifest --data_dir data/raw`（確認は `--verify`） |
 | **生データ全結合学習** | `uv run python -m src.e2e.training.train --config configs/train.toml --data_dir data/raw --output_dir models/v006` |
 | **交差検証（1セッションを抜いて評価）** | `uv run python -m src.e2e.training.cross_validate --config configs/train.toml --data_dir data/raw --output data/cv/<名前>.json` |

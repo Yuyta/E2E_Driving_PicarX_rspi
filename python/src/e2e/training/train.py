@@ -277,6 +277,8 @@ def train(data_dir, output_model_dir, params: Optional[Dict[str, Any]] = None) -
             "sessions": provenance.session_records(dataset.source_session_dirs),
             # 指令と実際の動きが食い違ったので学習から外したフレーム
             "skipped_motion_mismatch": dataset.skipped_motion_mismatch,
+            # 前進の指令がなく止まっていたので学習から外したフレーム
+            "skipped_stopped": dataset.skipped_stopped,
         },
         "code": provenance.git_state(),
         "environment": provenance.environment(),

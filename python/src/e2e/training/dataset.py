@@ -46,13 +46,27 @@ def resolve_session_dirs(
         if found:
             return found
         # 再帰的に探索 (data/processed/clean_v1 など深い階層にも対応)
-        recursive_found = sorted(
-            list(dict.fromkeys(lp.parent for lp in p.rglob("labels.jsonl")))
-        )
+        recursive_found = sorted(list(dict.fromkeys(lp.parent for lp in p.rglob("labels.jsonl"))))
         if recursive_found:
             return recursive_found
 
     raise FileNotFoundError(f"No valid session directory with labels.jsonl found in: {p}")
+
+
+def is_stopped(record: Dict[str, Any]) -> bool:
+    """記録から、前進の指令がなく止まっていたと分かるフレームか。分からなければ False
+
+    新しい記録はそのフレームで有効な指令（`command.speed`）、収集の記録は `throttle`、
+    介入の記録は `speed` を持つ。どれもない古い記録は、止まっていたとは判断しない。
+    """
+    command = record.get("command")
+    if isinstance(command, dict) and "speed" in command:
+        return float(command["speed"]) <= 0.0
+    if "throttle" in record:
+        return float(record["throttle"]) <= 0.0
+    if "speed" in record:
+        return float(record["speed"]) <= 0.0
+    return False
 
 
 class DrivingDataset(Dataset):
@@ -66,6 +80,7 @@ class DrivingDataset(Dataset):
         transform=None,
         include_excluded: bool = False,
         include_motion_mismatch: bool = False,
+        include_stopped: bool = False,
     ):
         """
         Args:
@@ -74,10 +89,13 @@ class DrivingDataset(Dataset):
             include_excluded: False の場合、exclude: true のデータ（未承認の介入データ等）を除外
             include_motion_mismatch: False の場合、指令と実際の動きが食い違ったフレーム
                 （`motion_check.flags` が空でないもの。空転、滑りなど）を除外
+            include_stopped: False の場合、前進の指令がないフレーム（`throttle` が 0）を除外。
+                止まっている間の舵角は、その景色でどう曲がるかの手本にならない
         """
         self.session_dirs = resolve_session_dirs(data_dir)
         self.samples: List[Dict[str, Any]] = []
         self.skipped_motion_mismatch = 0
+        self.skipped_stopped = 0
 
         for s_dir in self.session_dirs:
             labels_file = s_dir / "labels.jsonl"
@@ -92,8 +110,7 @@ class DrivingDataset(Dataset):
 
                     # 学習除外フラグの確認 (未承認の介入データや外れ値データをスキップ)
                     if not include_excluded and (
-                        record.get("exclude", False)
-                        or record.get("exclude_from_training", False)
+                        record.get("exclude", False) or record.get("exclude_from_training", False)
                     ):
                         continue
 
@@ -102,6 +119,10 @@ class DrivingDataset(Dataset):
                         "flags"
                     ):
                         self.skipped_motion_mismatch += 1
+                        continue
+
+                    if not include_stopped and is_stopped(record):
+                        self.skipped_stopped += 1
                         continue
 
                     frame_name = record.get("frame", "")
