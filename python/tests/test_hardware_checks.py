@@ -205,3 +205,71 @@ def test_wifi_check_stops_when_the_pi_refuses(no_sleep):
     client = FakeClient([], refuse=True)
     client.reconnect_failures = 0
     assert not m1_check.check_wifi(client, seconds=5.0)
+
+
+# --- M1 の疑似切断 ---
+
+
+def test_netcut_command_uses_the_key_only_when_given():
+    with_key = m1_check.netcut_ssh_command("pi", "/k", 8)
+    assert with_key[-2:] == ["pi", "sudo -n /usr/local/sbin/picarx-netcut 8"]
+    assert ["-i", "/k"] == with_key[with_key.index("-i") : with_key.index("-i") + 2]
+    assert "BatchMode=yes" in with_key
+    assert "-i" not in m1_check.netcut_ssh_command("pi", None, 8)
+
+
+class FakeCutter:
+    def __init__(self, returncode):
+        self.returncode = returncode
+
+    def poll(self):
+        return self.returncode
+
+    def communicate(self, timeout=None):
+        return ("cut tcp/8080 for 8s\nrestored\n", "" if self.returncode == 0 else "denied")
+
+
+class ClockedClient(FakeClient):
+    """指令ごとに時計を進め、疑似切断の開始時刻に届くようにする"""
+
+    def __init__(self, events, clock, cut_at_move=None):
+        super().__init__(events)
+        self.clock = clock
+        self.cut_at_move = cut_at_move
+
+    def move_sync(self, *_args, **_kwargs):
+        self.moves += 1
+        self.clock[0] += 1.0
+        if self.cut_at_move is not None and self.moves >= self.cut_at_move:
+            raise httpx.ReadTimeout("dropped")
+        return True
+
+
+@pytest.fixture
+def clock(monkeypatch, no_sleep):
+    now = [0.0]
+    monkeypatch.setattr(m1_check.time, "monotonic", lambda: now[0])
+    return now
+
+
+def test_simulated_cut_passes_and_reports_the_pi_output(clock, monkeypatch, capsys):
+    started = []
+    monkeypatch.setattr(
+        m1_check.subprocess, "Popen", lambda cmd, **_k: started.append(cmd) or FakeCutter(0)
+    )
+    client = ClockedClient([ttl_stop(30.0)], clock, cut_at_move=4)
+    assert m1_check.check_wifi(client, seconds=30.0, netcut=["ssh", "pi", "cut"])
+    assert started == [["ssh", "pi", "cut"]]
+    out = capsys.readouterr().out
+    assert "Pi: restored" in out
+    assert "遮断の解除を待っています" in out
+
+
+def test_failed_cut_stops_the_car_at_once(clock, monkeypatch, capsys):
+    monkeypatch.setattr(m1_check.subprocess, "Popen", lambda cmd, **_k: FakeCutter(1))
+    client = ClockedClient([], clock)
+    client.reconnect_failures = 0
+    assert not m1_check.check_wifi(client, seconds=30.0, netcut=["ssh", "pi", "cut"])
+    assert client.stops == 1
+    assert client.moves <= 3
+    assert "denied" in capsys.readouterr().out
