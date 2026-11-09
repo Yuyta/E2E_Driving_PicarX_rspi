@@ -216,13 +216,13 @@ v001           | 15     | 32    | 0.0946    | 0.2586     | ±9.1°      | PTH+ON
 ### 2. 実行コマンド (PCのPowerShell)
 ```powershell
 # 通常起動 (2D動的オキュパンシーグリッド地図 ＋ リアルタイムGUIダッシュボード起動)
-uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --speed 35 --min_speed 20
+uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --speed 50 --min_speed 40
 
 # GUIウィンドウを表示せずヘッドレスで走行する場合
 uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --no_gui
 
-# カーブ旋回時・障害物接近時の減速チューニング (最低速度を25、減速開始距離を50cmに変更)
-uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --speed 40 --min_speed 25 --slowdown_dist 50.0
+# カーブ旋回時・障害物接近時の減速チューニング (巡航を60、減速開始距離を50cmに変更。最低速度は40未満にしない)
+uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --speed 60 --min_speed 40 --slowdown_dist 50.0
 
 # 通信ウォッチドッグのタイムアウト時間を調整 (デフォルト: 0.6秒)
 uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --watchdog_timeout 1.0
@@ -233,8 +233,8 @@ uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --stuc
 
 #### オプション説明:
 - `--model` : 推論に使用するONNXモデルのパス（必須）
-- `--speed` : 基本巡航スピード（`0` 〜 `100`、デフォルト: `35`）
-- `--min_speed` : カーブ旋回時・障害物接近時の最低減速スピード（デフォルト: `20`）
+- `--speed` : 基本巡航スピード（`40` 〜 `100`、デフォルト: `50`）
+- `--min_speed` : カーブ旋回時・障害物接近時の最低減速スピード（デフォルト: `40`、40未満はエラー）。35では這うように遅く、30では車輪が回らない
 - `--curve_factor` : 旋回減速感度係数（デフォルト: `1.0`）
 - `--safe_dist` : 減速の計算に使う距離（cm、デフォルト: `15.0`）。停止は Pi が 15cm で行う
 - `--slowdown_dist` : 障害物接近に伴い動的減速を開始する距離（cm、デフォルト: `40.0`）

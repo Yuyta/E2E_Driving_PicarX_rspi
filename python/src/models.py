@@ -7,6 +7,14 @@ from pydantic import BaseModel, Field
 MIN_TTL_MS = 50
 MAX_TTL_MS = 1000
 
+# 車が確実に進む最低の速度（前進）。Pi は速度をそのまま PWM のデューティ比（%）にするので、
+# 低い速度ではモーターが回らない。2026-11-09 の計測（`src.e2e.speed_check`、電池 8.1V）:
+# 30 は動かない。35 は約3cm/s で這う。40 は止まった状態から約10cm/s、走行中に落としても約7cm/s。
+# 減速の下限、動きの判定、これより遅い指定の引き上げに使う。後退は未計測
+MIN_MOVING_SPEED = 40
+# 普段の走行速度。M1 の障害物と段差の停止、通信断での停止をこの速度で確認した
+DRIVE_SPEED = 50
+
 
 class DriveDirection(str, Enum):
     FORWARD = "forward"
@@ -16,7 +24,12 @@ class DriveDirection(str, Enum):
 
 class MoveCommand(BaseModel):
     direction: DriveDirection
-    speed: int = Field(default=30, ge=0, le=100, description="走行速度 (0-100)")
+    speed: int = Field(
+        default=DRIVE_SPEED,
+        ge=0,
+        le=100,
+        description=f"走行速度 (0-100)。{MIN_MOVING_SPEED} 未満では車輪が回らない",
+    )
     ttl_ms: int = Field(
         default=500,
         ge=MIN_TTL_MS,

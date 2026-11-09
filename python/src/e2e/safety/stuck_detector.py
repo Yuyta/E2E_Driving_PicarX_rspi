@@ -11,6 +11,8 @@ from typing import Deque, List, Tuple
 import cv2
 import numpy as np
 
+from src.models import DRIVE_SPEED, MIN_MOVING_SPEED
+
 
 class StuckDetector:
     """視覚的変化量に基づくスタック（引っかかり・空転）検知および脱出制御器"""
@@ -20,7 +22,7 @@ class StuckDetector:
         history_frames: int = 8,
         min_motion_threshold: float = 4.0,
         stuck_duration_frames: int = 15,
-        min_moving_speed: int = 15,
+        min_moving_speed: int = MIN_MOVING_SPEED,
     ):
         """
         Args:
@@ -51,9 +53,7 @@ class StuckDetector:
             return 0.0
 
         # 高速化のために 80x60 に縮小してグレースケール化
-        small_gray = cv2.cvtColor(
-            cv2.resize(current_frame_bgr, (80, 60)), cv2.COLOR_BGR2GRAY
-        )
+        small_gray = cv2.cvtColor(cv2.resize(current_frame_bgr, (80, 60)), cv2.COLOR_BGR2GRAY)
 
         self.frame_buffer.append(small_gray)
 
@@ -114,7 +114,7 @@ class StuckDetector:
     def is_stuck(self) -> bool:
         return self.is_stuck_flag
 
-    def get_unstuck_plan(self, escape_speed: int = 35) -> List[Tuple[str, int, int, int]]:
+    def get_unstuck_plan(self, escape_speed: int = DRIVE_SPEED) -> List[Tuple[str, int, int, int]]:
         """
         引っかかり・スタックから脱出するための複合アクションシーケンスを生成。
         1. 直前軌跡の逆再生バック (障害物から離れる)
@@ -125,7 +125,7 @@ class StuckDetector:
             List of (action_type, steer_angle, speed, duration_ms)
             action_type: "reverse" | "forward"
         """
-        spd = max(20, min(100, int(escape_speed)))
+        spd = max(MIN_MOVING_SPEED, min(100, int(escape_speed)))
 
         plan: List[Tuple[str, int, int, int]] = [
             # 1. まずしっかり直線〜緩やかにバック (1000ms)

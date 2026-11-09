@@ -23,7 +23,7 @@ from typing import List, Optional, Sequence
 
 import httpx
 
-from src.models import DriveDirection, SafetyEvent
+from src.models import DRIVE_SPEED, MIN_MOVING_SPEED, DriveDirection, SafetyEvent
 from src.picarx_client.client import PicarxClient
 
 CAMERA_TARGET_FPS = 10.0
@@ -33,7 +33,7 @@ HAZARD_REASONS = ("obstacle", "cliff")
 APPROACH_TTL_MS = 400
 APPROACH_PERIOD_SEC = 0.07
 APPROACH_SETTLE_SEC = 0.5
-TTL_TEST_SPEED = 20
+TTL_TEST_SPEED = DRIVE_SPEED
 TTL_TEST_MS = 300
 # TTL に加え、反射ループ1周と状態取得の遅れを許容する
 TTL_POLL_TIMEOUT_SEC = 2.0
@@ -171,7 +171,7 @@ def check_approach(client: PicarxClient, speed: int, seconds: float) -> bool:
     return refused
 
 
-WIFI_TEST_SPEED = 20
+WIFI_TEST_SPEED = DRIVE_SPEED
 WIFI_RECONNECT_TIMEOUT_SEC = 180.0
 
 
@@ -328,7 +328,7 @@ def main() -> int:
         "--speed",
         type=int,
         default=WIFI_TEST_SPEED,
-        help="前進の速度。低すぎると実機では進まない（M1 の記録では 50 前後で進む）",
+        help=f"前進の速度。{MIN_MOVING_SPEED} 未満では車輪が回らず、止まる様子を確かめられない",
     )
     wifi.add_argument(
         "--simulate",

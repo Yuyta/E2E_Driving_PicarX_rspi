@@ -6,6 +6,7 @@ import httpx
 
 from src.config import settings
 from src.models import (
+    DRIVE_SPEED,
     MAX_TTL_MS,
     MIN_TTL_MS,
     CameraSnapshotResponse,
@@ -53,7 +54,9 @@ class PicarxClient:
                 self._sync_client = httpx.Client(timeout=self.timeout, headers=self._headers)
             return self._sync_client
 
-    async def move(self, direction: DriveDirection, speed: int = 30, ttl_ms: int = 500) -> bool:
+    async def move(
+        self, direction: DriveDirection, speed: int = DRIVE_SPEED, ttl_ms: int = 500
+    ) -> bool:
         """走行指示を送信する。`ttl_ms` 以内に次の指示がなければ Pi が停止する。"""
         cmd = MoveCommand(direction=direction, speed=speed, ttl_ms=ttl_ms)
         async with httpx.AsyncClient(timeout=self.timeout, headers=self._headers) as client:
@@ -178,7 +181,9 @@ class PicarxClient:
 
     # --- 同期呼び出し用ラッパー (QThread / CLI / 同期コンテキストで再利用) ---
 
-    def move_sync(self, direction: DriveDirection, speed: int = 30, ttl_ms: int = 500) -> bool:
+    def move_sync(
+        self, direction: DriveDirection, speed: int = DRIVE_SPEED, ttl_ms: int = 500
+    ) -> bool:
         """走行指示を送信する。Pi に拒否された時は `False` を返す。"""
         cmd = MoveCommand(direction=direction, speed=speed, ttl_ms=ttl_ms)
         resp = self._sync().post(f"{self.base_url}/api/drive/move", json=cmd.model_dump())

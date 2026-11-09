@@ -9,6 +9,8 @@ from collections import deque
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
+from src.models import DRIVE_SPEED, MIN_MOVING_SPEED
+
 # Pi の `/api/drive/move` が受け付ける最短の TTL
 MIN_COMMAND_MS = 50
 
@@ -16,6 +18,7 @@ MIN_COMMAND_MS = 50
 @dataclass
 class TrajectoryPoint:
     """走行軌跡の1ステップ"""
+
     speed: int
     steer_angle: int
     duration_ms: int
@@ -29,7 +32,7 @@ class TrajectoryTracker:
         self,
         max_history_points: int = 100,
         default_reverse_duration_ms: int = 1200,
-        reverse_speed: int = 35,
+        reverse_speed: int = DRIVE_SPEED,
     ):
         """
         Args:
@@ -39,7 +42,7 @@ class TrajectoryTracker:
         """
         self.max_history_points = max_history_points
         self.default_reverse_duration_ms = max(500, int(default_reverse_duration_ms))
-        self.reverse_speed = max(10, min(100, int(reverse_speed)))
+        self.reverse_speed = max(MIN_MOVING_SPEED, min(100, int(reverse_speed)))
         self.history: deque[TrajectoryPoint] = deque(maxlen=max_history_points)
 
     def record(

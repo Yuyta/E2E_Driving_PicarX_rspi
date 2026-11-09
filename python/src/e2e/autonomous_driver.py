@@ -26,7 +26,7 @@ import httpx
 import numpy as np
 import onnxruntime as ort
 
-from src.models import DriveDirection
+from src.models import DRIVE_SPEED, MIN_MOVING_SPEED, DriveDirection
 from src.picarx_client.client import PicarxClient
 
 try:
@@ -72,8 +72,8 @@ class RemoteAutonomousDriver:
     def __init__(
         self,
         model_path,
-        speed=35,
-        min_speed=20,
+        speed=DRIVE_SPEED,
+        min_speed=MIN_MOVING_SPEED,
         curve_factor=1.0,
         safe_distance=15.0,
         slowdown_distance=40.0,
@@ -140,7 +140,8 @@ class RemoteAutonomousDriver:
         self.trajectory_tracker = TrajectoryTracker(
             max_history_points=100,
             default_reverse_duration_ms=reverse_duration_ms,
-            reverse_speed=min_speed,
+            # 後退で動く最低の速度は未計測なので、巡航の速度で下がる
+            reverse_speed=speed,
         )
 
         # Phase 3.6: スタック（引っかかり・車輪空転）検知モジュール
@@ -256,9 +257,7 @@ class RemoteAutonomousDriver:
             return False
 
         # 後退後の方向転換 (Turn Away)。危険があれば Pi が止める
-        turn_steer, turn_spd, turn_dur = self.trajectory_tracker.get_escape_turn(
-            last_cliff_sensors
-        )
+        turn_steer, turn_spd, turn_dur = self.trajectory_tracker.get_escape_turn(last_cliff_sensors)
         print(
             f"[ESCAPE TURN] Turning away from hazard (Steer: {turn_steer:+02d}°, {turn_dur}ms)..."
         )
@@ -500,9 +499,7 @@ class RemoteAutonomousDriver:
                     if obstacle_cycles >= OBSTACLE_ESCAPE_CYCLES:
                         if not self._reverse_refused:
                             print("\n[OBSTACLE DEAD-END] Executing reverse escape.")
-                        self.execute_breadcrumb_reverse(
-                            target_duration_ms=self.reverse_duration_ms
-                        )
+                        self.execute_breadcrumb_reverse(target_duration_ms=self.reverse_duration_ms)
                         obstacle_cycles = 0
                     continue
 
@@ -522,9 +519,7 @@ class RemoteAutonomousDriver:
 
                 # Phase 3.6: 旧スタック検知 & 自動脱出（食い違いの検出を無効にした時だけ）
                 if self.enable_stuck_detection and not self.enable_motion_check:
-                    if self.stuck_detector.update(
-                        frame, motor_speed=self.speed_limiter.min_speed
-                    ):
+                    if self.stuck_detector.update(frame, motor_speed=self.speed_limiter.min_speed):
                         self.execute_unstuck()
                         continue
 
@@ -641,12 +636,13 @@ def main():
     parser = argparse.ArgumentParser(
         description="Autonomous Driving with ONNX via Rust API (Indoor Home Free-Space)"
     )
+    parser.add_argument("--model", type=str, required=True, help="Path to ONNX model")
+    parser.add_argument("--speed", type=int, default=DRIVE_SPEED, help="Base driving speed (0-100)")
     parser.add_argument(
-        "--model", type=str, required=True, help="Path to ONNX model"
-    )
-    parser.add_argument("--speed", type=int, default=35, help="Base driving speed (0-100)")
-    parser.add_argument(
-        "--min_speed", type=int, default=20, help="Minimum curve/slowdown speed (0-100)"
+        "--min_speed",
+        type=int,
+        default=MIN_MOVING_SPEED,
+        help=f"Minimum curve/slowdown speed ({MIN_MOVING_SPEED}-100; slower wheels do not turn)",
     )
     parser.add_argument(
         "--curve_factor",
@@ -734,6 +730,10 @@ def main():
     )
 
     args = parser.parse_args()
+    if args.min_speed < MIN_MOVING_SPEED:
+        parser.error(
+            f"--min_speed は {MIN_MOVING_SPEED} 以上にしてください（それ未満では車輪が回らない）"
+        )
     driver = RemoteAutonomousDriver(
         model_path=args.model,
         speed=args.speed,

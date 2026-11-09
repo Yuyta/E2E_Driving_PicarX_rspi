@@ -14,6 +14,8 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+from src.models import MIN_MOVING_SPEED
+
 try:
     from .estimator import MotionSample
 except ImportError:
@@ -52,7 +54,8 @@ class Command:
 class CheckerConfig:
     """しきい値は提案値。床に印を付けたコースとわざと空転させる試験で校正する"""
 
-    min_check_speed: int = 20  # これより遅い指令では、動かなくても食い違いとしない
+    # これより遅い指令では、動かなくても食い違いとしない（車輪が回らない速度なので）
+    min_check_speed: int = MIN_MOVING_SPEED
     settle_s: float = 0.5  # 指令が変わってから判定するまでの時間（加速と惰性の分）
     min_turn_steer_deg: float = 15.0  # これ以上の舵角で曲がる向きを確かめる
     straight_steer_deg: float = 3.0  # これ以下の舵角は直進とみなす

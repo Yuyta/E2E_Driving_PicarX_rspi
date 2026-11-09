@@ -33,7 +33,7 @@ from src.e2e.motion.monitor import (
     describe,
     record_motion_event,
 )
-from src.models import DriveDirection
+from src.models import DRIVE_SPEED, MIN_MOVING_SPEED, DriveDirection
 from src.picarx_client.client import PicarxClient
 
 # W キーで送る走行指令の期限。キーを押し続けると繰り返し送られる
@@ -101,7 +101,7 @@ class E2ECollectorWindow(QMainWindow):
         self.current_steering = 0  # -35 ~ +35 度
         self.current_throttle = 0.0  # 0.0 ~ 1.0
         self.max_steering_angle = 35.0
-        self.drive_speed = 40
+        self.drive_speed = DRIVE_SPEED
 
         # 指令と実際の動きの食い違いの検出（ROADMAP の M3）
         self.command_state = CommandState(time.time())
@@ -190,8 +190,8 @@ class E2ECollectorWindow(QMainWindow):
         speed_layout = QHBoxLayout(speed_group)
         speed_layout.addWidget(QLabel("Speed (0-100):"))
         self.spin_speed = QSpinBox()
-        self.spin_speed.setRange(20, 100)
-        self.spin_speed.setValue(40)
+        self.spin_speed.setRange(MIN_MOVING_SPEED, 100)
+        self.spin_speed.setValue(DRIVE_SPEED)
         self.spin_speed.valueChanged.connect(self._on_speed_changed)
         speed_layout.addWidget(self.spin_speed)
         right_layout.addWidget(speed_group)
@@ -277,9 +277,7 @@ class E2ECollectorWindow(QMainWindow):
 
         update = None
         if img is not None:
-            update = self.motion_monitor.update(
-                img, now, distance_cm, self.command_state.at(now)
-            )
+            update = self.motion_monitor.update(img, now, distance_cm, self.command_state.at(now))
             if update is not None:
                 self._show_motion(update)
 

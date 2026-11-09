@@ -120,7 +120,7 @@ PC は使う時だけ起動し、資源にも余裕がないので、常駐す�
 
 | 用途 | 要求 | 応答 |
 |---|---|---|
-| 走行 | `POST /api/drive/move` `{"direction":"forward","speed":30,"ttl_ms":500}` | `{"status":"ok"}` |
+| 走行 | `POST /api/drive/move` `{"direction":"forward","speed":50,"ttl_ms":500}` | `{"status":"ok"}` |
 | 緊急停止 | `POST /api/drive/emergency_stop`、`POST /api/drive/emergency_stop/reset` | `{"status":"ok"}` |
 | 距離 | `GET /api/sensor/ultrasonic` | `{"distance_cm":35.4,"age_ms":12}`。不明な時は 503 |
 | 発話 | `POST /api/audio/speak` `{"text":"..."}` | `{"status":"ok"}` |
@@ -147,7 +147,7 @@ GET /api/status
 
 ```json
 POST /api/drive/command
-{"speed": 30, "steer": 5, "ttl_ms": 300}
+{"speed": 50, "steer": 5, "ttl_ms": 300}
 ```
 
 ---

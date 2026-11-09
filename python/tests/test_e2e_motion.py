@@ -7,7 +7,7 @@ import cv2
 import numpy as np
 import pytest
 
-from src.e2e.motion.analyze import analyze_session, command_from_record
+from src.e2e.motion.analyze import LEGACY_SPEED, analyze_session, command_from_record
 from src.e2e.motion.checker import (
     NO_MOTION,
     TURN_MISMATCH,
@@ -144,27 +144,27 @@ STILL = dict(edge_flow_px_s=0.5, image_moving=False, expansion_rate=0.0)
 
 
 def test_moving_as_commanded_is_ok():
-    result = MotionChecker().check(Command(40, 0, since_s=2.0), sample())
+    result = MotionChecker().check(Command(60, 0, since_s=2.0), sample())
     assert result.flags == []
     assert result.unknown is None
 
 
 def test_wheels_spinning_without_motion_is_flagged():
-    result = MotionChecker().check(Command(40, 0, since_s=2.0), sample(**STILL))
+    result = MotionChecker().check(Command(60, 0, since_s=2.0), sample(**STILL))
     assert result.flags == [NO_MOTION]
 
 
 def test_approaching_wall_without_texture_is_not_flagged():
     # 画像はほとんど動かないが、超音波で近づいているのが分かる
     result = MotionChecker().check(
-        Command(40, 0, since_s=2.0), sample(**STILL, approach_cm_s=12.0)
+        Command(60, 0, since_s=2.0), sample(**STILL, approach_cm_s=12.0)
     )
     assert result.flags == []
 
 
 def test_no_texture_and_still_distance_is_flagged():
     result = MotionChecker().check(
-        Command(40, 0, since_s=2.0),
+        Command(60, 0, since_s=2.0),
         sample(image_valid=False, image_reason="few_features", approach_cm_s=0.3),
     )
     assert result.flags == [NO_MOTION]
@@ -172,14 +172,14 @@ def test_no_texture_and_still_distance_is_flagged():
 
 def test_no_texture_and_no_distance_is_unknown():
     result = MotionChecker().check(
-        Command(40, 0, since_s=2.0), sample(image_valid=False, image_reason="few_features")
+        Command(60, 0, since_s=2.0), sample(image_valid=False, image_reason="few_features")
     )
     assert result.flags == []
     assert result.unknown == "few_features"
 
 
 def test_right_steering_but_turning_left_is_flagged():
-    result = MotionChecker().check(Command(40, 30, since_s=2.0), sample(yaw_rate_dps=-20.0))
+    result = MotionChecker().check(Command(60, 30, since_s=2.0), sample(yaw_rate_dps=-20.0))
     assert result.flags == [TURN_MISMATCH]
 
 
@@ -190,19 +190,19 @@ def test_reversing_flips_the_expected_turn():
 
 
 def test_turning_while_steering_straight_is_flagged():
-    result = MotionChecker().check(Command(40, 0, since_s=2.0), sample(yaw_rate_dps=25.0))
+    result = MotionChecker().check(Command(60, 0, since_s=2.0), sample(yaw_rate_dps=25.0))
     assert result.flags == [TURN_MISMATCH]
 
 
 def test_calibrated_turn_compares_the_amount():
     config = CheckerConfig(speed_cm_s_per_unit=0.5, wheelbase_cm=10.0)
     checker = MotionChecker(config)
-    expected = checker.expected_yaw_rate(Command(40, 20, since_s=2.0))
+    expected = checker.expected_yaw_rate(Command(60, 20, since_s=2.0))
     assert expected > 0
 
-    ok = checker.check(Command(40, 20, since_s=2.0), sample(yaw_rate_dps=expected * 1.2))
+    ok = checker.check(Command(60, 20, since_s=2.0), sample(yaw_rate_dps=expected * 1.2))
     assert ok.flags == []
-    slipping = checker.check(Command(40, 20, since_s=2.0), sample(yaw_rate_dps=expected * 0.2))
+    slipping = checker.check(Command(60, 20, since_s=2.0), sample(yaw_rate_dps=expected * 0.2))
     assert slipping.flags == [TURN_MISMATCH]
 
 
@@ -224,14 +224,14 @@ def test_camera_pan_is_not_judged():
 
 
 def test_just_after_a_command_change_is_not_judged():
-    result = MotionChecker().check(Command(40, 0, since_s=0.2), sample(**STILL))
+    result = MotionChecker().check(Command(60, 0, since_s=0.2), sample(**STILL))
     assert result.flags == []
     assert result.unknown == "settling"
 
 
 def test_mismatch_is_sustained_after_the_configured_time():
     checker = MotionChecker(CheckerConfig(sustain_s=1.0))
-    command = Command(40, 0, since_s=2.0)
+    command = Command(60, 0, since_s=2.0)
     assert checker.check(command, sample(**STILL, timestamp=10.0)).sustained is None
     assert checker.check(command, sample(**STILL, timestamp=10.6)).sustained is None
     assert checker.check(command, sample(**STILL, timestamp=11.1)).sustained == NO_MOTION
@@ -285,14 +285,14 @@ def test_monitor_reports_a_sustained_mismatch_once():
         config=CheckerConfig(sustain_s=0.6, settle_s=0.0),
         on_sustained=lambda flag, update: reported.append(flag),
     )
-    command = Command(40, 0, since_s=5.0)
+    command = Command(60, 0, since_s=5.0)
     frame = view()
     updates = [monitor.update(frame, t * 0.1, None, command) for t in range(20)]
 
     assert reported == [NO_MOTION]
     record = [u for u in updates if u is not None][-1].to_record()
     assert record["motion_check"]["flags"] == [NO_MOTION]
-    assert record["command"]["speed"] == 40
+    assert record["command"]["speed"] == 60
     assert json.dumps(record)  # 記録に書ける
 
 
@@ -332,12 +332,12 @@ def test_command_from_record_handles_new_and_legacy_records():
         -10.0,
         False,
     )
-    assert command_from_record({"steering": 0.5, "throttle": 0.5}) == (40, 17.5, True)
+    assert command_from_record({"steering": 0.5, "throttle": 0.5}) == (LEGACY_SPEED, 17.5, True)
     assert command_from_record({"steering": 0.0, "throttle": 0.0})[0] == 0
 
 
 def test_analyze_session_counts_mismatches(tmp_path: Path):
-    stopped = {"command": {"speed": 40, "steering_deg": 0, "since_s": 2.0}}
+    stopped = {"command": {"speed": 60, "steering_deg": 0, "since_s": 2.0}}
     session = tmp_path / "s1"
     (session / "images").mkdir(parents=True)
     with open(session / "labels.jsonl", "w", encoding="utf-8") as f:

@@ -10,7 +10,7 @@ max_distance_cm = 150.0
 max_approach_cm_s = 100.0
 
 [checker]
-min_check_speed = 20
+min_check_speed = 40      # 車が確実に進む最低の速度（src/models.py の MIN_MOVING_SPEED）
 settle_s = 0.5
 min_turn_steer_deg = 15.0
 straight_steer_deg = 3.0

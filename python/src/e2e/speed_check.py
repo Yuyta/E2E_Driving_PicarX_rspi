@@ -22,7 +22,7 @@ from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
 import httpx
 
-from src.models import DriveDirection
+from src.models import DRIVE_SPEED, DriveDirection
 from src.picarx_client.client import PicarxClient
 
 OUTPUT_DIR = Path("data/m3_checks")
@@ -32,7 +32,7 @@ CONTROL_TIMEOUT_SEC = 1.0
 
 TRIAL_SEC = 1.5  # その速度で走らせる時間
 SETTLE_SEC = 1.0  # 次の試行の前に、完全に止まるまで待つ時間
-ROLL_FROM_SPEED = 50  # 走行中の試験で、先に走らせる速度（M1 で動くと分かっている値）
+ROLL_FROM_SPEED = DRIVE_SPEED  # 走行中の試験で、先に走らせる速度（動くと分かっている値）
 ROLL_FROM_SEC = 1.5  # 止まった状態から速度50でも、動き出しに約1秒かかる（2026-11-09 実測）
 ROLL_SKIP_SEC = 0.5  # 速度を落とした直後は惰性で進むので、この時間は速さの計算に使わない
 # 壁に近づくと Pi が 15cm で止める。1回の試行で進む分の余裕を残し、これより近ければ置き直す

@@ -292,7 +292,7 @@ PiCar-X には車輪の回転数を測るセンサーがないので、カメラ
   - 特徴点が12個未満、または追跡できない時は「不明」
   - PC で1フレーム約1.3ms
 - **食い違いの判定 (`motion/checker.py`)**: 指令が変わってから0.5秒は判定しない。カメラを動かしている間も判定しない。
-  - `no_motion`: 速度20以上の指令なのに、画像が動かず、超音波の距離も変わらない（超音波が使えなければ画像だけで判断）。画像が不明で超音波も使えなければ不明
+  - `no_motion`: 速度40（`MIN_MOVING_SPEED`。車が確実に進む最低の速度）以上の指令なのに、画像が動かず、超音波の距離も変わらない（超音波が使えなければ画像だけで判断）。画像が不明で超音波も使えなければ不明
   - `turn_mismatch`: 舵角15°以上で逆向きに毎秒8°より速く曲がった。舵角3°以下で毎秒15°より速く曲がった。後退では向きを反転して比べる。速度と軸距を校正した後は、自転車モデルで想定した量と比べ、0.5〜2倍の外なら食い違い
   - `uncommanded_motion`: 停止中に、特徴点の60%以上がそろって動いた（景色全体が動いた）。超音波の距離が変わらなければカメラだけが動いたとみなして不明にする
   - 同じ食い違いが1秒続くと「続いている」とする
@@ -408,7 +408,7 @@ PiCarX/
 | **クリーンデータでの再学習** | `uv run python -m src.e2e.training.train --data_dir data/processed/clean_v2 --output_dir models/v005 --epochs 25` |
 | **モデルオフライン評価** | `uv run python -m src.e2e.evaluation.evaluate --data_dir data/raw --model_path models/v004/best_model.pth` |
 | **MLOps レジストリ確認** | `uv run python -m src.e2e.registry.compare` |
-| **実機自律走行** | `uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --speed 35` |
+| **実機自律走行** | `uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --speed 50` |
 | **動きの実機計測** | `uv run python -m src.e2e.m3_check run --scenario still`（走る場面は `--i-understand-the-car-will-move`） |
 | **記録の動きの解析** | `uv run python -m src.e2e.motion.analyze --data_dir data/raw/<session_id>` |
 | **介入イベント一覧確認** | `uv run python -m src.e2e.dataset.disengagement_manager --list` |

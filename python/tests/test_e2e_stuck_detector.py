@@ -15,7 +15,7 @@ def test_stuck_detector_normal_moving():
     for i in range(10):
         # フレームごとに輝度が変化する画像
         frame = np.full((120, 160, 3), (i * 25) % 256, dtype=np.uint8)
-        is_stuck = detector.update(frame, motor_speed=30)
+        is_stuck = detector.update(frame, motor_speed=60)
         assert not is_stuck
     assert not detector.is_stuck
 
@@ -48,14 +48,14 @@ def test_stuck_detector_trigger_when_stuck():
 
     # 最初の数フレームはバッファ充填中
     for _ in range(3):
-        assert not detector.update(static_frame, motor_speed=30)
+        assert not detector.update(static_frame, motor_speed=60)
 
     # バッファ充填後、同一画像（動きゼロ）が4フレーム継続
-    assert not detector.update(static_frame, motor_speed=30)  # 1フレーム目
-    assert not detector.update(static_frame, motor_speed=30)  # 2フレーム目
-    assert not detector.update(static_frame, motor_speed=30)  # 3フレーム目
+    assert not detector.update(static_frame, motor_speed=60)  # 1フレーム目
+    assert not detector.update(static_frame, motor_speed=60)  # 2フレーム目
+    assert not detector.update(static_frame, motor_speed=60)  # 3フレーム目
     # 4フレーム目でスタック確定
-    assert detector.update(static_frame, motor_speed=30)
+    assert detector.update(static_frame, motor_speed=60)
     assert detector.is_stuck
 
     # リセットの確認
@@ -66,12 +66,12 @@ def test_stuck_detector_trigger_when_stuck():
 
 def test_unstuck_plan_generation():
     detector = StuckDetector()
-    plan = detector.get_unstuck_plan(escape_speed=30)
+    plan = detector.get_unstuck_plan(escape_speed=60)
 
     assert len(plan) >= 4
     # 最初のステップは後退（reverse）であること
     assert plan[0][0] == "reverse"
-    assert plan[0][2] == 30  # speed
+    assert plan[0][2] == 60  # speed
 
     # 途中に左右の操舵（forward with steer != 0）が含まれること
     actions = [p[0] for p in plan]
