@@ -4,12 +4,12 @@ Agentic AIのPicarxClientおよびGUIコンポーネントを共通基盤とし�
 カメラ映像を見ながらキーボード操縦・データセット記録を行う。
 """
 
-import base64
 import json
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from PySide6.QtCore import Qt, QThread, Signal, Slot
 from PySide6.QtGui import QImage, QKeyEvent, QPixmap
@@ -33,11 +33,13 @@ from src.e2e.motion.monitor import (
     describe,
     record_motion_event,
 )
-from src.models import DRIVE_SPEED, MIN_MOVING_SPEED, DriveDirection
+from src.models import DRIVE_SPEED, MIN_MOVING_SPEED, DriveDirection, RobotStatus
 from src.picarx_client.client import PicarxClient
 
 # W キーで送る走行指令の期限。キーを押し続けると繰り返し送られる
 MOVE_TTL_MS = 600
+# 配信のフレームを待つ時間。届かなければ待ち直す
+FRAME_TIMEOUT_SEC = 1.0
 
 # OpenCV (保存時のフォーマット変換・リサイズ用)
 try:
@@ -48,10 +50,29 @@ except ImportError:
     np = None
 
 
-class CameraWorker(QThread):
-    """PicarxClientを利用してカメラ画像とセンサー値をバックグラウンドで定期取得するワーカースレッド"""
+def sensor_fields(status: Optional[RobotStatus]) -> dict:
+    """1フレーム分のセンサー値。状態が読めなかった時は値を None にする"""
+    if status is None:
+        return {"distance_cm": None, "distance_far": None, "floor": None, "battery_v": None}
+    sensors = status.sensors
+    distance = sensors.distance
+    cm = None if distance.far or distance.cm is None else round(distance.cm, 1)
+    return {
+        # 何も捉えていない時（反射が戻らず遠い時を含む）は None
+        "distance_cm": cm,
+        "distance_far": distance.far,
+        "floor": sensors.floor.values,
+        "battery_v": sensors.battery.voltage,
+    }
 
-    frame_received = Signal(bytes, float)
+
+class CameraWorker(QThread):
+    """カメラの常時配信（MJPEG、約15fps）を受け、フレームごとに Pi の状態を1回読む。
+
+    以前は静止画と超音波を毎回別々に取りに行っていて、10fps に届かなかった（M3）。
+    """
+
+    frame_received = Signal(bytes, int, object)  # JPEG、配信の通し番号、RobotStatus か None
 
     def __init__(self, client: PicarxClient):
         super().__init__()
@@ -59,28 +80,22 @@ class CameraWorker(QThread):
         self.running = True
 
     def run(self):
-        while self.running:
-            img_bytes = None
-            distance = 999.0
-
-            # 1. センサー値取得 (PicarxClient再利用)
-            try:
-                distance = self.client.get_ultrasonic_sync()
-            except Exception:
-                pass
-
-            # 2. カメラ画像取得 (PicarxClient再利用)
-            try:
-                snapshot = self.client.get_camera_snapshot_sync()
-                if snapshot and snapshot.image_base64:
-                    img_bytes = base64.b64decode(snapshot.image_base64)
-            except Exception:
-                pass
-
-            if img_bytes is not None and self.running:
-                self.frame_received.emit(img_bytes, distance)
-
-            time.sleep(0.08)  # 約12Hz
+        stream = self.client.open_camera_stream().start()
+        last_seq = 0
+        try:
+            while self.running:
+                frame = stream.wait_for_frame(last_seq, timeout=FRAME_TIMEOUT_SEC)
+                if frame is None:
+                    continue
+                last_seq = frame.seq
+                try:
+                    status = self.client.get_status_sync()
+                except Exception:
+                    status = None
+                if self.running:
+                    self.frame_received.emit(frame.jpeg, frame.seq, status)
+        finally:
+            stream.stop()
 
     def stop(self):
         self.running = False
@@ -98,6 +113,7 @@ class E2ECollectorWindow(QMainWindow):
 
         self.is_recording = False
         self.frame_count = 0
+        self._frame_times: list = []
         self.current_steering = 0  # -35 ~ +35 度
         self.current_throttle = 0.0  # 0.0 ~ 1.0
         self.max_steering_angle = 35.0
@@ -260,12 +276,16 @@ class E2ECollectorWindow(QMainWindow):
         except Exception as exc:
             self.lbl_dist.setText(f"E-STOP RESET FAILED: {exc}")
 
-    @Slot(bytes, float)
-    def _on_frame_received(self, img_bytes: bytes, distance: float):
+    @Slot(bytes, int, object)
+    def _on_frame_received(self, img_bytes: bytes, seq: int, status: Optional[RobotStatus]):
         now = time.time()
-        distance_cm = distance if distance < 900.0 else None
+        sensors = sensor_fields(status)
+        distance_cm = sensors["distance_cm"]
         if distance_cm is not None:
             self.lbl_dist.setText(f"{distance_cm:.1f} cm")
+        elif sensors["distance_far"]:
+            self.lbl_dist.setText("far")
+        self._update_rate(now)
 
         qimg = QImage()
         if qimg.loadFromData(img_bytes, "JPEG"):
@@ -282,7 +302,13 @@ class E2ECollectorWindow(QMainWindow):
                 self._show_motion(update)
 
         if self.is_recording:
-            self._save_sample(img_bytes, img, now, distance_cm, update)
+            self._save_sample(img_bytes, img, now, seq, sensors, update)
+
+    def _update_rate(self, now: float) -> None:
+        """直近1秒に届いたフレームの数を表示する（10fps 以上で集める。M3）"""
+        self._frame_times = [t for t in self._frame_times if now - t < 1.0]
+        self._frame_times.append(now)
+        self.setWindowTitle(f"PiCar-X E2E Data Collector - {len(self._frame_times)} fps")
 
     def _show_motion(self, update: MonitorUpdate) -> None:
         check = update.check
@@ -310,7 +336,7 @@ class E2ECollectorWindow(QMainWindow):
         _, summary = record_motion_event(flag, update)
         print(f"[MOTION MISMATCH] {summary} {update.check.details}")
 
-    def _save_sample(self, img_bytes, img, now, distance_cm, update):
+    def _save_sample(self, img_bytes, img, now, seq, sensors, update):
         filename = f"frame_{self.frame_count:06d}.jpg"
         filepath = self.images_dir / filename
 
@@ -329,7 +355,8 @@ class E2ECollectorWindow(QMainWindow):
             "steering": round(steering_norm, 4),
             # 指令の期限が切れて止まった後は 0 にする（LRN-6）
             "throttle": 0.5 if command.speed > 0 else 0.0,
-            "distance_cm": None if distance_cm is None else round(distance_cm, 1),
+            "stream_seq": seq,
+            **sensors,
         }
         if update is not None:
             record.update(update.to_record())
