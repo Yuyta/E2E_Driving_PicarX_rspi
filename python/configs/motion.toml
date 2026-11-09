@@ -5,7 +5,7 @@
 [tracker]
 interval_s = 0.3          # 比べるフレームの時間差
 hfov_deg = 53.5           # カメラの水平画角。未校正（OV5647 の値）
-moving_px_s = 4.0         # 画像が動いたとみなす動きの大きさ（ピクセル/秒）。未校正
+moving_px_s = 5.1         # 画像が動いたとみなす動きの大きさ（ピクセル/秒）。2026-11-09 校正（静止 p99 最大 2.2、走行 p10 最小 11.5）
 max_distance_cm = 150.0
 max_approach_cm_s = 100.0
 
@@ -15,11 +15,11 @@ settle_s = 0.5
 min_turn_steer_deg = 15.0
 straight_steer_deg = 3.0
 min_turn_rate_dps = 8.0
-straight_max_rate_dps = 15.0  # 未校正。舵0でも左へ寄る癖（M1）を測ってから決める
+straight_max_rate_dps = 15.0  # 2026-11-09 確認。舵の中心を補正（Pi の DIR_SERVO_OFFSET=6）した後の直進は -7.9〜+3.7°/s
 still_cm_s = 2.0
 uncommanded_min_inliers = 0.6
-uncommanded_px_s = 8.0        # 未校正
+uncommanded_px_s = 6.7        # 2026-11-09 校正（人が横切る p99 2.2、押す p50 20.3）
 sustain_s = 1.0
 # 校正したら書く（どちらかが未設定なら、曲がる量ではなく向きの符号だけを確かめる）
-# speed_cm_s_per_unit = 0.0
+speed_cm_s_per_unit = 0.227   # 2026-11-09、速度50で 11.3cm/s（壁への接近）。速度40で 7〜10cm/s と、比例よりやや速い
 # wheelbase_cm = 0.0

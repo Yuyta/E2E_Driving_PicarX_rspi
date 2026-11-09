@@ -18,7 +18,9 @@ def test_repository_motion_config_loads():
     tracker, config = load_motion_config(DEFAULT_CONFIG)
     assert tracker.interval_s == 0.3
     assert config.sustain_s == 1.0
-    assert config.speed_cm_s_per_unit is None
+    assert config.speed_cm_s_per_unit == pytest.approx(0.227)
+    # 軸距を測るまでは、曲がる量ではなく向きの符号だけを確かめる
+    assert config.wheelbase_cm is None
 
 
 def test_motion_config_overrides_and_rejects_unknown_keys(tmp_path: Path):
@@ -44,12 +46,13 @@ def test_missing_motion_config_uses_defaults(tmp_path: Path):
 # --- M3 の計測のまとめと判定 ---
 
 
-def record(t, flow=20.0, yaw=0.0, flags=(), sustained=None, approach=None, valid=True):
+def record(t, flow=20.0, yaw=0.0, flags=(), sustained=None, approach=None, valid=True, since=None):
     check = {"flags": list(flags)}
     if sustained:
         check["sustained"] = sustained
     return {
         "t": t,
+        "command": None if since is None else {"since_s": since},
         "motion": {
             "image_valid": valid,
             "edge_flow_px_s": flow,
@@ -79,11 +82,23 @@ def test_judge_lifted_needs_a_timely_no_motion():
         record(1.6, flow=0.5, flags=["no_motion"], sustained="no_motion")
     ]
     summary = m3_check.summarize(records, "lifted", 50, 0)
-    assert summary["first_sustained"] == {"flag": "no_motion", "t": 1.6}
+    assert summary["first_sustained"] == {"flag": "no_motion", "t": 1.6, "since_command": None}
     assert m3_check.judge(summary)[0].startswith("OK")
 
     late = [record(0.0, flow=0.5), record(3.0, flow=0.5, sustained="no_motion")]
     assert m3_check.judge(m3_check.summarize(late, "lifted", 50, 0))[0].startswith("NG")
+
+
+def test_judge_lifted_counts_from_the_first_command_not_the_camera_start():
+    # 2026-11-09 の実機: カメラの配信を待つ約1秒の後に指令を出し、指令から 1.6 秒で続いた
+    records = [
+        record(1.2, flow=0.3, since=0.2),
+        record(2.63, flow=0.3, flags=["no_motion"], sustained="no_motion", since=1.6),
+    ]
+    assert m3_check.judge(m3_check.summarize(records, "lifted", 50, 0))[0].startswith("OK")
+
+    slow = [record(4.0, flow=0.3, flags=["no_motion"], sustained="no_motion", since=3.0)]
+    assert m3_check.judge(m3_check.summarize(slow, "lifted", 50, 0))[0].startswith("NG")
 
 
 def test_judge_still_scene_with_flags_is_ng():

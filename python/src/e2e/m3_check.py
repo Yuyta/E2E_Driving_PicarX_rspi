@@ -15,7 +15,8 @@ M3「指令と実際の動きの食い違い」を実機で計測し、しきい
     forward  直進（印が付かないこと。舵0での曲がり癖）
     left     左へ舵を切って前進（向きの変化が負）
     right    右へ舵を切って前進（向きの変化が正）
-    lifted   車体を持ち上げて車輪を浮かせ、前進の指令（no_motion で止まること）
+    lifted   後輪だけを台の端から浮かせ、前進の指令（no_motion で止まること）。
+             車体ごと持ち上げると床センサーが床を見失い、Pi が段差として前進を拒否する
 """
 
 import argparse
@@ -40,7 +41,8 @@ OUTPUT_DIR = Path("data/m3_checks")
 MOVE_TTL_MS = 400
 CONTROL_TIMEOUT_SEC = 1.0
 FRAME_TIMEOUT_SEC = 1.0
-# 車輪を浮かせた時、指令から止まるまでの目標（判定の待ち 0.5 秒 + 継続 1 秒 + 余裕）
+# 車輪を浮かせた時、最初の前進の指令から止まるまでの目標（判定の待ち 0.5 秒 + 継続 1 秒 + 余裕）。
+# 計測の開始からではない。開始直後はカメラの配信を待つ間（約1秒）があり、指令はまだ出ていない
 LIFTED_STOP_TARGET_SEC = 2.5
 
 MOVING = {"forward": 0, "left": -30, "right": 30, "lifted": 0}
@@ -88,13 +90,23 @@ def summarize(records: List[dict], scenario: str, speed: int, steer: int) -> Dic
         "unknown": dict(unknown),
         "first_sustained": next(
             (
-                {"flag": r["motion_check"]["sustained"], "t": round(r["t"], 2)}
+                {
+                    "flag": r["motion_check"]["sustained"],
+                    "t": round(r["t"], 2),
+                    "since_command": since_command(r),
+                }
                 for r in records
                 if r["motion_check"].get("sustained")
             ),
             None,
         ),
     }
+
+
+def since_command(record: dict) -> Optional[float]:
+    """その記録の時点で、今の指令を出してから経った秒数。指令がなければ None"""
+    since = (record.get("command") or {}).get("since_s")
+    return None if since is None else round(since, 2)
 
 
 def judge(summary: Dict) -> List[str]:
@@ -106,9 +118,14 @@ def judge(summary: Dict) -> List[str]:
     if expected:
         first = summary["first_sustained"]
         if first and first["flag"] == expected:
-            if scenario == "lifted" and first["t"] > LIFTED_STOP_TARGET_SEC:
+            elapsed = first.get("since_command")
+            if elapsed is None:
+                elapsed = first["t"]
+            if scenario == "lifted":
+                verdict = "NG" if elapsed > LIFTED_STOP_TARGET_SEC else "OK"
                 notes.append(
-                    f"NG: {expected} まで {first['t']} 秒（目標 {LIFTED_STOP_TARGET_SEC}）"
+                    f"{verdict}: 前進の指令から {elapsed} 秒で {expected} が続いた"
+                    f"（目標 {LIFTED_STOP_TARGET_SEC} 秒以内）"
                 )
             else:
                 notes.append(f"OK: {expected} が {first['t']} 秒で続いた")
@@ -203,6 +220,12 @@ def run_scenario(
     print()
 
     if not records:
+        if refused is not None:
+            hint = ""
+            if refused == "cliff" and scenario == "lifted":
+                hint = "。車体ごと持ち上げず、後輪だけを台の端から浮かせてください"
+            reason = getattr(refused, "value", refused)
+            raise RuntimeError(f"Pi が前進を拒否したので、計測できませんでした（{reason}）{hint}")
         raise RuntimeError("推定値が得られませんでした（カメラの配信を確認してください）")
     summary = summarize(records, scenario, speed if moving else 0, steer if moving else 0)
     summary["stopped_by_check"] = stopped_by_check
@@ -337,7 +360,11 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"{args.scenario} は車両が前進します。--i-understand-the-car-will-move が必要です"
         )
     client = PicarxClient(timeout=CONTROL_TIMEOUT_SEC)
-    result = run_scenario(client, args.scenario, args.speed, args.steer, args.seconds)
+    try:
+        result = run_scenario(client, args.scenario, args.speed, args.steer, args.seconds)
+    except RuntimeError as exc:
+        print(f"中止: {exc}")
+        return 1
     path = save_result(result, args.scenario, args.note)
     print_summary(result["summary"])
     print(f"保存: {path}")
