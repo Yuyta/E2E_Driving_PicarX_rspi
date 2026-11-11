@@ -20,6 +20,7 @@ pygame-ce が入っていない時やパッドがつながっていない時は�
 """
 
 import os
+import time
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
@@ -41,6 +42,8 @@ AXIS_MAX = 32767.0
 STICK_DEADZONE = 0.15
 # プロコンの ZL / ZR はオンかオフだけ。アナログのトリガーでも半分を超えたら押したとみなす
 TRIGGER_THRESHOLD = 0.5
+# 開けなかった時（Bluetooth が不安定でスティックの校正値を読めない時など）に開き直す間隔
+REOPEN_INTERVAL_S = 1.0
 
 # プロコンの刻印と、SDL が位置で返すボタン（SDL の名前は Xbox の配置）
 SWITCH_BUTTONS = {
@@ -107,6 +110,8 @@ class Gamepad:
         self._pad = None
         self.name: Optional[str] = None
         self.pressed: set = set()  # 最後に読んだ時に押していたボタンの刻印（確認用）
+        self.error: Optional[str] = None  # 最後に開けなかった理由。開けたら None
+        self._next_open = 0.0
         if self.available:
             pygame.init()
             pygame.joystick.init()
@@ -123,25 +128,44 @@ class Gamepad:
             self._open_first()
         if self._pad is None:
             return None
-        if not self._pad.attached():
-            self._close()
-            return None
         pad = self._pad
-        self.pressed = {
-            label for label, name in SWITCH_BUTTONS.items() if pad.get_button(getattr(pygame, name))
-        }
-        return to_input(
-            left_x=pad.get_axis(pygame.CONTROLLER_AXIS_LEFTX),
-            zl=pad.get_axis(pygame.CONTROLLER_AXIS_TRIGGERLEFT),
-            zr=pad.get_axis(pygame.CONTROLLER_AXIS_TRIGGERRIGHT),
-            pressed=self.pressed,
-        )
+        try:
+            if not pad.attached():
+                self._close()
+                return None
+            self.pressed = {
+                label
+                for label, name in SWITCH_BUTTONS.items()
+                if pad.get_button(getattr(pygame, name))
+            }
+            return to_input(
+                left_x=pad.get_axis(pygame.CONTROLLER_AXIS_LEFTX),
+                zl=pad.get_axis(pygame.CONTROLLER_AXIS_TRIGGERLEFT),
+                zr=pad.get_axis(pygame.CONTROLLER_AXIS_TRIGGERRIGHT),
+                pressed=self.pressed,
+            )
+        except pygame.error as exc:
+            # 読んでいる途中で切れた。つながっていないとみなし、少し待って開き直す
+            self.error = str(exc)
+            self._close()
+            self._next_open = time.monotonic() + REOPEN_INTERVAL_S
+            return None
 
     def _open_first(self) -> None:
+        now = time.monotonic()
+        if now < self._next_open:
+            return
         for index in range(pygame.joystick.get_count()):
             if sdl_controller.is_controller(index):
-                self._pad = sdl_controller.Controller(index)
+                try:
+                    self._pad = sdl_controller.Controller(index)
+                except pygame.error as exc:
+                    # SDL がプロコンからスティックの校正値を読めなかった時など。少し待って開き直す
+                    self.error = str(exc)
+                    self._next_open = now + REOPEN_INTERVAL_S
+                    return
                 self.name = self._pad.name
+                self.error = None
                 return
 
     def _close(self) -> None:
@@ -163,8 +187,6 @@ class Gamepad:
 
 def main() -> None:
     """パッドが読めるかと、ボタンの刻印が合っているかを確かめる（Ctrl+C で終わる）"""
-    import time
-
     pad = Gamepad()
     if not pad.available:
         print("pygame-ce がない: uv sync --extra e2e")
@@ -174,10 +196,11 @@ def main() -> None:
     try:
         while True:
             state = pad.poll()
-            shown = (state, tuple(sorted(pad.pressed)))
+            shown = (state, tuple(sorted(pad.pressed)), pad.error)
             if shown != last:
                 buttons = " ".join(sorted(pad.pressed)) or "-"
-                print(f"{pad.name or '(パッドなし)'}  押している: {buttons}  {state}")
+                name = pad.name or f"(パッドなし: {pad.error or '未接続'})"
+                print(f"{name}  押している: {buttons}  {state}")
                 last = shown
             time.sleep(0.05)
     except KeyboardInterrupt:

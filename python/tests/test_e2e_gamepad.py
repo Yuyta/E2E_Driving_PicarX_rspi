@@ -1,5 +1,9 @@
 """プロコンの生の値から操作を決める（`src.e2e.gamepad`）"""
 
+import pygame
+import pytest
+
+from src.e2e import gamepad
 from src.e2e.gamepad import AXIS_MAX, SWITCH_BUTTONS, PadInput, stick_value, to_input
 
 
@@ -52,3 +56,57 @@ def test_face_buttons_are_read_by_position():
     assert SWITCH_BUTTONS["B"] == "CONTROLLER_BUTTON_A"
     assert SWITCH_BUTTONS["X"] == "CONTROLLER_BUTTON_Y"
     assert SWITCH_BUTTONS["Y"] == "CONTROLLER_BUTTON_X"
+
+
+# --- 開けなかった時は止まらずに開き直す ---
+
+
+class FlakyController:
+    """最初の数回は SDL が開けない（スティックの校正値を読めない）プロコン"""
+
+    failures = 1
+
+    def __init__(self, index):
+        if FlakyController.failures > 0:
+            FlakyController.failures -= 1
+            raise pygame.error("Couldn't load stick calibration")
+        self.name = "Pro Controller"
+
+    def attached(self):
+        return True
+
+    def get_button(self, button):
+        return False
+
+    def get_axis(self, axis):
+        return 0
+
+    def quit(self):
+        pass
+
+
+@pytest.fixture
+def flaky_pad(monkeypatch):
+    clock = {"now": 100.0}
+    monkeypatch.setattr(gamepad.time, "monotonic", lambda: clock["now"])
+    monkeypatch.setattr(gamepad.pygame.joystick, "get_count", lambda: 1)
+    monkeypatch.setattr(gamepad.sdl_controller, "is_controller", lambda index: True)
+    monkeypatch.setattr(gamepad.sdl_controller, "Controller", FlakyController)
+    FlakyController.failures = 1
+    pad = gamepad.Gamepad()
+    yield pad, clock
+    pad._close()
+
+
+def test_a_failed_open_is_retried_instead_of_raising(flaky_pad):
+    pad, clock = flaky_pad
+    assert pad.poll() is None
+    assert "stick calibration" in pad.error
+
+    clock["now"] += 0.5  # すぐには開き直さない
+    assert pad.poll() is None
+    assert FlakyController.failures == 0 and pad.name is None
+
+    clock["now"] += gamepad.REOPEN_INTERVAL_S
+    assert pad.poll() == PadInput()
+    assert pad.name == "Pro Controller" and pad.error is None

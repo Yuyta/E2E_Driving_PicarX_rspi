@@ -94,6 +94,7 @@ class FakePad:
         self.available = True
         self.name = "Fake Pad"
         self.state = None
+        self.error = None
 
     def poll(self):
         return self.state

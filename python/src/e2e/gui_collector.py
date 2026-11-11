@@ -377,9 +377,10 @@ class E2ECollectorWindow(QMainWindow):
         last = self._last_pad
         self._last_pad = state
         if state is None:
+            error = self.gamepad.error
+            self.lbl_pad.setText(f"未接続（{error}。開き直しています）" if error else "未接続")
             if last is not None:
                 # 抜けた。押していた操作は離したことにする
-                self.lbl_pad.setText("未接続")
                 self._pad_drive = 0
                 self._pad_steer = 0.0
                 self._update_drive()
