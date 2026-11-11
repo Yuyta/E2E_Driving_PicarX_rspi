@@ -103,7 +103,9 @@ class FakePad:
 
 
 @pytest.fixture
-def window(monkeypatch):
+def window(monkeypatch, tmp_path):
+    # 起動するとセッションのフォルダを data/raw に作るので、実際の走行データの横に作らない
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(gui_collector, "PicarxClient", FakeClient)
     monkeypatch.setattr(gui_collector, "Gamepad", FakePad)
     # 食い違いを記憶 DB に書かない
