@@ -57,7 +57,7 @@ flowchart TD
         HW["サーボ & モーター PWM<br>(自動オフセット補正適用)"]
     end
 
-    GC -- "キーボード操縦" --> API
+    GC -- "キーボード / プロコン操縦" --> API
     API -- "Snapshot (Base64 JPEG)" --> GC
     GC --> RawData
     RawData --> DC
@@ -101,7 +101,12 @@ PC上でカメラ映像をリアルタイム確認しながら手動操縦し、
   - `A` / `D`: 押している間、舵を毎秒60°で左 / 右へ切る（最大 ±35°）。離すと同じ速さで中央へ戻る
   - `X`: ステアリングを即座に中立 (0°)
   - `R`: 録画開始 / 一時停止トグル
-  - 食い違いが続いて止まった時は、`W` を押し直すまで走り出さない。ウィンドウから操作が別の場所へ移った時は、すべてのキーを離したとみなして止まる（2026-11-09 から）
+  - 食い違いが続いて止まった時、`S` で止めた時、Pi が指令を拒否した時は、走行の操作（キーとプロコン）をすべて離すまで走り出さない。ウィンドウから操作が別の場所へ移った時は、すべてのキーを離したとみなして止まる（2026-11-09 から）
+- **プロコン（Nintendo Switch Pro Controller）** (`gamepad.py`、2026-11-11 から): SDL（pygame-ce、`e2e` の追加の依存）の GameController として 20ms ごとに読む。面のボタンは位置で読み（`SDL_GAMECONTROLLER_USE_BUTTON_LABELS=0`）、位置からプロコンの刻印を決める。キーボードと同時に使え、前進が後退より優先
+  - `A` / `ZR`: 押している間、前進（設定速度）。`B` / `ZL`: 押している間、後退（`DRIVE_SPEED`。後退で車輪が回る最低の速度は未計測のため）。両方なら止まる
+  - 左スティックの左右: 倒した量に応じた舵角（中央の15%は無視）。十字キーの左右: 舵をいっぱいまで切る。どちらもキーボードと同じ毎秒60°で目標へ近づける
+  - `X`: 停止（`S` と同じ）。`HOME`: 緊急停止（画面の EMERGENCY STOP と同じ）。`＋`: 録画トグル。`－`: 舵を中央へ。`Y` は `B` の隣で押し間違えやすいので使わない
+  - プロコンが抜けたら、押していた操作を離したとみなして止まる。接続と割り当ての確認は `uv run python -m src.e2e.gamepad`
 - **保存データ形式**: `python/data/raw/<session_timestamp>/`（git 管理外）
   - `images/frame_xxxxxx.jpg`: 解像度 160×120 の JPEG 画像
   - `labels.jsonl`: 各フレームの JSONL レコード
@@ -124,14 +129,13 @@ PC上でカメラ映像をリアルタイム確認しながら手動操縦し、
     }
     ```
     - `steering` は最大舵角 ±35° を基準に `-1.0` (最大左折) 〜 `+1.0` (最大右折) に正規化。
-    - `throttle` は前進の指令が有効な間だけ `0.5`、それ以外は `0.0`。`W` は期限 600ms の指令なので、指令が途絶えて止まった後は `0.0` になる（2026-11-08 から。それ以前の記録は止まった後も `0.5`）。
+    - `throttle` は前進の指令が有効な間だけ `0.5`、後退の指令が有効な間は `-0.5`（2026-11-11 から）、それ以外は `0.0`。`W` は期限 600ms の指令なので、指令が途絶えて止まった後は `0.0` になる（2026-11-08 から。それ以前の記録は止まった後も `0.5`）。
     - `distance_cm` は超音波の距離。何も捉えていない時は `null`。反射が戻らず遠いと Pi が判断した時は `distance_far` が `true`。
     - `floor` は床センサーの値（左、中央、右）、`battery_v` は電池電圧。どちらも Pi の `/api/status` から、フレームごとに1回読む。読めなかった時は `null`（2026-11-09 から）。
     - `stream_seq` はカメラの常時配信の通し番号。収集はこの配信（約15fps）を使う。番号が飛んでいれば、その間のフレームを取りこぼしている。
-    - `command` はそのフレームの時点で有効な指令（期限を含む）、`motion` はカメラの画像の動きと超音波から推定した実際の動き、`motion_check` は指令との食い違い（§4.7）。食い違いのあるフレームは学習から外す。前進の指令がなく止まっていたフレーム（`command.speed` か `throttle` が 0）も学習から外す。止まっている間の舵角は、その景色でどう曲がるかの手本にならないため（2026-11-10 から。外した数は `metadata.json` の `skipped_stopped`）。
-    - 電池電圧と床センサーの値はまだ保存しない（M3 の再収集で追加する）。
+    - `command` はそのフレームの時点で有効な指令（期限を含む）、`motion` はカメラの画像の動きと超音波から推定した実際の動き、`motion_check` は指令との食い違い（§4.7）。食い違いのあるフレームは学習から外す。前進の指令がなかったフレーム（`command.speed` か `throttle` が 0 以下。止まっている時と後退中）も学習から外す。止まっている間や後退中の舵角は、その景色で前へ進みながらどう曲がるかの手本にならないため（2026-11-10 から。外した数は `metadata.json` の `skipped_stopped`）。
 - **食い違いが続いた時**: 同じ食い違いが1秒続くと、走行を止めて画面に表示し、記憶に「走行を止めた」出来事として残す。
-- **収集周期**: `CameraWorker` は約12Hzの設計だが、記録された実測のフレーム間隔は中央値で約1秒（2026-11-03 時点、旧方式）。カメラを常時配信に変えた後（M1）の収集周期は未計測。M3 で 10fps 以上で集め直す。
+- **収集周期**: `CameraWorker` はカメラの常時配信を受け、フレームごとに Pi の状態を1回読む。実機で 15.0fps、取りこぼしなし（2026-11-09、2026-11-11 の収集でも 15.0fps）。旧方式（静止画と超音波を毎回取得）は中央値で約1秒だった。
 
 ---
 
@@ -269,7 +273,7 @@ CPU推論を想定した4層の軽量CNN（推論時間の実測値は未記録�
 
 ### 4.6 ハードウェア校正自動補正レイヤー (`rust/src/picarx/core.rs`)
 
-PiCar-X実機のサーボモーターギア個体差（数度の傾き）を吸収する機構。
+PiCar-X実機のサーボモーターギア個体差（数度の傾き）と、左右の後輪の速さの差を吸収する機構。値は今は手で測って設定する。走りながら記録から推定して直す仕組みは ROADMAP の M4「走りながらの自動校正」で計画している。
 
 - **校正設定ファイルの自動読み込み**:
   - 起動時に `/opt/picar-x/picar-x.conf`、`/etc/picar-x/picar-x.conf`、`~/.config/picar-x/picar-x.conf` を自動探索。
@@ -283,6 +287,11 @@ PiCar-X実機のサーボモーターギア個体差（数度の傾き）を吸�
   set_dir_servo_angle(angle + dir_offset);
   ```
   これにより、Rustサーバー起動直後からカメラが正確に真正面を向き、直進操舵のズレが排除される。
+- **後輪の速さ** (`try_drive`):
+  - 舵を切っている時は内側の車輪を遅くする（`wheel_speeds`。舵角 θ の時、内側は速度 ×(100−|θ|)/100）。
+  - その後に `MOTOR_BALANCE`（%、±30まで、既定0）で左右の差を補正する（`balance_wheels`、2026-11-11 から）。正なら右輪を、負なら左輪をその分だけ遅くする。正は右へ寄せる向きで `DIR_SERVO_OFFSET` と同じ。前進と後退の両方に効く。
+  - 起動時に `✓ Servo offsets applied: Dir=…` と `✓ Motor balance applied: …%` を表示する。
+- **今の実機の値**（Pi の `~/.env` にだけあり、リポジトリには含まれない）: `DIR_SERVO_OFFSET=6`、`MOTOR_BALANCE=10`。直進は3秒で −0.8°、舵 −30 / +30 は3秒で −26° / +24°（2026-11-11、`m3_check` の forward / left / right）。
 
 ---
 
@@ -380,6 +389,7 @@ PiCarX/
 │   │   ├── README.md              # 操作マニュアル
 │   │   ├── autonomous_driver.py   # 自律走行
 │   │   ├── gui_collector.py       # データ収集 GUI
+│   │   ├── gamepad.py             # プロコンの読み取り（収集 GUI 用）
 │   │   ├── dataset/               # cleaner.py, disengagement_manager.py, manifest.py
 │   │   ├── evaluation/            # evaluate.py, metrics.py
 │   │   ├── mapping/               # occupancy_grid.py, visualizer.py
@@ -406,11 +416,12 @@ PiCarX/
 | 目的 | コマンド (PowerShell) |
 |---|---|
 | **データ収集GUI起動** | `uv run python -m src.e2e.gui_collector` |
+| **プロコンの接続と割り当ての確認** | `uv run python -m src.e2e.gamepad`（押したボタンの刻印と操作を表示） |
 | **収集したセッションの確認** | `uv run python -m src.e2e.dataset.session_report --data_dir data/raw`（fps、走行中の割合、左右と舵角の偏り、食い違いの印、取りこぼし） |
 | **マニフェストの作成と確認** | `uv run python -m src.e2e.dataset.manifest --data_dir data/raw`（確認は `--verify`） |
 | **生データ全結合学習** | `uv run python -m src.e2e.training.train --config configs/train.toml --data_dir data/raw --output_dir models/v006` |
 | **交差検証（1セッションを抜いて評価）** | `uv run python -m src.e2e.training.cross_validate --config configs/train.toml --data_dir data/raw --output data/cv/<名前>.json` |
-| **バックアップ** | `powershell -ExecutionPolicy Bypass -File scriptsackup.ps1`（リポジトリのルートで実行） |
+| **バックアップ** | `powershell -ExecutionPolicy Bypass -File scripts\backup.ps1`（リポジトリのルートで実行） |
 | **データクリーニング (外れ値除外)** | `uv run python -m src.e2e.dataset.cleaner --data_dir data/raw --model models/v004/model.onnx --threshold 0.4 --output_dir data/processed/clean_v2` |
 | **クリーンデータでの再学習** | `uv run python -m src.e2e.training.train --data_dir data/processed/clean_v2 --output_dir models/v005 --epochs 25` |
 | **モデルオフライン評価** | `uv run python -m src.e2e.evaluation.evaluate --data_dir data/raw --model_path models/v004/best_model.pth` |
