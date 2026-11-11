@@ -1,4 +1,4 @@
-"""収集 GUI（`src.e2e.gui_collector`）: 保存するセンサー値と、W を押している間の走行"""
+"""収集 GUI（`src.e2e.gui_collector`）: 保存するセンサー値、W やパッドを押している間の走行"""
 
 import os
 import time
@@ -12,6 +12,7 @@ from PySide6.QtTest import QTest  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from src.e2e import gui_collector  # noqa: E402
+from src.e2e.gamepad import PadInput  # noqa: E402
 from src.e2e.gui_collector import sensor_fields  # noqa: E402
 from src.models import BatteryStatus, DistanceStatus, FloorStatus, SensorsStatus  # noqa: E402
 
@@ -70,7 +71,7 @@ class FakeClient:
         return FakeStream()
 
     def move_sync(self, direction, speed, ttl_ms):
-        self.calls.append(("move", speed))
+        self.calls.append(("move", speed, direction.value))
         return True
 
     def stop_sync(self):
@@ -81,10 +82,30 @@ class FakeClient:
         self.calls.append(("steer", angle))
         return True
 
+    def emergency_stop_sync(self):
+        self.calls.append(("emergency",))
+        return True
+
+
+class FakePad:
+    """テストから状態を決めるパッド。state が None ならつながっていない"""
+
+    def __init__(self):
+        self.available = True
+        self.name = "Fake Pad"
+        self.state = None
+
+    def poll(self):
+        return self.state
+
+    def close(self):
+        pass
+
 
 @pytest.fixture
 def window(monkeypatch):
     monkeypatch.setattr(gui_collector, "PicarxClient", FakeClient)
+    monkeypatch.setattr(gui_collector, "Gamepad", FakePad)
     # 食い違いを記憶 DB に書かない
     monkeypatch.setattr(gui_collector, "record_motion_event", lambda flag, update: (None, flag))
     QApplication.instance() or QApplication([])
@@ -93,6 +114,7 @@ def window(monkeypatch):
     # カメラのスレッドを止めてから破棄する。残すと後の GUI のテストでプロセスが落ちる
     win.drive_timer.stop()
     win.steer_timer.stop()
+    win.pad_timer.stop()
     win.camera_worker.stop()
     win.deleteLater()
     QApplication.processEvents()
@@ -155,3 +177,91 @@ def test_steering_ramps_while_held_and_returns_to_center(window):
     assert window.current_steering == 0
     # 途中の角度も送っている（学習に中間の舵角が残る）
     assert len(set(steers(window.client))) >= 8
+
+
+# --- プロコン（ゲームパッド）での前進・後退・舵 ---
+
+
+def directions(client):
+    return [call[2] for call in client.calls if call[0] == "move"]
+
+
+def test_pad_drives_backward_and_stops_when_released(window):
+    window.gamepad.state = PadInput(drive=-1)
+    QTest.qWait(250)
+    assert directions(window.client) and set(directions(window.client)) == {"backward"}
+    assert window.command_state.at(time.time()).speed == -gui_collector.REVERSE_SPEED
+
+    window.gamepad.state = PadInput()
+    QTest.qWait(100)
+    count = moves(window.client)
+    QTest.qWait(250)
+    assert moves(window.client) == count
+    assert stopped_after_last_move(window.client)
+
+
+def test_pad_forward_and_stick_steer_in_proportion(window):
+    window.gamepad.state = PadInput(drive=1, steer=0.5)
+    QTest.qWait(800)
+    assert directions(window.client)[-1] == "forward"
+    # 半分倒すと最大角の半分で止まる
+    assert window.current_steering == round(gui_collector.MAX_STEER_DEG / 2)
+
+
+def test_unplugging_the_pad_stops_the_car(window):
+    window.gamepad.state = PadInput(drive=1)
+    QTest.qWait(150)
+    window.gamepad.state = None
+    QTest.qWait(100)
+    count = moves(window.client)
+    QTest.qWait(250)
+    assert moves(window.client) == count
+    assert stopped_after_last_move(window.client)
+
+
+def test_after_a_mismatch_the_pad_must_be_released_before_driving_again(window):
+    window.gamepad.state = PadInput(drive=1)
+    QTest.qWait(150)
+    update = type("Update", (), {"check": type("Check", (), {"details": {}})()})()
+    window._on_motion_mismatch("no_motion", update)
+    count = moves(window.client)
+    QTest.qWait(250)
+    assert moves(window.client) == count  # 押したままでは走り出さない
+
+    window.gamepad.state = PadInput()
+    QTest.qWait(60)
+    window.gamepad.state = PadInput(drive=-1)  # 離してから後退で抜け出せる
+    QTest.qWait(150)
+    assert directions(window.client)[-1] == "backward"
+
+
+def test_plus_toggles_recording_once_per_press(window):
+    window.gamepad.state = PadInput(record=True)
+    QTest.qWait(150)
+    assert window.is_recording
+    window.gamepad.state = PadInput()
+    QTest.qWait(60)
+    assert window.is_recording
+
+
+def test_x_stops_while_a_is_held_until_released(window):
+    window.gamepad.state = PadInput(drive=1)
+    QTest.qWait(150)
+    window.gamepad.state = PadInput(drive=1, stop=True)
+    QTest.qWait(60)
+    window.gamepad.state = PadInput(drive=1)
+    count = moves(window.client)
+    QTest.qWait(250)
+    assert moves(window.client) == count
+    assert stopped_after_last_move(window.client)
+
+
+def test_home_is_the_emergency_stop(window):
+    window.gamepad.state = PadInput(drive=1)
+    QTest.qWait(150)
+    window.gamepad.state = PadInput(drive=1, emergency=True)
+    QTest.qWait(60)
+    assert ("emergency",) in window.client.calls
+    count = moves(window.client)
+    QTest.qWait(250)
+    assert moves(window.client) == count
