@@ -85,6 +85,20 @@ fn wheel_speeds(speed: i32, steer_angle: i32) -> (i32, i32) {
     }
 }
 
+/// 左右の後輪の回る速さの差を補正する値の上限（%）
+const MOTOR_BALANCE_MAX: i32 = 30;
+
+/// 左右の後輪の速さの差を補正する。`balance` が正なら右輪を、負なら左輪をその % だけ遅くする。
+/// 正は右へ寄せる向き（`DIR_SERVO_OFFSET` と同じ）。舵0でも左へ曲がる車は正にする
+fn balance_wheels(left: i32, right: i32, balance: i32) -> (i32, i32) {
+    let balance = balance.clamp(-MOTOR_BALANCE_MAX, MOTOR_BALANCE_MAX);
+    if balance > 0 {
+        (left, right * (100 - balance) / 100)
+    } else {
+        (left * (100 + balance) / 100, right)
+    }
+}
+
 fn timer_prescaler(timer_index: u8) -> u16 {
     if timer_index == MOTOR_TIMER_INDEX {
         MOTOR_TIMER_PRESCALER
@@ -112,6 +126,8 @@ pub struct Picarx {
     // モーター反転設定（Python仕様に準拠）
     left_reverse: bool,
     right_reverse: bool,
+    /// 左右の後輪の速さの差の補正（%）。`MOTOR_BALANCE` で設定する
+    motor_balance: i32,
 
     // GPIOのみを使う。測定中にI2C(モーター)を止めないようロックを分ける
     ultrasonic: Arc<Mutex<Ultrasonic>>,
@@ -173,6 +189,7 @@ impl Picarx {
             // Pythonのデフォルト設定通り、右側だけを反転に
             left_reverse: false,
             right_reverse: true,
+            motor_balance: Self::load_motor_balance(),
             // Picarx::new()側で既にMCUリセット済みのため、ここでは再リセットしない
             ultrasonic: Arc::new(Mutex::new(Ultrasonic::new(false)?)),
             _audio_sink: audio_sink,
@@ -341,6 +358,7 @@ impl Picarx {
     /// `speed` が負なら後退する。現在の舵角に応じて内側の車輪を遅くする。失敗を呼び出し元へ返す。
     pub fn try_drive(&mut self, speed: i32) -> Result<(), Box<dyn std::error::Error>> {
         let (left, right) = wheel_speeds(speed, self.dir_angle);
+        let (left, right) = balance_wheels(left, right, self.motor_balance);
         self.try_set_wheels(left, right)
     }
 
@@ -427,6 +445,17 @@ impl Picarx {
         );
 
         (dir_offset, pan_offset, tilt_offset)
+    }
+
+    /// 環境変数 (.env) の `MOTOR_BALANCE`。正なら右輪を遅くする（左へ寄っていく車を直す）
+    fn load_motor_balance() -> i32 {
+        let balance = std::env::var("MOTOR_BALANCE")
+            .ok()
+            .and_then(|val| val.parse::<i32>().ok())
+            .unwrap_or(0)
+            .clamp(-MOTOR_BALANCE_MAX, MOTOR_BALANCE_MAX);
+        println!("✓ Motor balance applied: {balance}% (positive slows the right wheel)");
+        balance
     }
 
     fn parse_calibration_content(
@@ -577,7 +606,7 @@ impl Drop for Picarx {
 mod tests {
     use super::{
         MOTOR_TIMER_INDEX, MOTOR_TIMER_PRESCALER, REG_MOTOR1_PWM, REG_MOTOR2_PWM, REG_PWM_CH0,
-        REG_PWM_CH2, TIMER_PRESCALER, timer_prescaler, wheel_speeds,
+        REG_PWM_CH2, TIMER_PRESCALER, balance_wheels, timer_prescaler, wheel_speeds,
     };
 
     /// robot-hat の割り当てと同じく、チャンネルを4で割った値がタイマー番号になる
@@ -601,6 +630,26 @@ mod tests {
     fn the_inner_wheel_is_the_same_side_when_reversing() {
         assert_eq!(wheel_speeds(-50, 30), (-50, -35));
         assert_eq!(wheel_speeds(-50, -30), (-35, -50));
+    }
+
+    #[test]
+    fn balance_zero_leaves_the_wheels_alone() {
+        assert_eq!(balance_wheels(50, 50, 0), (50, 50));
+        assert_eq!(balance_wheels(-50, -35, 0), (-50, -35));
+    }
+
+    #[test]
+    fn positive_balance_slows_the_right_wheel_and_negative_the_left() {
+        assert_eq!(balance_wheels(50, 50, 10), (50, 45));
+        assert_eq!(balance_wheels(50, 50, -10), (45, 50));
+        // 後退でも同じ側を遅くする
+        assert_eq!(balance_wheels(-50, -50, 10), (-50, -45));
+    }
+
+    #[test]
+    fn balance_is_limited() {
+        assert_eq!(balance_wheels(100, 100, 90), (100, 70));
+        assert_eq!(balance_wheels(100, 100, -90), (70, 100));
     }
 
     #[test]
