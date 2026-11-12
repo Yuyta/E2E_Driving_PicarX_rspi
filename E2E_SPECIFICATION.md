@@ -218,7 +218,7 @@ CPU推論を想定した4層の軽量CNN（推論時間の実測値は未記録�
 - **オフライン評価 (`evaluate.py`)**:
   - 平均絶対誤差 (MAE) を正規化スケールおよび実角度（±◯度）で算出。左（-0.15 未満）、直進、右（0.15 超）の別の MAE、隣り合うフレームの予測の差の平均（ふらつき）、PC での推論時間も出す（`evaluation/metrics.py`）。
   - 評価結果を `eval_metrics.json` に自動出力。
-  - 指定したディレクトリの全フレームで評価する。学習に使ったデータを指定すると、その分も評価に含まれる（`v004` は学習データ全150件で評価）。走行性能の指標としては使わない。
+  - 指定したディレクトリの全フレームで評価する。学習に使ったデータを指定すると、その分も評価に含まれる。走行性能の指標としては使わない。
 - **データセットレジストリ (`registry/dataset.py`)**:
   - セッションごとのフレーム数、走行時間、FPS、直進/左折/右折比率、平均操舵角を自動分析。
 - **モデルレジストリ (`registry/models.py`)**:
@@ -337,8 +337,8 @@ PiCar-X には車輪の回転数を測るセンサーがないので、カメラ
    - **制限**: 現行周期では30フレームが約30秒以上に相当する。
    - **制限**: `steering` はモデルの出力であり人の修正ではない。`--approve` で学習対象にすると、失敗時の操舵を正解として学習する。人の修正操作を記録する仕組みができるまで、承認して学習に使わない。
 2. **Dataset Merging**: 複数セッションの統合学習に対応。
-3. **Retraining Pipeline**: `models/v002`〜`v005`、`clean_v1`、`clean_v2` を生成済み（`v001` はメタデータにローカルのパスを含むため git 管理外）。
-   - **現状のデータ量**: 3セッション計150フレーム（左101 / 直進37 / 右12）。
+3. **Retraining Pipeline**: 学習、クリーニング、再学習の流れは実装済み。それまでの走行データ、`clean_v1`/`clean_v2`、モデル `v001`〜`v005` は、走り方の決まりを変えたため 2026-11-12 にバックアップも含めて削除した。
+   - **現状のデータ量**: なし（新しい決まりで収集し直す）。
 
 ---
 
@@ -422,11 +422,11 @@ PiCarX/
 | **生データ全結合学習** | `uv run python -m src.e2e.training.train --config configs/train.toml --data_dir data/raw --output_dir models/v006` |
 | **交差検証（1セッションを抜いて評価）** | `uv run python -m src.e2e.training.cross_validate --config configs/train.toml --data_dir data/raw --output data/cv/<名前>.json` |
 | **バックアップ** | `powershell -ExecutionPolicy Bypass -File scripts\backup.ps1`（リポジトリのルートで実行） |
-| **データクリーニング (外れ値除外)** | `uv run python -m src.e2e.dataset.cleaner --data_dir data/raw --model models/v004/model.onnx --threshold 0.4 --output_dir data/processed/clean_v2` |
-| **クリーンデータでの再学習** | `uv run python -m src.e2e.training.train --data_dir data/processed/clean_v2 --output_dir models/v005 --epochs 25` |
-| **モデルオフライン評価** | `uv run python -m src.e2e.evaluation.evaluate --data_dir data/raw --model_path models/v004/best_model.pth` |
+| **データクリーニング (外れ値除外)** | `uv run python -m src.e2e.dataset.cleaner --data_dir data/raw --model models/<version>/model.onnx --threshold 0.4 --output_dir data/processed/clean_v2` |
+| **クリーンデータでの再学習** | `uv run python -m src.e2e.training.train --data_dir data/processed/clean_v2 --output_dir models/<version> --epochs 25` |
+| **モデルオフライン評価** | `uv run python -m src.e2e.evaluation.evaluate --data_dir data/raw --model_path models/<version>/best_model.pth` |
 | **MLOps レジストリ確認** | `uv run python -m src.e2e.registry.compare` |
-| **実機自律走行** | `uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --speed 50` |
+| **実機自律走行** | `uv run python -m src.e2e.autonomous_driver --model models/<version>/model.onnx --speed 50` |
 | **動きの実機計測** | `uv run python -m src.e2e.m3_check run --scenario still`（走る場面は `--i-understand-the-car-will-move`） |
 | **記録の動きの解析** | `uv run python -m src.e2e.motion.analyze --data_dir data/raw/<session_id>` |
 | **介入イベント一覧確認** | `uv run python -m src.e2e.dataset.disengagement_manager --list` |

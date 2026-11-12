@@ -150,12 +150,12 @@ uv run python -m src.e2e.training.cross_validate --config configs/train.toml --d
 
 ## ステップ 2.5: データクリーニング (悪いデータの自動除外)
 
-学習済みモデル（例: `v003` など）を使って全走行フレームの予測誤差（残差）を算出し、**「人間の操作遅れ」「衝突時の混乱操舵」「外れ値」を自動ではじいた高品質データセット** を作成します。
+学習済みモデルを使って全走行フレームの予測誤差（残差）を算出し、**「人間の操作遅れ」「衝突時の混乱操舵」「外れ値」を自動ではじいた高品質データセット** を作成します。
 
 ### 実行コマンド (PowerShell)
 ```powershell
 # 閾値 0.4 (約±14度) 以上の乖離があるフレームを自動除外
-uv run python -m src.e2e.dataset.cleaner --data_dir data/raw --model models/v003/model.onnx --threshold 0.4 --output_dir data/processed/clean_v1
+uv run python -m src.e2e.dataset.cleaner --data_dir data/raw --model models/<version>/model.onnx --threshold 0.4 --output_dir data/processed/clean_v1
 ```
 
 #### オプション説明:
@@ -240,19 +240,19 @@ v001           | 15     | 32    | 0.0946    | 0.2586     | ±9.1°      | PTH+ON
 ### 2. 実行コマンド (PCのPowerShell)
 ```powershell
 # 通常起動 (2D動的オキュパンシーグリッド地図 ＋ リアルタイムGUIダッシュボード起動)
-uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --speed 50 --min_speed 40
+uv run python -m src.e2e.autonomous_driver --model models/<version>/model.onnx --speed 50 --min_speed 40
 
 # GUIウィンドウを表示せずヘッドレスで走行する場合
-uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --no_gui
+uv run python -m src.e2e.autonomous_driver --model models/<version>/model.onnx --no_gui
 
 # カーブ旋回時・障害物接近時の減速チューニング (巡航を60、減速開始距離を50cmに変更。最低速度は40未満にしない)
-uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --speed 60 --min_speed 40 --slowdown_dist 50.0
+uv run python -m src.e2e.autonomous_driver --model models/<version>/model.onnx --speed 60 --min_speed 40 --slowdown_dist 50.0
 
 # 通信ウォッチドッグのタイムアウト時間を調整 (デフォルト: 0.6秒)
-uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --watchdog_timeout 1.0
+uv run python -m src.e2e.autonomous_driver --model models/<version>/model.onnx --watchdog_timeout 1.0
 
 # スタック検知感度を調整 (閾値を3.0、検知継続フレームを20フレームに変更)
-uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --stuck_threshold 3.0 --stuck_frames 20
+uv run python -m src.e2e.autonomous_driver --model models/<version>/model.onnx --stuck_threshold 3.0 --stuck_frames 20
 ```
 
 #### オプション説明:
