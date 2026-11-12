@@ -59,3 +59,11 @@ def test_legacy_sessions_get_no_warnings():
     report = report_session(records)
     assert report["legacy"]
     assert warnings(report) == []
+
+
+def test_intents_are_counted_and_old_frames_count_as_any():
+    records = [frame(i * 0.1, seq=i) for i in range(4)]
+    records[0]["intent"] = "left"
+    records[1]["intent"] = "right"
+    records[2]["intent"] = "left"
+    assert report_session(records)["intents"] == {"any": 1, "left": 2, "right": 1}

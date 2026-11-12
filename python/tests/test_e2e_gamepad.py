@@ -110,3 +110,11 @@ def test_a_failed_open_is_retried_instead_of_raising(flaky_pad):
     clock["now"] += gamepad.REOPEN_INTERVAL_S
     assert pad.poll() == PadInput()
     assert pad.name == "Pro Controller" and pad.error is None
+
+
+def test_l_and_r_set_the_intent_without_moving_the_car():
+    assert pad("L").intent == "left"
+    assert pad("R").intent == "right"
+    assert pad().intent == "any"
+    assert pad("L", "R").intent == "any"  # 両方は決めない
+    assert pad("L") == PadInput(intent="left")  # 走行と舵は変えない

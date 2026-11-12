@@ -1,5 +1,6 @@
 """収集 GUI（`src.e2e.gui_collector`）: 保存するセンサー値、W やパッドを押している間の走行"""
 
+import json
 import os
 import time
 
@@ -268,3 +269,49 @@ def test_home_is_the_emergency_stop(window):
     count = moves(window.client)
     QTest.qWait(250)
     assert moves(window.client) == count
+
+
+# --- 行きたい向き（意図）の記録 ---
+
+
+def saved_labels(window):
+    with open(window.labels_file, encoding="utf-8") as f:
+        return [json.loads(line) for line in f]
+
+
+def save_one(window):
+    window._save_sample(b"jpeg", None, time.time(), 1, sensor_fields(None), None)
+
+
+def test_pad_l_and_r_are_recorded_as_the_intent_while_held(window):
+    window.gamepad.state = PadInput(drive=1, intent="left")
+    QTest.qWait(80)
+    assert window.lbl_intent.text() == "left"
+    save_one(window)
+    window.gamepad.state = PadInput(drive=1)
+    QTest.qWait(80)
+    save_one(window)
+    assert [r["intent"] for r in saved_labels(window)] == ["left", "any"]
+    assert directions(window.client)[-1] == "forward"  # 意図では止まらない
+
+
+def test_q_and_e_set_the_intent_from_the_keyboard(window):
+    QTest.keyPress(window, Qt.Key_E)
+    save_one(window)
+    QTest.keyRelease(window, Qt.Key_E)
+    QTest.keyPress(window, Qt.Key_Q)
+    QTest.keyPress(window, Qt.Key_E)
+    save_one(window)  # 両方は おまかせ
+    QTest.keyRelease(window, Qt.Key_E)
+    save_one(window)
+    QTest.keyRelease(window, Qt.Key_Q)
+    save_one(window)
+    assert [r["intent"] for r in saved_labels(window)] == ["right", "any", "left", "any"]
+
+
+def test_unplugging_the_pad_clears_its_intent(window):
+    window.gamepad.state = PadInput(intent="right")
+    QTest.qWait(60)
+    window.gamepad.state = None
+    QTest.qWait(60)
+    assert window.current_intent() == "any"

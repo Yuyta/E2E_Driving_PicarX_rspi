@@ -3,7 +3,7 @@
 配置は Nintendo のレースゲームと同じ考え方にする。右手の親指で進む・下がる、左手の親指で舵を切る。
 
     [ZL] 後退                                       前進 [ZR]
-    [L]  －                                             [R]  －
+    [L]  意図: 左                                   意図: 右 [R]
       (左スティック) 舵                 (X) 停止
       [十字 ←→] 舵いっぱい          (Y) －   (A) 前進
                                         (B) 後退
@@ -12,6 +12,8 @@
 - A / ZR を押している間は前進、B / ZL を押している間は後退（両方なら止まる）
 - X は S キーと同じ停止。押していた走行の操作をすべて離すまで走り出さない
 - HOME は画面の EMERGENCY STOP と同じ。戻すには画面の Reset を押す
+- L / R を押している間は、行きたい向き（意図）を左・右として記録する。押していなければおまかせ
+  （両方なら おまかせ）。車の動きは変えない（ROADMAP の M3「行きたい向きの入力」）
 
 SDL（pygame-ce）の GameController として読む。SDL は既定では A/B/X/Y を刻印の文字で返すが、
 古い版や読み方によって入れ替わることがあるので、ボタンの位置で読む設定にして、
@@ -56,7 +58,21 @@ SWITCH_BUTTONS = {
     "HOME": "CONTROLLER_BUTTON_GUIDE",
     "DPAD_LEFT": "CONTROLLER_BUTTON_DPAD_LEFT",
     "DPAD_RIGHT": "CONTROLLER_BUTTON_DPAD_RIGHT",
+    "L": "CONTROLLER_BUTTON_LEFTSHOULDER",
+    "R": "CONTROLLER_BUTTON_RIGHTSHOULDER",
 }
+
+# 行きたい向き（意図）。上の層（M5 の見回りと行き先）が走行モデルへ渡す値と同じ
+INTENT_ANY = "any"
+INTENT_LEFT = "left"
+INTENT_RIGHT = "right"
+
+
+def intent_of(left: bool, right: bool) -> str:
+    """左右どちらか一方だけを押している時はその向き。どちらも、またはどちらでもなければおまかせ"""
+    if left == right:
+        return INTENT_ANY
+    return INTENT_LEFT if left else INTENT_RIGHT
 
 
 @dataclass(frozen=True)
@@ -69,6 +85,7 @@ class PadInput:
     center: bool = False  # －
     stop: bool = False  # X
     emergency: bool = False  # HOME
+    intent: str = INTENT_ANY  # L / R
 
 
 def stick_value(raw: float, deadzone: float = STICK_DEADZONE) -> float:
@@ -99,6 +116,7 @@ def to_input(left_x: float, zl: float, zr: float, pressed: Iterable[str]) -> Pad
         center="MINUS" in pressed,
         stop="X" in pressed,
         emergency="HOME" in pressed,
+        intent=intent_of("L" in pressed, "R" in pressed),
     )
 
 

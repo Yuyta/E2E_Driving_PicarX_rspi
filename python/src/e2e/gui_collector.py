@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.e2e.gamepad import Gamepad, PadInput
+from src.e2e.gamepad import INTENT_ANY, INTENT_LEFT, INTENT_RIGHT, Gamepad, PadInput, intent_of
 from src.e2e.motion.monitor import (
     CommandState,
     MonitorUpdate,
@@ -156,6 +156,9 @@ class E2ECollectorWindow(QMainWindow):
         self._kb_forward = False  # W を押している
         self._pad_drive = 0  # パッドの前進（1）か後退（-1）
         self._pad_steer = 0.0  # パッドの舵（-1〜1）
+        self._pad_intent = INTENT_ANY  # パッドの L / R
+        self._kb_intent_left = False  # Q を押している
+        self._kb_intent_right = False  # E を押している
         self._last_pad: Optional[PadInput] = None
         # 送っている向き（1: 前進、-1: 後退、0: 止まっている）
         self._drive_dir = 0
@@ -248,6 +251,11 @@ class E2ECollectorWindow(QMainWindow):
         self.lbl_pad = QLabel("未接続")
         self.lbl_pad.setWordWrap(True)
         telem_layout.addWidget(self.lbl_pad, 4, 1)
+
+        telem_layout.addWidget(QLabel("Intent:"), 5, 0)
+        self.lbl_intent = QLabel(INTENT_ANY)
+        self.lbl_intent.setStyleSheet("font-weight: bold;")
+        telem_layout.addWidget(self.lbl_intent, 5, 1)
         right_layout.addWidget(telem_group)
 
         # 速度設定
@@ -270,9 +278,12 @@ class E2ECollectorWindow(QMainWindow):
             "<b>A</b> : 左折 (Steer Left)<br>"
             "<b>D</b> : 右折 (Steer Right)<br>"
             "<b>X</b> : 直進に戻す (Center)<br>"
+            "<b>Q / E</b> : 押している間、意図を左 / 右にする (Intent)<br>"
             "<b>R</b> : 録画トグル (REC Toggle)<br><br>"
             "<b>プロコン</b>: A/ZR 前進、B/ZL 後退、X 停止、左スティック 舵、"
-            "十字←→ 舵いっぱい、＋ 録画トグル、－ 舵を中央へ、HOME 緊急停止<br>"
+            "十字←→ 舵いっぱい、L / R 意図 左 / 右、＋ 録画トグル、－ 舵を中央へ、HOME 緊急停止<br>"
+            "<small style='color:#555;'>※ 意図は「その先の分かれ道でどちらへ行きたいか」。"
+            "基本はまっすぐ、塞がれたら空いている側へ曲がる。</small><br>"
             "<small style='color:#555;'>※ 後退中のフレームは学習に使わない。</small><br><br>"
             "<small style='color:#555;'>※ ウィンドウをフォーカスして操作してください。</small>"
         )
@@ -316,6 +327,18 @@ class E2ECollectorWindow(QMainWindow):
         if self._pad_drive < 0:
             return -1
         return 0
+
+    def current_intent(self) -> str:
+        """キー（Q / E）とパッド（L / R）を合わせた意図"""
+        left = self._kb_intent_left or self._pad_intent == INTENT_LEFT
+        right = self._kb_intent_right or self._pad_intent == INTENT_RIGHT
+        return intent_of(left, right)
+
+    def _show_intent(self) -> None:
+        intent = self.current_intent()
+        self.lbl_intent.setText(intent)
+        color = "" if intent == INTENT_ANY else "color: #0275d8; "
+        self.lbl_intent.setStyleSheet(f"{color}font-weight: bold;")
 
     def _update_drive(self) -> None:
         """操作が変わった。向きが変われば走り出すか止める"""
@@ -383,11 +406,16 @@ class E2ECollectorWindow(QMainWindow):
                 # 抜けた。押していた操作は離したことにする
                 self._pad_drive = 0
                 self._pad_steer = 0.0
+                self._pad_intent = INTENT_ANY
+                self._show_intent()
                 self._update_drive()
             return
         if last is None:
             self.lbl_pad.setText(self.gamepad.name or "接続")
         self._pad_steer = state.steer
+        if state.intent != self._pad_intent:
+            self._pad_intent = state.intent
+            self._show_intent()
         drive_changed = state.drive != self._pad_drive
         self._pad_drive = state.drive
         # 止める操作を先に見る。押していた走行の操作は、離すまで止まったままにする
@@ -437,6 +465,9 @@ class E2ECollectorWindow(QMainWindow):
         """押しているキーをすべて離したことにする（操作が別のウィンドウへ移った時など）"""
         self._steer_left = False
         self._steer_right = False
+        self._kb_intent_left = False
+        self._kb_intent_right = False
+        self._show_intent()
         if self._kb_forward:
             self._kb_forward = False
             self._update_drive()
@@ -540,6 +571,8 @@ class E2ECollectorWindow(QMainWindow):
             "steering": round(steering_norm, 4),
             # 指令の期限が切れて止まった後は 0 にする（LRN-6）。後退は負（学習には使わない）
             "throttle": 0.5 if command.speed > 0 else (-0.5 if command.speed < 0 else 0.0),
+            # 行きたい向き（any / left / right）。モデルは画像とこれから舵角を出す
+            "intent": self.current_intent(),
             "stream_seq": seq,
             **sensors,
         }
@@ -576,6 +609,14 @@ class E2ECollectorWindow(QMainWindow):
         elif key == Qt.Key_X:
             self._center_steer()
 
+        elif key in (Qt.Key_Q, Qt.Key_E):
+            if not event.isAutoRepeat():
+                if key == Qt.Key_Q:
+                    self._kb_intent_left = True
+                else:
+                    self._kb_intent_right = True
+                self._show_intent()
+
         elif key == Qt.Key_R:
             self._toggle_recording()
 
@@ -593,6 +634,12 @@ class E2ECollectorWindow(QMainWindow):
             self._steer_left = False
         elif key == Qt.Key_D:
             self._steer_right = False
+        elif key == Qt.Key_Q:
+            self._kb_intent_left = False
+            self._show_intent()
+        elif key == Qt.Key_E:
+            self._kb_intent_right = False
+            self._show_intent()
         else:
             super().keyReleaseEvent(event)
 

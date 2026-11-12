@@ -88,6 +88,8 @@ def report_session(records: List[dict]) -> Dict:
         "usable": len(usable),
         "directions": {k: directions[k] for k in ("left", "straight", "right")},
         "turn_balance": round(min(turns) / max(turns), 2) if max(turns) else None,
+        # 意図ごとのフレーム数（学習に使えるフレーム）。意図を記録していない旧形式は any に数える
+        "intents": dict(sorted(Counter(r.get("intent", "any") for r in usable).items())),
         "saturated_ratio": round(saturated / len(usable), 3) if usable else None,
         "steering_deg_histogram": dict(
             sorted(
@@ -149,6 +151,7 @@ def print_report(name: str, report: Dict) -> None:
         f"（左右の比 {report['turn_balance']}）、最大近く {report['saturated_ratio']}"
     )
     print(f"舵角（5°刻み）: {report['steering_deg_histogram']}")
+    print(f"意図: {report['intents']}")
     notes = warnings(report)
     for note in notes:
         print(f"  注意: {note}")
