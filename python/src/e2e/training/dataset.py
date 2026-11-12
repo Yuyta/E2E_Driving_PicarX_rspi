@@ -12,6 +12,11 @@ from PIL import Image
 from torch.utils.data import Dataset
 from torchvision import transforms
 
+try:
+    from ..intent import one_hot
+except ImportError:
+    from src.e2e.intent import one_hot
+
 
 def resolve_session_dirs(
     data_dir: Union[str, Path, Sequence[Union[str, Path]]],
@@ -145,6 +150,8 @@ class DrivingDataset(Dataset):
                             "image_path": img_path,
                             "steering": float(record.get("steering", 0.0)),
                             "throttle": float(record.get("throttle", 0.0)),
+                            # 意図のない古い記録は any
+                            "intent": record.get("intent") or "any",
                             # 分割と集計は元のセッション単位で行う。
                             # 画像を複製していた旧形式の出力は cleaned_meta から元を読む
                             "session_id": (
@@ -181,8 +188,9 @@ class DrivingDataset(Dataset):
 
         steering = torch.tensor(sample["steering"], dtype=torch.float32)
         throttle = torch.tensor(sample["throttle"], dtype=torch.float32)
+        intent = torch.tensor(one_hot(sample["intent"]), dtype=torch.float32)
 
-        return image, steering, throttle
+        return image, steering, throttle, intent
 
     @property
     def source_session_dirs(self) -> List[Path]:

@@ -251,6 +251,9 @@ uv run python -m src.e2e.autonomous_driver --model models/<version>/model.onnx -
 # GUIウィンドウを表示せずヘッドレスで走行する場合
 uv run python -m src.e2e.autonomous_driver --model models/<version>/model.onnx --no_gui
 
+# どちらへも曲がれる場所で左を選ぶ (既定は any。意図を入力に持たないモデルでは any だけ)
+uv run python -m src.e2e.autonomous_driver --model models/<version>/model.onnx --intent left
+
 # カーブ旋回時・障害物接近時の減速チューニング (巡航を60、減速開始距離を50cmに変更。最低速度は40未満にしない)
 uv run python -m src.e2e.autonomous_driver --model models/<version>/model.onnx --speed 60 --min_speed 40 --slowdown_dist 50.0
 

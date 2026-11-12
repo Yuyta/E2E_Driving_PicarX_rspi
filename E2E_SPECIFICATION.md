@@ -182,23 +182,26 @@ PC上でカメラ映像をリアルタイム確認しながら手動操縦し、
 #### 4.3.1 モデル仕様 (`SmallDrivingCNN`)
 CPU推論を想定した4層の軽量CNN（推論時間の実測値は未記録）。
 
-- **入力**: `[Batch, 3, 120, 160]` (RGB画像)
+- **入力**: `[Batch, 3, 120, 160]` (RGB画像、ONNX の入力名 `input`) と `[Batch, 3]` (行きたい向き。`any`, `left`, `right` の順の 0 / 1、ONNX の入力名 `intent`、2026-11-12 から)
 - **出力**: `[Batch, 1]` (予測ステアリング角, `-1.0` 〜 `+1.0`)
+- **意図の扱い**: 意図ごとに出力の頭（ヘッド）を分ける分岐型（条件付きの模倣学習）。画像の特徴と1つ目の全結合層は共通で、意図に合う頭の値だけを出す。意図を特徴につなげるだけの形より意図に従わせやすい。意図を省くと `any`。記録に意図のない古いフレームも `any` として学習する
 - **ネットワーク構造**:
   ```text
   Input (3, 120, 160)
     │
-    ├── Conv2d(3 -> 16, 3x3, stride=2, padding=1) + BatchNorm2d + ReLU + MaxPool2d(2) -> (16, 30, 40)
-    ├── Conv2d(16 -> 32, 3x3, stride=1, padding=1) + BatchNorm2d + ReLU + MaxPool2d(2) -> (32, 15, 20)
-    ├── Conv2d(32 -> 64, 3x3, stride=1, padding=1) + BatchNorm2d + ReLU + MaxPool2d(2) -> (64, 7, 10)
-    ├── Conv2d(64 -> 64, 3x3, stride=1, padding=1) + BatchNorm2d + ReLU                 -> (64, 7, 10)
+    ├── Conv2d(3 -> 16, 5x5, stride=2) + BatchNorm2d + ReLU   -> (16, 58, 78)
+    ├── Conv2d(16 -> 32, 5x5, stride=2) + BatchNorm2d + ReLU  -> (32, 27, 37)
+    ├── Conv2d(32 -> 64, 5x5, stride=2) + BatchNorm2d + ReLU  -> (64, 12, 17)
+    ├── Conv2d(64 -> 64, 3x3, stride=1) + BatchNorm2d + ReLU  -> (64, 10, 15)
     │
-    ├── AdaptiveAvgPool2d((2, 2)) -> (64, 2, 2) = 256次元
+    ├── AdaptiveAvgPool2d((4, 4)) -> (64, 4, 4) = 1024次元
     ├── Flatten
+    ├── Linear(1024 -> 128) + ReLU + Dropout(0.3)               (意図で共通)
     │
-    ├── Linear(256 -> 64) + ReLU + Dropout(0.2)
-    ├── Linear(64 -> 32) + ReLU
-    └── Linear(32 -> 1) + Tanh
+    ├── 頭 any  : Linear(128 -> 32) + ReLU + Linear(32 -> 1) + Tanh
+    ├── 頭 left : 同上
+    ├── 頭 right: 同上
+    └── 出力 = 3つの頭の値と意図の 0 / 1 の積の和（意図の頭の値）
   ```
 
 #### 4.3.2 学習仕様 (`training/train.py`)
@@ -430,7 +433,7 @@ PiCarX/
 | **クリーンデータでの再学習** | `uv run python -m src.e2e.training.train --data_dir data/processed/clean_v2 --output_dir models/<version> --epochs 25` |
 | **モデルオフライン評価** | `uv run python -m src.e2e.evaluation.evaluate --data_dir data/raw --model_path models/<version>/best_model.pth` |
 | **MLOps レジストリ確認** | `uv run python -m src.e2e.registry.compare` |
-| **実機自律走行** | `uv run python -m src.e2e.autonomous_driver --model models/<version>/model.onnx --speed 50` |
+| **実機自律走行** | `uv run python -m src.e2e.autonomous_driver --model models/<version>/model.onnx --speed 50`（行きたい向きは `--intent left` / `right`、既定は `any`） |
 | **動きの実機計測** | `uv run python -m src.e2e.m3_check run --scenario still`（走る場面は `--i-understand-the-car-will-move`） |
 | **記録の動きの解析** | `uv run python -m src.e2e.motion.analyze --data_dir data/raw/<session_id>` |
 | **介入イベント一覧確認** | `uv run python -m src.e2e.dataset.disengagement_manager --list` |

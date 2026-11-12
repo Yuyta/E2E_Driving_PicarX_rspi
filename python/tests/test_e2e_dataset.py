@@ -61,7 +61,7 @@ def test_driving_dataset_single_session(mock_dataset_tree):
     assert len(dataset) == 3
     assert len(dataset.session_dirs) == 1
 
-    img, steer, throttle = dataset[0]
+    img, steer, throttle, intent = dataset[0]
     assert img.shape == (3, 120, 160)
     assert abs(steer.item() - 0.2) < 1e-4
     assert abs(throttle.item() - 0.5) < 1e-4
@@ -76,7 +76,7 @@ def test_driving_dataset_merged_sessions(mock_dataset_tree):
 
     # 各サンプルが取得できるか
     for i in range(5):
-        img, steer, _ = dataset[i]
+        img, steer, _, _ = dataset[i]
         assert img.shape == (3, 120, 160)
 
 

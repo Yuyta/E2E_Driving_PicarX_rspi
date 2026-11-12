@@ -43,6 +43,7 @@ def cross_validate(data_dir, params: Optional[Dict[str, Any]] = None, log=print)
     all_preds: List[float] = []
     all_targets: List[float] = []
     all_sessions: List[str] = []
+    all_intents: List[str] = []
 
     for held_out in sessions:
         train_idx = [i for i, s in enumerate(dataset.samples) if s["session_id"] != held_out]
@@ -53,18 +54,20 @@ def cross_validate(data_dir, params: Optional[Dict[str, Any]] = None, log=print)
         preds = predict_all(model, dataset, test_idx)
         targets = [dataset.samples[i]["steering"] for i in test_idx]
         session_ids = [held_out] * len(test_idx)
-        metrics = steering_metrics(preds, targets, session_ids)
+        intents = [dataset.samples[i]["intent"] for i in test_idx]
+        metrics = steering_metrics(preds, targets, session_ids, intents)
         folds.append({"held_out": held_out, **metrics})
 
         all_preds.extend(preds)
         all_targets.extend(targets)
         all_sessions.extend(session_ids)
+        all_intents.extend(intents)
 
     return {
         "method": "leave_one_session_out",
         "params": params,
         # すべての抜いたセッションの予測をまとめた指標。採用の判定はこれで比べる
-        "overall": steering_metrics(all_preds, all_targets, all_sessions),
+        "overall": steering_metrics(all_preds, all_targets, all_sessions, all_intents),
         "folds": folds,
         "data_fingerprint": provenance.data_fingerprint(dataset.samples),
         "code": provenance.git_state(),
@@ -94,6 +97,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"By direction: {overall['steering_mae_by_direction']}")
     print(f"Samples by direction: {overall['samples_by_direction']}")
     print(f"Steering change: {overall['steering_change']}")
+    print(f"By intent: {overall['steering_mae_by_intent']}")
+    print(f"Samples by intent: {overall['samples_by_intent']}")
     if args.output:
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
         with open(args.output, "w", encoding="utf-8") as f:

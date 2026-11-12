@@ -26,6 +26,8 @@ import time
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
+from src.e2e.intent import INTENT_ANY, intent_of
+
 # SDL のウィンドウを開かないので、ウィンドウの外でもパッドの入力を受け取る
 os.environ.setdefault("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1")
 # 面のボタンを刻印の文字ではなく位置で返す（下 = SDL の A、右 = B、左 = X、上 = Y）
@@ -61,18 +63,6 @@ SWITCH_BUTTONS = {
     "L": "CONTROLLER_BUTTON_LEFTSHOULDER",
     "R": "CONTROLLER_BUTTON_RIGHTSHOULDER",
 }
-
-# 行きたい向き（意図）。上の層（M5 の見回りと行き先）が走行モデルへ渡す値と同じ
-INTENT_ANY = "any"
-INTENT_LEFT = "left"
-INTENT_RIGHT = "right"
-
-
-def intent_of(left: bool, right: bool) -> str:
-    """左右どちらか一方だけを押している時はその向き。どちらも、またはどちらでもなければおまかせ"""
-    if left == right:
-        return INTENT_ANY
-    return INTENT_LEFT if left else INTENT_RIGHT
 
 
 @dataclass(frozen=True)

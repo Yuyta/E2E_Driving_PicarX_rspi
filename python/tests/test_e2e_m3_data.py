@@ -116,7 +116,7 @@ def test_cleaner_references_raw_images_instead_of_copying(tmp_path: Path, raw_di
     # 分割と集計は元のセッション単位
     assert {s["session_id"] for s in dataset.samples} == {"s1", "s2", "s3"}
     assert {p.name for p in dataset.source_session_dirs} == {"s1", "s2", "s3"}
-    image, steering, _ = dataset[0]
+    image, steering, _, _ = dataset[0]
     assert image.shape == (3, 120, 160)
 
 

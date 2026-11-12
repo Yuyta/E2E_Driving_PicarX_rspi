@@ -31,12 +31,14 @@ except ModuleNotFoundError:  # Python 3.10 以前
 
 try:
     from ..evaluation.metrics import inference_time_ms, predict_all, steering_metrics
+    from ..intent import INTENTS
     from . import provenance
     from .dataset import DrivingDataset
     from .model import SmallDrivingCNN
     from .onnx_utils import strip_export_debug_info
 except ImportError:
     from src.e2e.evaluation.metrics import inference_time_ms, predict_all, steering_metrics
+    from src.e2e.intent import INTENTS
     from src.e2e.training import provenance
     from src.e2e.training.dataset import DrivingDataset
     from src.e2e.training.model import SmallDrivingCNN
@@ -167,10 +169,10 @@ def _fit(dataset, train_idx, val_idx, params, log):
     for epoch in range(1, epochs + 1):
         model.train()
         train_loss = 0.0
-        for images, steerings, _ in train_loader:
+        for images, steerings, _, intents in train_loader:
             steerings = steerings.unsqueeze(1)
             optimizer.zero_grad()
-            loss = criterion(model(images), steerings)
+            loss = criterion(model(images, intents), steerings)
             loss.backward()
             optimizer.step()
             train_loss += loss.item() * images.size(0)
@@ -181,8 +183,8 @@ def _fit(dataset, train_idx, val_idx, params, log):
             model.eval()
             val_loss = 0.0
             with torch.no_grad():
-                for images, steerings, _ in val_loader:
-                    loss = criterion(model(images), steerings.unsqueeze(1))
+                for images, steerings, _, intents in val_loader:
+                    loss = criterion(model(images, intents), steerings.unsqueeze(1))
                     val_loss += loss.item() * images.size(0)
             val_loss /= len(val_idx)
             entry["val_loss"] = val_loss
@@ -202,16 +204,22 @@ def _fit(dataset, train_idx, val_idx, params, log):
 
 def export_onnx(model: SmallDrivingCNN, onnx_path: Path) -> None:
     dummy_input = torch.zeros(1, 3, INPUT_HEIGHT, INPUT_WIDTH)
+    dummy_intent = torch.zeros(1, len(INTENTS))
+    dummy_intent[0, 0] = 1.0
     torch.onnx.export(
         model,
-        dummy_input,
+        (dummy_input, dummy_intent),
         str(onnx_path),
         export_params=True,
         opset_version=17,
         do_constant_folding=True,
-        input_names=["input"],
+        input_names=["input", "intent"],
         output_names=["steering"],
-        dynamic_axes={"input": {0: "batch_size"}, "steering": {0: "batch_size"}},
+        dynamic_axes={
+            "input": {0: "batch_size"},
+            "intent": {0: "batch_size"},
+            "steering": {0: "batch_size"},
+        },
     )
     # 新しい exporter（既定）は進捗に絵文字を出す。cp932 の端末では main() で置き換えて表示する。
     # 旧 exporter（dynamo=False）は AdaptiveAvgPool2d の 7x10 -> 2x2 を出力できないので使わない
@@ -244,6 +252,7 @@ def train(data_dir, output_model_dir, params: Optional[Dict[str, Any]] = None) -
         preds,
         [dataset.samples[i]["steering"] for i in val_idx],
         [dataset.samples[i]["session_id"] for i in val_idx],
+        [dataset.samples[i]["intent"] for i in val_idx],
     )
 
     metadata = {
@@ -252,6 +261,8 @@ def train(data_dir, output_model_dir, params: Optional[Dict[str, Any]] = None) -
         "batch_size": params["batch_size"],
         "best_val_loss": best_val_loss,
         "input_shape": [1, 3, INPUT_HEIGHT, INPUT_WIDTH],
+        # 2つ目の入力。any, left, right の順の 0 / 1（ONNX の入力名は intent）
+        "intent_input": {"shape": [1, len(INTENTS)], "order": list(INTENTS)},
         "output": "steering (-1.0 to 1.0)",
         "sessions": train_sessions + val_sessions,
         "total_samples": len(dataset),
@@ -279,6 +290,9 @@ def train(data_dir, output_model_dir, params: Optional[Dict[str, Any]] = None) -
             "skipped_motion_mismatch": dataset.skipped_motion_mismatch,
             # 前進の指令がなく止まっていたので学習から外したフレーム
             "skipped_stopped": dataset.skipped_stopped,
+            "samples_by_intent": {
+                name: sum(1 for s in dataset.samples if s["intent"] == name) for name in INTENTS
+            },
         },
         "code": provenance.git_state(),
         "environment": provenance.environment(),

@@ -37,6 +37,7 @@ def evaluate(data_dir, model_path):
         preds,
         [dataset.samples[i]["steering"] for i in indices],
         [dataset.samples[i]["session_id"] for i in indices],
+        [dataset.samples[i]["intent"] for i in indices],
     )
 
     metrics = {
@@ -46,6 +47,8 @@ def evaluate(data_dir, model_path):
         "steering_mae_by_direction": detail["steering_mae_by_direction"],
         "samples_by_direction": detail["samples_by_direction"],
         "steering_change": detail["steering_change"],
+        "steering_mae_by_intent": detail["steering_mae_by_intent"],
+        "samples_by_intent": detail["samples_by_intent"],
         "inference_ms_pc": inference_time_ms(model),
         "data_dir": str(data_dir),
     }
@@ -56,6 +59,7 @@ def evaluate(data_dir, model_path):
     print(f"Steering MAE   : ±{metrics['steering_mae_degrees']}° (Degrees)")
     print(f"By direction   : {metrics['steering_mae_by_direction']}")
     print(f"Steering change: {metrics['steering_change']}")
+    print(f"By intent      : {metrics['steering_mae_by_intent']}")
     print(f"Inference (PC) : {metrics['inference_ms_pc']} ms")
 
     eval_file = Path(model_path).parent / "eval_metrics.json"

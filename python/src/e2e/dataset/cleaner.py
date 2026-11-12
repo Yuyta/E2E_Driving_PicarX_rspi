@@ -16,9 +16,11 @@ from PIL import Image
 from torchvision import transforms
 
 try:
+    from ..intent import one_hot
     from ..training.dataset import DrivingDataset
     from ..training.model import SmallDrivingCNN
 except ImportError:
+    from src.e2e.intent import one_hot
     from src.e2e.training.dataset import DrivingDataset
     from src.e2e.training.model import SmallDrivingCNN
 
@@ -75,6 +77,9 @@ class DatasetCleaner:
                 raise ImportError("onnxruntime is required to run ONNX models.")
             self.ort_session = ort.InferenceSession(str(self.model_path))
             self.input_name = self.ort_session.get_inputs()[0].name
+            self.has_intent_input = any(
+                i.name == "intent" for i in self.ort_session.get_inputs()
+            )
         else:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             self.torch_model = SmallDrivingCNN().to(self.device)
@@ -83,18 +88,21 @@ class DatasetCleaner:
             )
             self.torch_model.eval()
 
-    def predict(self, image: Image.Image) -> float:
-        """単一画像のステアリング角を推論 (-1.0 to 1.0)"""
+    def predict(self, image: Image.Image, intent: Optional[str] = None) -> float:
+        """単一画像のステアリング角を推論 (-1.0 to 1.0)。意図を省くと おまかせ"""
         tensor = self.transform(image).unsqueeze(0)
+        intent_tensor = torch.tensor([one_hot(intent)], dtype=torch.float32)
 
         if self.is_onnx:
             input_feed = {self.input_name: tensor.numpy()}
+            if self.has_intent_input:
+                input_feed["intent"] = intent_tensor.numpy()
             output = self.ort_session.run(None, input_feed)[0]
             return float(output[0][0])
         else:
             with torch.no_grad():
                 tensor = tensor.to(self.device)
-                output = self.torch_model(tensor)
+                output = self.torch_model(tensor, intent_tensor.to(self.device))
                 return float(output.cpu().item())
 
     def analyze_dataset(
@@ -114,7 +122,7 @@ class DatasetCleaner:
 
             try:
                 img = Image.open(img_path).convert("RGB")
-                pred_steering = self.predict(img)
+                pred_steering = self.predict(img, info["intent"])
             except Exception as e:
                 print(f"Warning: Failed to process {img_path}: {e}")
                 continue

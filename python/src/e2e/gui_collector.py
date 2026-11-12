@@ -26,7 +26,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from src.e2e.gamepad import INTENT_ANY, INTENT_LEFT, INTENT_RIGHT, Gamepad, PadInput, intent_of
+from src.e2e.gamepad import Gamepad, PadInput
+from src.e2e.intent import INTENT_ANY, INTENT_LEFT, INTENT_RIGHT, intent_of
 from src.e2e.motion.monitor import (
     CommandState,
     MonitorUpdate,

@@ -1,15 +1,26 @@
 """
 Lightweight End-to-End CNN model for PiCar-X Steering Prediction
 NVIDIA DAVE-2 / PilotNet に着想を得た、CPUでも高速動作する軽量CNNモデル
+
+行きたい向き（意図: any / left / right）ごとに出力の頭（ヘッド）を分ける（条件付きの模倣学習の
+分岐型）。画像の特徴は共通で、意図に合う頭の舵角だけを出す。意図を特徴につなげるだけの形より、
+意図に従わせやすい（ROADMAP の M3「行きたい向きの入力」）。
 """
+
+from typing import Optional
 
 import torch
 import torch.nn as nn
 
+try:
+    from ..intent import INTENTS
+except ImportError:
+    from src.e2e.intent import INTENTS
+
 
 class SmallDrivingCNN(nn.Module):
     """
-    入力: (B, 3, 120, 160)
+    入力: 画像 (B, 3, 120, 160) と意図 (B, 3)。意図は any, left, right の順の 0 / 1
     出力: (B, 1) - ステアリング予測値 (-1.0 ~ 1.0)
     """
 
@@ -37,19 +48,31 @@ class SmallDrivingCNN(nn.Module):
             nn.AdaptiveAvgPool2d((4, 4)),  # 固定サイズ 64 x 4 x 4 = 1024
         )
 
-        # 全結合層
+        # 全結合層（意図で共通）
         self.fc = nn.Sequential(
             nn.Linear(64 * 4 * 4, 128),
             nn.ReLU(inplace=True),
             nn.Dropout(0.3),
-            nn.Linear(128, 32),
-            nn.ReLU(inplace=True),
-            nn.Linear(32, 1),
-            nn.Tanh(),  # 出力を -1.0 〜 1.0 に正規化
+        )
+        # 意図ごとの頭
+        self.heads = nn.ModuleList(
+            nn.Sequential(
+                nn.Linear(128, 32),
+                nn.ReLU(inplace=True),
+                nn.Linear(32, 1),
+                nn.Tanh(),  # 出力を -1.0 〜 1.0 に正規化
+            )
+            for _ in INTENTS
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor, intent: Optional[torch.Tensor] = None) -> torch.Tensor:
+        """意図を省くと おまかせ（any）"""
+        if intent is None:
+            intent = torch.zeros(x.shape[0], len(INTENTS), dtype=x.dtype, device=x.device)
+            intent[:, 0] = 1.0
         x = self.features(x)
         x = torch.flatten(x, 1)
         x = self.fc(x)
-        return x
+        # 全部の頭を計算し、意図の 0 / 1 で1つを選ぶ（ONNX でも同じ形で出せる）
+        outputs = torch.cat([head(x) for head in self.heads], dim=1)  # (B, 3)
+        return (outputs * intent).sum(dim=1, keepdim=True)

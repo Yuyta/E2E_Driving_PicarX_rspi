@@ -26,6 +26,7 @@ import httpx
 import numpy as np
 import onnxruntime as ort
 
+from src.e2e.intent import INTENT_ANY, INTENTS, one_hot
 from src.models import DRIVE_SPEED, MIN_MOVING_SPEED, DriveDirection
 from src.picarx_client.client import PicarxClient
 
@@ -90,6 +91,7 @@ class RemoteAutonomousDriver:
         decay_rate=0.001,
         log_dir="data/disengagements",
         buffer_frames=30,
+        intent=INTENT_ANY,
     ):
         self.model_path = model_path
         self.speed = speed
@@ -109,6 +111,9 @@ class RemoteAutonomousDriver:
         print(f"Loading ONNX Model from: {model_path}")
         self.session = ort.InferenceSession(model_path)
         self.input_name = self.session.get_inputs()[0].name
+        # 行きたい向き（意図）を入力に持つモデルか。持たないモデルは常に おまかせ
+        self.has_intent_input = any(i.name == "intent" for i in self.session.get_inputs())
+        self.set_intent(intent)
 
         # 既存クライアント再利用 (Rust APIサーバー経由)
         self.client = PicarxClient(timeout=CONTROL_TIMEOUT_SEC)
@@ -163,6 +168,19 @@ class RemoteAutonomousDriver:
                 decay_rate=decay_rate,
             )
             self.visualizer = MapVisualizer(self.grid_map, display_scale=3)
+
+    def set_intent(self, intent: str) -> None:
+        """行きたい向き（any / left / right）。M5 の見回りと行き先が分かれ道ごとに変える"""
+        if intent not in INTENTS:
+            raise ValueError(f"Unknown intent: {intent!r} (expected one of {INTENTS})")
+        if intent != INTENT_ANY and not self.has_intent_input:
+            raise ValueError("This model has no intent input; only 'any' is possible")
+        self.intent = intent
+        self._intent_feed = (
+            {"intent": np.array([one_hot(intent)], dtype=np.float32)}
+            if self.has_intent_input
+            else {}
+        )
 
     def preprocess(self, bgr_img):
         """BGR画像 -> (1, 3, 120, 160) の正規化Tensor"""
@@ -528,7 +546,9 @@ class RemoteAutonomousDriver:
                 # ----------------------------------------------------
                 with self.profiler.stage("inference"):
                     input_tensor = self.preprocess(frame)
-                    outputs = self.session.run(None, {self.input_name: input_tensor})
+                    outputs = self.session.run(
+                        None, {self.input_name: input_tensor, **self._intent_feed}
+                    )
                 steering_norm = float(outputs[0][0][0])  # -1.0 ~ 1.0
 
                 # ----------------------------------------------------
@@ -638,6 +658,12 @@ def main():
     )
     parser.add_argument("--model", type=str, required=True, help="Path to ONNX model")
     parser.add_argument("--speed", type=int, default=DRIVE_SPEED, help="Base driving speed (0-100)")
+    parser.add_argument(
+        "--intent",
+        choices=INTENTS,
+        default=INTENT_ANY,
+        help="Preferred direction where both ways are open (any, left, right)",
+    )
     parser.add_argument(
         "--min_speed",
         type=int,
@@ -753,6 +779,7 @@ def main():
         cell_size_m=args.cell_size,
         log_dir=args.log_dir,
         buffer_frames=args.buffer_frames,
+        intent=args.intent,
     )
     driver.run()
 
