@@ -156,9 +156,7 @@ def test_wheels_spinning_without_motion_is_flagged():
 
 def test_approaching_wall_without_texture_is_not_flagged():
     # 画像はほとんど動かないが、超音波で近づいているのが分かる
-    result = MotionChecker().check(
-        Command(60, 0, since_s=2.0), sample(**STILL, approach_cm_s=12.0)
-    )
+    result = MotionChecker().check(Command(60, 0, since_s=2.0), sample(**STILL, approach_cm_s=12.0))
     assert result.flags == []
 
 
@@ -351,3 +349,13 @@ def test_analyze_session_counts_mismatches(tmp_path: Path):
     assert counts[NO_MOTION] == counts["frames"] > 0
     assert counts["legacy_commands"] == 0
     assert all(r["check"]["flags"] == [NO_MOTION] for r in results)
+
+
+def test_turn_is_not_judged_from_an_unsure_estimate():
+    # 白い壁の前など、模様の点が少ない時の向きの推定は信じない
+    config = CheckerConfig(turn_min_points=60, turn_min_inliers=0.6)
+    unsure = sample(points=30, inlier_ratio=0.4, yaw_rate_dps=-35.0)
+    result = MotionChecker(config).check(Command(50, 0, since_s=2.0), unsure)
+    assert result.flags == [] and result.unknown == "turn_unsure"
+    sure = sample(points=100, inlier_ratio=0.8, yaw_rate_dps=-35.0)
+    assert MotionChecker(config).check(Command(50, 0, since_s=2.0), sure).flags == ["turn_mismatch"]

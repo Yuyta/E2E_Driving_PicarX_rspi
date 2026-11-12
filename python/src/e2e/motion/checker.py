@@ -63,6 +63,11 @@ class CheckerConfig:
     straight_max_rate_dps: float = 15.0  # 直進の指令でこれより速く曲がればズレ
     still_cm_s: float = 2.0  # 超音波の距離の変化がこれ未満なら止まっている
     uncommanded_min_inliers: float = 0.6  # 景色全体が動いたとみなす特徴点の割合
+    # 曲がり方は、模様の点がこれ以上あり、合う点の割合がこれ以上の時だけ確かめる。
+    # 白い壁や床の多い部屋では、点が少ない時の向きの推定がばらつき、直進中のフレームの
+    # 半分に誤って印が付いた（2026-11-12）。既定は 0（常に確かめる）
+    turn_min_points: int = 0
+    turn_min_inliers: float = 0.0
     uncommanded_px_s: float = 8.0  # 指令なしで動いたとみなす画像の動き（ピクセル/秒）
     sustain_s: float = 1.0  # これだけ続いたら走行を止める
     # 速度と舵角から曲がる量を計算するための値。校正するまでは None（向きの符号だけを確かめる）
@@ -159,6 +164,9 @@ class MotionChecker:
             return
 
         # 2. 曲がり方（後退では舵角に対して向きの変化が逆になる）
+        if motion.points < cfg.turn_min_points or motion.inlier_ratio < cfg.turn_min_inliers:
+            result.unknown = "turn_unsure"
+            return
         yaw = motion.yaw_rate_dps
         steer = command.steering_deg
         direction = 1.0 if command.speed > 0 else -1.0

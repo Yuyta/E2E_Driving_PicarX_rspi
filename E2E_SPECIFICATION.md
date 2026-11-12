@@ -423,6 +423,7 @@ PiCarX/
 | 目的 | コマンド (PowerShell) |
 |---|---|
 | **データ収集GUI起動** | `uv run python -m src.e2e.gui_collector` |
+| **決まったルールで走って自動で収集** | `uv run python -m src.e2e.auto_collector --seconds 150 --i-understand-the-car-will-move`（車が動く。床のケーブルと布団などの柔らかい物を片付けてから。ルールは `auto_collector.py` の冒頭） |
 | **プロコンの接続と割り当ての確認** | `uv run python -m src.e2e.gamepad`（押したボタンの刻印と操作を表示） |
 | **収集したセッションの確認** | `uv run python -m src.e2e.dataset.session_report --data_dir data/raw`（fps、走行中の割合、左右と舵角の偏り、食い違いの印、取りこぼし） |
 | **マニフェストの作成と確認** | `uv run python -m src.e2e.dataset.manifest --data_dir data/raw`（確認は `--verify`） |

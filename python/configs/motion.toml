@@ -18,6 +18,10 @@ min_turn_rate_dps = 8.0
 straight_max_rate_dps = 15.0  # 2026-11-09 確認。舵の中心を補正（Pi の DIR_SERVO_OFFSET=6）した後の直進は -7.9〜+3.7°/s
 still_cm_s = 2.0
 uncommanded_min_inliers = 0.6
+# 曲がり方を確かめるのは、向きの推定が信頼できる時だけ（2026-11-12、白い部屋で直進中の
+# フレームの半分に誤った turn_mismatch が付いた。信頼できる推定だけなら直進のずれは -0.1°/s）
+turn_min_points = 60
+turn_min_inliers = 0.6
 uncommanded_px_s = 6.7        # 2026-11-09 校正（人が横切る p99 2.2、押す p50 20.3）
 sustain_s = 1.0
 # 校正したら書く（どちらかが未設定なら、曲がる量ではなく向きの符号だけを確かめる）
