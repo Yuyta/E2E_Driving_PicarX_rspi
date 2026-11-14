@@ -107,6 +107,50 @@ def blocked_label(
     return None
 
 
+# 引っかかったフレームの前後で、「空いている」のラベルを信じないフレーム数（15fps で約1秒）
+BLOCKED_STUCK_CONTEXT = 15
+
+
+def is_stuck(record: Dict[str, Any]) -> bool:
+    """前へ進む指令なのに、画像も距離も変わらなかった（`motion_check` の no_motion）"""
+    flags = (record.get("motion_check") or {}).get("flags") or []
+    if "no_motion" not in flags:
+        return False
+    command = record.get("command") or {}
+    speed = command.get("speed")
+    if speed is None:
+        return float(record.get("throttle", 0.0)) > 0.0
+    return float(speed) > 0.0
+
+
+def blocked_labels(
+    records: Sequence[Dict[str, Any]],
+    near_cm: float = BLOCKED_NEAR_CM,
+    clear_cm: float = BLOCKED_CLEAR_CM,
+    stuck: bool = True,
+    stuck_context: int = BLOCKED_STUCK_CONTEXT,
+) -> List[Optional[bool]]:
+    """1セッションの記録（時刻順）の、前方が塞がっているかのラベル
+
+    超音波の距離から決める（`blocked_label`）。`stuck` なら、前へ進めずに引っかかったフレームは
+    距離によらず塞がっているとし、その前後 `stuck_context` フレームの「空いている」は不明にする。
+    布のように音を吸う物や細い脚に当たると、反射が戻らず「遠い」と読めてしまう。実データでは、
+    反射なしのまま約1秒動けず、その後に下がった場面の画像が、カーテンや布に押し付けられていた
+    （2026-11-14 に確認、引っかかったフレームの7割は超音波で「空いている」だった）。
+    """
+    labels = [blocked_label(record, near_cm, clear_cm) for record in records]
+    if not stuck:
+        return labels
+    stuck_at = [i for i, record in enumerate(records) if is_stuck(record)]
+    for i in stuck_at:
+        for k in range(max(0, i - stuck_context), min(len(records), i + stuck_context + 1)):
+            if labels[k] is False:
+                labels[k] = None
+    for i in stuck_at:
+        labels[i] = True
+    return labels
+
+
 # 自動収集（auto_collector）で、障害物を避ける曲がりと開けた場所での曲がりの状態
 TURN_STATES = ("avoid", "open_turn")
 
@@ -167,6 +211,7 @@ class DrivingDataset(Dataset):
         blocked_near_cm: float = BLOCKED_NEAR_CM,
         blocked_clear_cm: float = BLOCKED_CLEAR_CM,
         turn_intent: bool = False,
+        blocked_stuck: bool = True,
     ):
         """
         Args:
@@ -183,6 +228,8 @@ class DrivingDataset(Dataset):
             blocked_near_cm, blocked_clear_cm: 前方が塞がっているかのラベルの境界（`blocked_label`）
             turn_intent: True の場合、曲がりの区間に曲がった向きを意図として付け直す
                 （`turn_intents`）。記録のままの意図は `intent_recorded` に残る
+            blocked_stuck: True の場合、引っかかったフレームを塞がっているとし、前後の
+                「空いている」を不明にする（`blocked_labels`）
         """
         self.session_dirs = resolve_session_dirs(data_dir)
         self.samples: List[Dict[str, Any]] = []
@@ -192,6 +239,10 @@ class DrivingDataset(Dataset):
         self.kept_for_blocked_only = 0
         # 曲がりの区間なので、意図を おまかせ から左右へ付け直したフレーム
         self.relabeled_turn_intent = 0
+        # 引っかかったので塞がっているとしたフレームのうち、超音波では空いているか不明だったもの
+        self.stuck_blocked = 0
+        # 引っかかったフレームの近くなので、「空いている」から不明にしたフレーム
+        self.stuck_unknown = 0
 
         for s_dir in self.session_dirs:
             labels_file = s_dir / "labels.jsonl"
@@ -201,9 +252,20 @@ class DrivingDataset(Dataset):
                 records = [json.loads(line) for line in f if line.strip()]
             recorded = [record.get("intent") or INTENT_ANY for record in records]
             intents = turn_intents(records) if turn_intent else recorded
+            plain = blocked_labels(records, blocked_near_cm, blocked_clear_cm, stuck=False)
+            labels = (
+                blocked_labels(records, blocked_near_cm, blocked_clear_cm)
+                if blocked_stuck
+                else plain
+            )
+            # 超音波では塞がっていなかったが、引っかかったので塞がっているとした
+            by_stuck = [bool(b and not a) for a, b in zip(plain, labels)]
+            self.stuck_blocked += sum(by_stuck)
+            self.stuck_unknown += sum(1 for a, b in zip(plain, labels) if a is False and b is None)
 
-            for record, intent, intent_recorded in zip(records, intents, recorded):
-                blocked = blocked_label(record, blocked_near_cm, blocked_clear_cm)
+            for record, intent, intent_recorded, blocked, blocked_by_stuck in zip(
+                records, intents, recorded, labels, by_stuck
+            ):
                 steer_valid = True
 
                 # 学習除外フラグの確認 (未承認の介入データや外れ値データをスキップ)
@@ -257,6 +319,8 @@ class DrivingDataset(Dataset):
                         "steer_valid": steer_valid,
                         # 前方が塞がっているか。None は不明
                         "blocked": blocked,
+                        # 超音波ではなく、引っかかったことから塞がっているとした
+                        "blocked_by_stuck": blocked_by_stuck,
                         # 分割と集計は元のセッション単位で行う。
                         # 画像を複製していた旧形式の出力は cleaned_meta から元を読む
                         "session_id": (

@@ -73,6 +73,8 @@ DEFAULT_PARAMS: Dict[str, Any] = {
     # 塞がっているかのラベルの境界（cm）。間の距離のフレームはこの学習に使わない
     "blocked_near_cm": BLOCKED_NEAR_CM,
     "blocked_clear_cm": BLOCKED_CLEAR_CM,
+    # 前へ進めずに引っかかったフレームを塞がっているとし、前後の「空いている」を不明にする
+    "blocked_stuck": True,
     # 曲がりの区間に、曲がった向きを意図として付け直す（dataset.turn_intents）
     "turn_intent": False,
     # 学習用のフレームに、左右反転した複製を加える（舵角の符号と意図の左右を入れ替える）。
@@ -118,6 +120,7 @@ def load_dataset(data_dir, params: Dict[str, Any]) -> DrivingDataset:
         blocked_near_cm=float(params["blocked_near_cm"]),
         blocked_clear_cm=float(params["blocked_clear_cm"]),
         turn_intent=bool(params["turn_intent"]),
+        blocked_stuck=bool(params["blocked_stuck"]),
     )
 
 
@@ -470,6 +473,7 @@ def train(data_dir, output_model_dir, params: Optional[Dict[str, Any]] = None) -
             "trained": learns_blocked(params),
             "label_near_cm": params["blocked_near_cm"],
             "label_clear_cm": params["blocked_clear_cm"],
+            "label_stuck": params["blocked_stuck"],
         },
         "sessions": train_sessions + val_sessions,
         "total_samples": len(dataset),
@@ -501,6 +505,9 @@ def train(data_dir, output_model_dir, params: Optional[Dict[str, Any]] = None) -
             "kept_for_blocked_only": dataset.kept_for_blocked_only,
             # 曲がりの区間なので、意図を左右へ付け直したフレーム（turn_intent）
             "relabeled_turn_intent": dataset.relabeled_turn_intent,
+            # 引っかかったので塞がっているとしたフレームと、その近くで不明にしたフレーム
+            "stuck_blocked": dataset.stuck_blocked,
+            "stuck_unknown": dataset.stuck_unknown,
             "samples_by_intent": {
                 name: sum(1 for s in dataset.samples if s["intent"] == name and s["steer_valid"])
                 for name in INTENTS
@@ -567,6 +574,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Relabel turns with the direction they turned as the intent",
     )
     parser.add_argument(
+        "--blocked_stuck",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Label frames where the car was stuck as blocked",
+    )
+    parser.add_argument(
         "--flip_augment",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -585,6 +598,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "blocked_loss_weight": args.blocked_loss_weight,
             "turn_intent": args.turn_intent,
             "flip_augment": args.flip_augment,
+            "blocked_stuck": args.blocked_stuck,
         },
     )
     data_input = args.data_dir[0] if len(args.data_dir) == 1 else args.data_dir

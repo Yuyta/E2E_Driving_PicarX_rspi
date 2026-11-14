@@ -13,7 +13,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
 
@@ -61,6 +61,44 @@ def intent_means(dataset, train_idx, intents: List[str]) -> List[float]:
     return [means.get(name, 0.0) for name in intents]
 
 
+BLOCKED_THRESHOLDS = (0.2, 0.3, 0.4, 0.5, 0.6, 0.7)
+
+
+def blocked_detail(
+    probs: Sequence[float], labels: Sequence[bool], by_stuck: Sequence[bool]
+) -> Dict[str, Any]:
+    """塞がっているかの内訳: しきい値ごとの再現率と適合率、ラベルの出どころ別
+
+    `ultrasonic` は引っかかったことから付けたラベルを除いた指標で、この規則を入れる前の交差検証と
+    比べやすい。`stuck_recall` は、超音波で見えずに引っかかった場面を画像から当てられた割合。
+    """
+    sweep = []
+    for threshold in BLOCKED_THRESHOLDS:
+        m = blocked_metrics(probs, labels, threshold=threshold)
+        sweep.append(
+            {
+                "threshold": threshold,
+                "recall": m["recall"],
+                "precision": m["precision"],
+                "accuracy": m["accuracy"],
+            }
+        )
+    keep = [i for i, stuck in enumerate(by_stuck) if not stuck]
+    stuck_idx = [i for i, stuck in enumerate(by_stuck) if stuck]
+    ultrasonic = blocked_metrics([probs[i] for i in keep], [labels[i] for i in keep])
+    stuck_probs = [probs[i] for i in stuck_idx]
+    return {
+        "thresholds": sweep,
+        "ultrasonic": ultrasonic,
+        "stuck_samples": len(stuck_idx),
+        "stuck_recall": (
+            round(sum(1 for p in stuck_probs if p >= 0.5) / len(stuck_probs), 4)
+            if stuck_probs
+            else None
+        ),
+    }
+
+
 def cross_validate(data_dir, params: Optional[Dict[str, Any]] = None, log=print) -> Dict[str, Any]:
     params = load_params(overrides=params)
     dataset = load_dataset(data_dir, params)
@@ -76,6 +114,7 @@ def cross_validate(data_dir, params: Optional[Dict[str, Any]] = None, log=print)
     all_intents: List[str] = []
     all_blocked_probs: List[float] = []
     all_blocked_labels: List[bool] = []
+    all_blocked_by_stuck: List[bool] = []
     # 画像を見ない答え方。モデルがこれより良ければ、画像を使えている
     all_intent_mean: List[float] = []
 
@@ -101,6 +140,7 @@ def cross_validate(data_dir, params: Optional[Dict[str, Any]] = None, log=print)
             metrics["blocked"] = blocked_metrics(probs, labels)
             all_blocked_probs.extend(probs)
             all_blocked_labels.extend(labels)
+            all_blocked_by_stuck.extend(dataset.samples[i]["blocked_by_stuck"] for i in blocked_idx)
         folds.append({"held_out": held_out, **metrics})
 
         all_preds.extend(preds)
@@ -118,6 +158,9 @@ def cross_validate(data_dir, params: Optional[Dict[str, Any]] = None, log=print)
     }
     if with_blocked:
         overall["blocked"] = blocked_metrics(all_blocked_probs, all_blocked_labels)
+        overall["blocked_detail"] = blocked_detail(
+            all_blocked_probs, all_blocked_labels, all_blocked_by_stuck
+        )
     return {
         "method": "leave_one_session_out",
         "params": params,
@@ -150,6 +193,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="Relabel turns with the direction they turned as the intent",
     )
     parser.add_argument(
+        "--blocked_stuck",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Label frames where the car was stuck as blocked",
+    )
+    parser.add_argument(
         "--flip_augment",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -166,6 +215,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "blocked_loss_weight": args.blocked_loss_weight,
             "turn_intent": args.turn_intent,
             "flip_augment": args.flip_augment,
+            "blocked_stuck": args.blocked_stuck,
         },
     )
     data_input = args.data_dir[0] if len(args.data_dir) == 1 else args.data_dir
@@ -189,6 +239,14 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
     if "blocked" in overall:
         print(f"Blocked: {overall['blocked']}")
+        detail = overall["blocked_detail"]
+        print(f"Blocked (ultrasonic labels only): {detail['ultrasonic']}")
+        print(f"Stuck frames detected: {detail['stuck_recall']} of {detail['stuck_samples']}")
+        for row in detail["thresholds"]:
+            print(
+                f"  threshold {row['threshold']}: "
+                f"recall {row['recall']}, precision {row['precision']}"
+            )
     if args.output:
         Path(args.output).parent.mkdir(parents=True, exist_ok=True)
         with open(args.output, "w", encoding="utf-8") as f:
