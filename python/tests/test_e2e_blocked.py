@@ -206,3 +206,29 @@ def test_cross_validation_reports_blocked_metrics(tmp_path: Path):
 
     plain = cross_validate(raw, {"epochs": 1, "batch_size": 8}, log=lambda _m: None)
     assert "blocked" not in plain["overall"]
+
+
+# --- Pi の tract で読める形での書き出し ---
+
+
+@pytest.mark.parametrize("in_size, out_size", [(10, 4), (15, 4), (7, 2), (8, 4)])
+def test_matrix_pool_matches_adaptive_avg_pool(in_size, out_size):
+    from src.e2e.training.model import MatrixAdaptivePool
+
+    torch.manual_seed(0)
+    x = torch.rand(2, 5, in_size, in_size + 3)
+    pool = MatrixAdaptivePool((in_size, in_size + 3), (out_size, out_size))
+    expected = torch.nn.AdaptiveAvgPool2d(out_size)(x)
+    assert torch.allclose(pool(x), expected, atol=1e-6)
+
+
+def test_onnx_uses_only_ops_that_tract_reads(tmp_path: Path):
+    import onnx
+
+    torch.manual_seed(0)
+    path = tmp_path / "model.onnx"
+    export_onnx(SmallDrivingCNN().eval(), path)
+    ops = {node.op_type for node in onnx.load(str(path)).graph.node}
+    # AdaptiveAvgPool2d の 10 x 15 -> 4 x 4 は GatherND になり、tract が読めなかった（2026-11-14）
+    assert not ops & {"GatherND", "Gather", "Where"}
+    assert "MatMul" in ops

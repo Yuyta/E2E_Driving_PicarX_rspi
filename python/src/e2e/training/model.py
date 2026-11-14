@@ -88,8 +88,13 @@ class SmallDrivingCNN(nn.Module):
         if intent is None:
             intent = torch.zeros(x.shape[0], len(INTENTS), dtype=x.dtype, device=x.device)
             intent[:, 0] = 1.0
-        x = self.features(x)
-        x = torch.flatten(x, 1)
+        return self.forward_pooled(self.features(x), intent)
+
+    def forward_pooled(
+        self, pooled: torch.Tensor, intent: torch.Tensor
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """プーリングの後（64 x 4 x 4）から、舵角と塞がっているかのロジット"""
+        x = torch.flatten(pooled, 1)
         x = self.fc(x)
         # 全部の頭を計算し、意図の 0 / 1 で1つを選ぶ（ONNX でも同じ形で出せる）
         outputs = torch.cat([head(x) for head in self.heads], dim=1)  # (B, 3)
@@ -97,13 +102,59 @@ class SmallDrivingCNN(nn.Module):
         return steering, self.blocked_head(x)
 
 
-class ExportModel(nn.Module):
-    """ONNX 用。舵角と、前方が塞がっている確率（0〜1）を出す"""
+def adaptive_pool_matrix(in_size: int, out_size: int) -> torch.Tensor:
+    """AdaptiveAvgPool と同じ区間で平均する行列
 
-    def __init__(self, model: SmallDrivingCNN):
+    区間は start = floor(i*in/out)、end = ceil((i+1)*in/out)
+    """
+    matrix = torch.zeros(out_size, in_size)
+    for i in range(out_size):
+        start = (i * in_size) // out_size
+        end = -((-(i + 1) * in_size) // out_size)
+        matrix[i, start:end] = 1.0 / (end - start)
+    return matrix
+
+
+class MatrixAdaptivePool(nn.Module):
+    """入力の大きさが決まっている時の AdaptiveAvgPool2d。左右から定数の行列を掛ける
+
+    10 x 15 から 4 x 4 のように割り切れないと、ONNX へ書き出した AdaptiveAvgPool2d は GatherND を
+    使う形になり、Pi で使う tract が読めない（2026-11-14 に確認）。行列の掛け算（MatMul）なら
+    読める。
+    """
+
+    def __init__(self, in_hw: Tuple[int, int], out_hw: Tuple[int, int]):
+        super().__init__()
+        self.register_buffer("rows", adaptive_pool_matrix(in_hw[0], out_hw[0]))
+        self.register_buffer("cols", adaptive_pool_matrix(in_hw[1], out_hw[1]).t().contiguous())
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.matmul(torch.matmul(self.rows, x), self.cols)
+
+
+class ExportModel(nn.Module):
+    """ONNX 用。舵角と、前方が塞がっている確率（0〜1）を出す
+
+    入力は 120 x 160 に決まっているので、最後のプーリングを同じ計算の行列の掛け算に置き換える。
+    重みは学習したモデルのものをそのまま使う。
+    """
+
+    def __init__(self, model: SmallDrivingCNN, input_hw: Tuple[int, int] = (120, 160)):
         super().__init__()
         self.model = model
+        pool = model.features[-1]
+        if not isinstance(pool, nn.AdaptiveAvgPool2d):
+            raise TypeError("The last feature layer must be AdaptiveAvgPool2d")
+        self.convs = nn.Sequential(*list(model.features)[:-1])
+        with torch.no_grad():
+            was_training = model.training
+            model.eval()
+            feature_hw = tuple(self.convs(torch.zeros(1, 3, *input_hw)).shape[-2:])
+            model.train(was_training)
+        output_size = pool.output_size
+        out_hw = (output_size, output_size) if isinstance(output_size, int) else output_size
+        self.pool = MatrixAdaptivePool(feature_hw, tuple(out_hw))
 
     def forward(self, x: torch.Tensor, intent: torch.Tensor):
-        steering, blocked_logit = self.model.forward_with_blocked(x, intent)
+        steering, blocked_logit = self.model.forward_pooled(self.pool(self.convs(x)), intent)
         return steering, torch.sigmoid(blocked_logit)
