@@ -435,6 +435,7 @@ PiCarX/
 | **マニフェストの作成と確認** | `uv run python -m src.e2e.dataset.manifest --data_dir data/raw`（確認は `--verify`） |
 | **生データ全結合学習** | `uv run python -m src.e2e.training.train --config configs/train.toml --data_dir data/raw --output_dir models/v006` |
 | **交差検証（1セッションを抜いて評価）** | `uv run python -m src.e2e.training.cross_validate --config configs/train.toml --data_dir data/raw --output data/cv/<名前>.json` |
+| **交差検証の比較（採用の判定）** | `uv run python -m src.e2e.evaluation.compare_cv --current data/cv/<使用中>.json --candidate data/cv/<候補>.json --output data/cv/compare_<名前>.json`（同じセッションを抜いた結果どうしだけ比べる。全体の MAE が悪化するか、意図ごとの平均の基準に負けると `keep_current`） |
 | **バックアップ** | `powershell -ExecutionPolicy Bypass -File scripts\backup.ps1`（リポジトリのルートで実行） |
 | **データクリーニング (外れ値除外)** | `uv run python -m src.e2e.dataset.cleaner --data_dir data/raw --model models/<version>/model.onnx --threshold 0.4 --output_dir data/processed/clean_v2` |
 | **クリーンデータでの再学習** | `uv run python -m src.e2e.training.train --data_dir data/processed/clean_v2 --output_dir models/<version> --epochs 25` |
