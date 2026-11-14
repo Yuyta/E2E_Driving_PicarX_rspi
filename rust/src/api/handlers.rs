@@ -4,8 +4,8 @@ use crate::api::models::{
     GrayscaleResponse, ListenResponse, MotionStatus, MoveCommand, ReflexStatus, SensorsStatus,
     SpeakCommand, StatusResponse, SteerCommand, UltrasonicResponse,
 };
+use crate::autopilot::Autopilot;
 use crate::rpi_camera::{CameraHub, FRAME_HEIGHT, FRAME_WIDTH, Frame};
-#[cfg(test)]
 use crate::safety::SafetyReason;
 use crate::safety::{
     CALIBRATION_SAMPLES, CliffCalibration, DISTANCE_MAX_AGE, FLOOR_MAX_AGE, SafetyController,
@@ -25,7 +25,7 @@ use std::convert::Infallible;
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
-const MAX_SPEED: i32 = 100;
+pub const MAX_SPEED: i32 = 100;
 const MIN_TTL_MS: u64 = 50;
 /// PC が切断された時に走り続ける時間の上限
 const MAX_TTL_MS: u64 = 1000;
@@ -61,6 +61,17 @@ pub struct AppState {
     /// 全エンドポイントで要求する Bearer トークン
     pub api_token: String,
     pub camera: Arc<CameraHub>,
+    /// Pi 上の自律走行（走行のループごと Pi で動かす）
+    pub autopilot: Autopilot,
+}
+
+/// 走行の指令が通らなかった理由
+#[derive(Debug, Clone, PartialEq)]
+pub enum MoveError {
+    /// 安全の判定で拒否した
+    Refused(SafetyReason),
+    /// モーターへの指令が失敗した
+    Hardware(String),
 }
 
 impl AppState {
@@ -69,6 +80,47 @@ impl AppState {
         self.safety
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// 走行を指令する（HTTP の走行指令と自律走行で共通）。安全の判定を通り、反射ループが TTL と
+    /// 危険を監視する。実際に指令した速度（反射が戻らない時は抑える）を返す
+    pub fn command_move(
+        &self,
+        direction: DriveDirection,
+        speed: i32,
+        ttl: Duration,
+    ) -> Result<i32, MoveError> {
+        let sensors = self.hardware.sensors();
+        let now = Instant::now();
+        let mut safety = self.safety();
+        // 走行中に別の方向の指令が拒否されても、今の走行の判定は反射ループが続ける
+        safety
+            .check_start(direction, &sensors, now)
+            .map_err(MoveError::Refused)?;
+        let distance = sensors
+            .distance_cm
+            .and_then(|r| r.fresh(now, DISTANCE_MAX_AGE));
+        let speed = limit_speed(direction, speed, distance);
+        match self.hardware.drive(direction, speed) {
+            Ok(()) => {
+                safety.begin_motion(direction, speed, ttl, Instant::now());
+                Ok(speed)
+            }
+            Err(error) => {
+                // 片方のモーターだけ動いている可能性があるので止める
+                safety.clear_motion();
+                let stop = self.hardware.stop();
+                safety.note_stop_result(&stop);
+                Err(MoveError::Hardware(error))
+            }
+        }
+    }
+
+    /// 前輪の舵を切る（HTTP と自律走行で共通）
+    pub fn command_steer(&self, angle: i32) -> Result<(), String> {
+        self.hardware.steer(angle)?;
+        self.safety().set_steer_angle(angle);
+        Ok(())
     }
 
     /// モーターを止める。失敗した場合は反射ループが再送する。
@@ -142,39 +194,32 @@ pub async fn move_handler(
     }
 
     if cmd.direction == DriveDirection::Stop {
+        stop_autopilot(&state, "drive stop command").await;
         return stop_response(state.stop_motors());
     }
 
-    let sensors = state.hardware.sensors();
-    let now = Instant::now();
-    let mut safety = state.safety();
-
-    if let Err(reason) = safety.check_start(cmd.direction, &sensors, now) {
-        // 走行中に別の方向の指令が拒否されても、今の走行の判定は反射ループが続ける
-        return (StatusCode::CONFLICT, Json(ApiResponse::refused(reason)));
+    // 自律走行中なら、人が運転を引き継いだとみなす
+    state.autopilot.note_manual(Instant::now());
+    match state.command_move(cmd.direction, cmd.speed, Duration::from_millis(cmd.ttl_ms)) {
+        Ok(_) => (StatusCode::OK, Json(ApiResponse::ok())),
+        Err(MoveError::Refused(reason)) => {
+            (StatusCode::CONFLICT, Json(ApiResponse::refused(reason)))
+        }
+        Err(MoveError::Hardware(error)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::err(error)),
+        ),
     }
+}
 
-    let distance = sensors
-        .distance_cm
-        .and_then(|r| r.fresh(now, DISTANCE_MAX_AGE));
-    let speed = limit_speed(cmd.direction, cmd.speed, distance);
-
-    match state.hardware.drive(cmd.direction, speed) {
-        Ok(()) => {
-            let ttl = Duration::from_millis(cmd.ttl_ms);
-            safety.begin_motion(cmd.direction, speed, ttl, Instant::now());
-            (StatusCode::OK, Json(ApiResponse::ok()))
-        }
-        Err(error) => {
-            // 片方のモーターだけ動いている可能性があるので止める
-            safety.clear_motion();
-            let stop = state.hardware.stop();
-            safety.note_stop_result(&stop);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::err(error)),
-            )
-        }
+/// 自律走行を止め、走行のスレッドが終わるまで待つ（人の介入として記録する）
+pub async fn stop_autopilot(state: &Arc<AppState>, note: &str) {
+    if state
+        .autopilot
+        .request_stop(Some("manual_intervention"), note)
+    {
+        let state = Arc::clone(state);
+        let _ = tokio::task::spawn_blocking(move || state.autopilot.join()).await;
     }
 }
 
@@ -198,26 +243,30 @@ pub async fn steer_handler(
         );
     }
 
-    match state.hardware.steer(cmd.angle) {
-        Ok(_) => {
-            state.safety().set_steer_angle(cmd.angle);
-            (StatusCode::OK, Json(ApiResponse::ok()))
-        }
+    state.autopilot.note_manual(Instant::now());
+    match state.command_steer(cmd.angle) {
+        Ok(()) => (StatusCode::OK, Json(ApiResponse::ok())),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(ApiResponse::err(e))),
     }
 }
 
 /// 通常停止。モーターを止めるだけで、以後の走行は拒否しない。
 pub async fn stop_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    stop_autopilot(&state, "drive stop command").await;
     stop_response(state.stop_motors())
 }
 
 /// 緊急停止。解除されるまで走行を拒否する。
 pub async fn emergency_stop_handler(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let mut safety = state.safety();
-    safety.set_emergency_stopped(true);
-    let result = state.hardware.stop();
-    safety.note_stop_result(&result);
+    let result = {
+        let mut safety = state.safety();
+        safety.set_emergency_stopped(true);
+        let result = state.hardware.stop();
+        safety.note_stop_result(&result);
+        result
+    };
+    // 先にモーターを止めてから、自律走行を終える（走行のループも緊急停止で走れない）
+    stop_autopilot(&state, "emergency stop").await;
     stop_response(result)
 }
 

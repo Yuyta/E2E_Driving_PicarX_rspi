@@ -2,6 +2,8 @@
 name = "picar-x-rust"
 version = "0.1.0"
 edition = "2024"
+# 依存の版は、この Rust で動く範囲に固定する（Docker と CI は 1.95）
+rust-version = "1.95"
 
 [dependencies]
 rodio = "0.22.2"
@@ -15,6 +17,13 @@ axum = "0.8"
 tokio = { version = "1.43", features = ["full"] }
 tower = { version = "0.5", features = ["util"] }
 futures-util = "0.3"
+# 走行モデルの推論（Pi 上の自律走行、ROADMAP の M3）
+tract-onnx = "0.21"
+jpeg-decoder = { version = "0.3", default-features = false }
+sha2 = "0.10"
+
+[dev-dependencies]
+tempfile = "3"
 
 [profile.release]
 opt-level = 3

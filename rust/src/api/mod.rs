@@ -1,3 +1,4 @@
+pub mod autopilot;
 pub mod handlers;
 pub mod hardware;
 pub mod models;
@@ -47,6 +48,11 @@ pub fn create_router(state: Arc<AppState>) -> Router {
         .route("/api/audio/listen", get(listen_handler))
         .route("/api/camera/snapshot", get(snapshot_handler))
         .route("/api/camera/stream", get(stream_handler))
+        .route("/api/autopilot/start", post(autopilot::start_handler))
+        .route("/api/autopilot/stop", post(autopilot::stop_handler))
+        .route("/api/autopilot/intent", post(autopilot::intent_handler))
+        .route("/api/autopilot/status", get(autopilot::status_handler))
+        .route("/api/autopilot/model", get(autopilot::model_handler))
         .layer(middleware::from_fn_with_state(state.clone(), require_token))
         .with_state(state)
 }
@@ -133,6 +139,7 @@ pub async fn run_server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         safety: Mutex::new(SafetyController::new(cliff_guard_enabled)),
         api_token,
         camera,
+        autopilot: crate::autopilot::Autopilot::from_env(),
     });
     spawn_reflex_loop(Arc::clone(&state))?;
 
@@ -159,6 +166,9 @@ pub async fn run_server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         result = shutdown_signal() => {
             result?;
             println!("終了シグナルを受信しました。モーターを停止します");
+            if state.autopilot.request_stop(None, "server shutdown") {
+                state.autopilot.join();
+            }
             if let Err(error) = state.stop_motors() {
                 eprintln!("⚠ 終了時の停止に失敗しました: {error}");
             }
@@ -275,6 +285,10 @@ mod tests {
                 safety: Mutex::new(safety),
                 api_token: TOKEN.to_string(),
                 camera: Arc::new(CameraHub::new()),
+                autopilot: crate::autopilot::Autopilot::new(
+                    std::env::temp_dir().join("picarx-test-models-none"),
+                    std::env::temp_dir().join("picarx-test-runs"),
+                ),
             });
             Self {
                 router: create_router(Arc::clone(&state)),
@@ -760,5 +774,53 @@ mod tests {
         assert!(!crate::api::handlers::token_matches("", ""));
         assert!(crate::api::handlers::token_matches("abc", "abc"));
         assert!(!crate::api::handlers::token_matches("abc", "abd"));
+    }
+
+    #[tokio::test]
+    async fn autopilot_endpoints_report_status_and_refuse_to_start_without_a_model() {
+        let app = TestApp::new(150.0);
+        let (status, body) = app.request("GET", "/api/autopilot/status", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["running"], false);
+
+        let (status, body) = app.request("POST", "/api/autopilot/start", None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert!(body["message"].as_str().unwrap().contains("モデル"));
+
+        let (status, _) = app
+            .request("POST", "/api/autopilot/start", Some(r#"{"speed": 20}"#))
+            .await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let (status, _) = app
+            .request("POST", "/api/autopilot/start", Some("not json"))
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+
+        let (status, _) = app
+            .request(
+                "POST",
+                "/api/autopilot/intent",
+                Some(r#"{"intent": "left"}"#),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        let (_, body) = app.request("GET", "/api/autopilot/status", None).await;
+        assert_eq!(body["upper_intent"], "left");
+
+        let (status, body) = app.request("POST", "/api/autopilot/stop", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["running"], false);
+
+        let (status, body) = app.request("GET", "/api/autopilot/model", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["verified"], false);
+        assert!(body["current"].is_null());
+    }
+
+    #[tokio::test]
+    async fn manual_drive_still_works_while_the_autopilot_is_idle() {
+        let app = TestApp::new(150.0);
+        assert_eq!(app.send_move(FORWARD).await, StatusCode::OK);
+        assert_eq!(app.drives(), 1);
     }
 }
