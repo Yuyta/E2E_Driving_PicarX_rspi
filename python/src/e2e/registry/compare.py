@@ -68,9 +68,12 @@ def show_models(models_dir: str = "models"):
 
     for m in models:
         ev = m.get("evaluation", {})
-        has_norm = "steering_mae_normalized" in ev
-        mae_norm = f"{ev['steering_mae_normalized']:.4f}" if has_norm else "--"
-        mae_deg = f"±{ev['steering_mae_degrees']:.1f}°" if "steering_mae_degrees" in ev else "--"
+        # オフライン評価がなければ、学習の時の検証の値（metadata.json）を出す
+        val = m.get("validation_metrics", {})
+        norm = ev.get("steering_mae_normalized", val.get("steering_mae"))
+        deg = ev.get("steering_mae_degrees", val.get("steering_mae_deg"))
+        mae_norm = f"{norm:.4f}" if norm is not None else "--"
+        mae_deg = f"±{deg:.1f}°" if deg is not None else "--"
 
         artifacts = []
         if m.get("has_weights"):
