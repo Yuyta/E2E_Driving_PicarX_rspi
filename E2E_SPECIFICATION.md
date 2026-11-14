@@ -284,6 +284,24 @@ CPU推論を想定した4層の軽量CNN（推論時間の実測値は未記録�
 
 ---
 
+### 4.5.1 Pi 上の自律走行 (`rust/src/autopilot/`)
+
+走行のループごと Pi で動かす（2026-11-14 に決定）。PC の `autonomous_driver.py` と同じ流れを、Pi の走行サーバーの中の別のスレッドで行う。PC がなくても走れ、Wi-Fi の遅れの影響も受けない。
+
+- **1周の流れ**: カメラの新しいフレームを待つ → 人の指令が来ていれば何もしない → 前へ進めるかを安全の判定で確かめる（障害物なら避ける向きを切り替え、約1秒止められたままなら後退。段差なら後退して段差の反対側へ向きを変える。センサーの値が不明なら待つ。緊急停止なら終える） → 前処理 → 引っかかりの確認 → 推論と避ける判断 → 速度を決めて指令（TTL 400ms）
+- **前処理** (`preprocess.rs`): 320x240 の JPEG を復号し、2x2 の平均で 160x120 へ縮め、マニフェストの値で正規化する。PC の OpenCV と同じ計算（ちょうど半分の INTER_LINEAR）
+- **推論** (`model.rs`): `tract-onnx` 0.21。読み込む前にマニフェストの各ファイルの SHA256、入力の大きさ、意図の順番、出力の名前を確かめ、合わなければ読み込まない。学習していない `blocked` の出力は使わない
+- **避ける判断** (`avoidance.rs`): PC の `avoidance.py` と同じ規則と値
+- **速度** (`speed.rs`): PC の `SpeedLimiter` と同じ式。反射が戻らない時は距離なしとして扱う
+- **後退** (`trajectory.rs`): 記録した前進の軌跡の範囲だけ、同じ舵角で戻る。周期が速くて1段が 50ms より短い時はまとめる
+- **引っかかり** (`stuck.rs`): 40x30 の明るさで 0.5 秒前の画像と比べ、差の平均が 2.5 未満の状態が 0.3 秒続いたら、引っかかったとして記録し、避ける向きを切り替えて後退する。30 秒に3回なら走行を終える
+- **人の引き継ぎ**: 走行中に `/api/drive/move` か `/api/drive/steer` が来たら、自律の指令を止める（`human_takeover` を記録）。1.5 秒途絶えたら、曲がりの途中の判断を捨てて自律に戻る。`/api/drive/stop` と緊急停止では走行を終える（`manual_intervention`）
+- **走行の記録** (`runlog.rs`): PC の `RunLog` と同じ形式で `~/picarx/runs/<run_id>/` に書く（`PICARX_RUNS_DIR`）。`model_version` と `data_fingerprint` はマニフェストから
+- **モデルの版** (`store.rs`、`picar-x-rust model ...`): `~/picarx/models/versions/<版>/` に置き、`current` のシンボリックリンクを張り替えて一度に切り替える。使用中と前の2つの版を残す。走行サーバーは `current` を読むだけ（`PICARX_MODELS_DIR`）
+- **窓口**: `POST /api/autopilot/start`（`speed`、`min_speed`、`intent`）、`POST /api/autopilot/stop`（`intervention`）、`POST /api/autopilot/intent`、`GET /api/autopilot/status`、`GET /api/autopilot/model`
+- **PC 側**: `src/e2e/pi_autopilot.py`（始める、見守る、止める、パッドでの引き継ぎと修正操作の記録）、`src/e2e/deploy/`（バンドルの作成、送信、戻し、走行の記録の取り込み）
+- **制限**: 地図（占有格子）と画面の表示は Pi では作らない。引っかかりの確認は画像の変化だけで、PC の動きの確認（特徴点の流れ、曲がり方の食い違い）は移していない
+
 ### 4.6 ハードウェア校正自動補正レイヤー (`rust/src/picarx/core.rs`)
 
 PiCar-X実機のサーボモーターギア個体差（数度の傾き）と、左右の後輪の速さの差を吸収する機構。値は今は手で測って設定する。走りながら記録から推定して直す仕組みは ROADMAP の M4「走りながらの自動校正」で計画している。
@@ -441,6 +459,8 @@ PiCarX/
 | **クリーンデータでの再学習** | `uv run python -m src.e2e.training.train --data_dir data/processed/clean_v2 --output_dir models/<version> --epochs 25` |
 | **モデルオフライン評価** | `uv run python -m src.e2e.evaluation.evaluate --data_dir data/raw --model_path models/<version>/best_model.pth` |
 | **MLOps レジストリ確認** | `uv run python -m src.e2e.registry.compare` |
+| **Pi へモデルを送る** | `uv run python -m src.e2e.deploy.pi --host pi@<ホスト> push --model_dir models/<version>`（戻すのは `rollback`、Pi の版の一覧は `list`、走行の記録を持ってくるのは `pull-runs`。`--host` の代わりに `PICARX_SSH_HOST` でもよい） |
+| **Pi 上の自律走行** | `uv run python -m src.e2e.pi_autopilot --speed 50`（`--intent left` / `right`、パッドで引き継いで修正操作を記録するなら `--gamepad`。Ctrl+C で止める） |
 | **実機自律走行** | `uv run python -m src.e2e.autonomous_driver --model models/<version>/model.onnx --speed 50`（行きたい向きは `--intent left` / `right`、既定は `any`。パッドで引き継いで修正操作を記録するなら `--gamepad`） |
 | **モデル別の介入率** | `uv run python -m src.e2e.evaluation.interventions --runs_dir data/runs` |
 | **動きの実機計測** | `uv run python -m src.e2e.m3_check run --scenario still`（走る場面は `--i-understand-the-car-will-move`） |

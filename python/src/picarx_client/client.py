@@ -29,6 +29,12 @@ DRIVE_RENEW_TTL_MS = 500
 MAX_DRIVE_MS = 5000
 # カメラの起動を待てるよう、配信の読み取りは制御の通信より長く待つ
 STREAM_READ_TIMEOUT_SEC = 5.0
+# Pi の自律走行の開始は、モデルの確認と読み込みを待つ
+AUTOPILOT_START_TIMEOUT_SEC = 30.0
+
+
+class AutopilotError(RuntimeError):
+    """Pi が自律走行の要求を受け付けなかった（理由は Pi の説明）"""
 
 
 class PicarxClient:
@@ -226,6 +232,48 @@ class PicarxClient:
         resp = self._sync().post(f"{self.base_url}/api/safety/calibrate")
         resp.raise_for_status()
         return True
+
+    # --- Pi 上の自律走行（走行のループごと Pi で動かす、ROADMAP の M3） ---
+
+    def _autopilot_json(self, resp: httpx.Response) -> dict:
+        try:
+            body = resp.json()
+        except ValueError:
+            body = {}
+        if resp.status_code != 200:
+            raise AutopilotError(body.get("message") or f"HTTP {resp.status_code}")
+        return body
+
+    def autopilot_start_sync(
+        self, speed: int = DRIVE_SPEED, min_speed: Optional[int] = None, intent: str = "any"
+    ) -> dict:
+        """Pi の使用中のモデルで自律走行を始める。run_id とモデルの版を返す"""
+        body = {"speed": speed, "intent": intent}
+        if min_speed is not None:
+            body["min_speed"] = min_speed
+        resp = self._sync().post(
+            f"{self.base_url}/api/autopilot/start", json=body, timeout=AUTOPILOT_START_TIMEOUT_SEC
+        )
+        return self._autopilot_json(resp)
+
+    def autopilot_stop_sync(self, intervention: bool = True) -> dict:
+        """自律走行を止める。intervention なら人の介入として記録する。止めた後の状態を返す"""
+        resp = self._sync().post(
+            f"{self.base_url}/api/autopilot/stop",
+            json={"intervention": intervention},
+            timeout=AUTOPILOT_START_TIMEOUT_SEC,
+        )
+        return self._autopilot_json(resp)
+
+    def autopilot_intent_sync(self, intent: str) -> None:
+        resp = self._sync().post(f"{self.base_url}/api/autopilot/intent", json={"intent": intent})
+        self._autopilot_json(resp)
+
+    def autopilot_status_sync(self) -> dict:
+        return self._autopilot_json(self._sync().get(f"{self.base_url}/api/autopilot/status"))
+
+    def autopilot_model_sync(self) -> dict:
+        return self._autopilot_json(self._sync().get(f"{self.base_url}/api/autopilot/model"))
 
     def get_status_sync(self) -> RobotStatus:
         resp = self._sync().get(f"{self.base_url}/api/status")
