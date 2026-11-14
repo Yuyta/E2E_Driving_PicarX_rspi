@@ -93,6 +93,65 @@ def predict_all(model: torch.nn.Module, dataset, indices: Sequence[int]) -> List
     return preds
 
 
+def blocked_metrics(
+    probabilities: Sequence[float], labels: Sequence[bool], threshold: float = 0.5
+) -> Dict[str, object]:
+    """前方が塞がっているかの判定の指標
+
+    見落とし（塞がっているのに空いていると答える）は衝突につながるので、再現率（recall）を
+    主に見る。`always_clear_accuracy` は常に「空いている」と答えた場合の正解率で、比べる基準。
+    """
+    probs = np.asarray(probabilities, dtype=np.float64)
+    truth = np.asarray(labels, dtype=bool)
+    if len(probs) != len(truth):
+        raise ValueError("probabilities and labels must have the same length")
+    if len(probs) == 0:
+        return {"samples": 0}
+    predicted = probs >= threshold
+    tp = int((predicted & truth).sum())
+    fp = int((predicted & ~truth).sum())
+    fn = int((~predicted & truth).sum())
+    tn = int((~predicted & ~truth).sum())
+    precision = tp / (tp + fp) if tp + fp else None
+    recall = tp / (tp + fn) if tp + fn else None
+    f1 = (
+        2 * precision * recall / (precision + recall)
+        if precision is not None and recall is not None and precision + recall
+        else None
+    )
+    eps = 1e-7
+    clipped = np.clip(probs, eps, 1 - eps)
+    log_loss = -np.mean(truth * np.log(clipped) + (~truth) * np.log(1 - clipped))
+
+    def rounded(value):
+        return None if value is None else round(float(value), 4)
+
+    return {
+        "samples": int(len(probs)),
+        "blocked_samples": int(truth.sum()),
+        "threshold": threshold,
+        "accuracy": rounded((tp + tn) / len(probs)),
+        "always_clear_accuracy": rounded((~truth).mean()),
+        "precision": rounded(precision),
+        "recall": rounded(recall),
+        "f1": rounded(f1),
+        "log_loss": rounded(log_loss),
+        "confusion": {"tp": tp, "fp": fp, "fn": fn, "tn": tn},
+    }
+
+
+def predict_blocked(model: torch.nn.Module, dataset, indices: Sequence[int]) -> List[float]:
+    """指定したサンプルの、前方が塞がっている確率を順に推論する"""
+    model.eval()
+    probs: List[float] = []
+    with torch.no_grad():
+        for idx in indices:
+            image, _, _, intent = dataset[idx]
+            _, logit = model.forward_with_blocked(image.unsqueeze(0), intent.unsqueeze(0))
+            probs.append(float(torch.sigmoid(logit).item()))
+    return probs
+
+
 def inference_time_ms(model: torch.nn.Module, runs: int = 50, warmup: int = 5) -> float:
     """1枚あたりの推論時間（PyTorch、CPU、中央値）。PC 上の比較用で、Pi の値ではない"""
     model.eval()

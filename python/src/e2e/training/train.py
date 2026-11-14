@@ -22,7 +22,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Dataset, Subset
 
 try:
     import tomllib
@@ -30,18 +30,30 @@ except ModuleNotFoundError:  # Python 3.10 以前
     tomllib = None
 
 try:
-    from ..evaluation.metrics import inference_time_ms, predict_all, steering_metrics
+    from ..evaluation.metrics import (
+        blocked_metrics,
+        inference_time_ms,
+        predict_all,
+        predict_blocked,
+        steering_metrics,
+    )
     from ..intent import INTENTS
     from . import provenance
-    from .dataset import DrivingDataset
-    from .model import SmallDrivingCNN
+    from .dataset import BLOCKED_CLEAR_CM, BLOCKED_NEAR_CM, DrivingDataset
+    from .model import ExportModel, SmallDrivingCNN
     from .onnx_utils import strip_export_debug_info
 except ImportError:
-    from src.e2e.evaluation.metrics import inference_time_ms, predict_all, steering_metrics
+    from src.e2e.evaluation.metrics import (
+        blocked_metrics,
+        inference_time_ms,
+        predict_all,
+        predict_blocked,
+        steering_metrics,
+    )
     from src.e2e.intent import INTENTS
     from src.e2e.training import provenance
-    from src.e2e.training.dataset import DrivingDataset
-    from src.e2e.training.model import SmallDrivingCNN
+    from src.e2e.training.dataset import BLOCKED_CLEAR_CM, BLOCKED_NEAR_CM, DrivingDataset
+    from src.e2e.training.model import ExportModel, SmallDrivingCNN
     from src.e2e.training.onnx_utils import strip_export_debug_info
 
 INPUT_HEIGHT = 120
@@ -56,6 +68,13 @@ DEFAULT_PARAMS: Dict[str, Any] = {
     "seed": 42,
     # 検証に使うセッション。空なら名前順で最後のセッション
     "val_sessions": [],
+    # 前方が塞がっているかの損失の重み。0 なら学習せず、舵角の学習はこの頭がない時と同じになる
+    "blocked_loss_weight": 0.0,
+    # 塞がっているかのラベルの境界（cm）。間の距離のフレームはこの学習に使わない
+    "blocked_near_cm": BLOCKED_NEAR_CM,
+    "blocked_clear_cm": BLOCKED_CLEAR_CM,
+    # 曲がりの区間に、曲がった向きを意図として付け直す（dataset.turn_intents）
+    "turn_intent": False,
 }
 
 
@@ -82,6 +101,48 @@ def load_params(
             params[key] = value
     params["val_sessions"] = list(params["val_sessions"])
     return params
+
+
+def learns_blocked(params: Dict[str, Any]) -> bool:
+    return float(params.get("blocked_loss_weight", 0.0)) > 0.0
+
+
+def load_dataset(data_dir, params: Dict[str, Any]) -> DrivingDataset:
+    """設定に合わせてデータを読む。塞がっているかを学習する時は、舵角に使わないフレームも残す"""
+    return DrivingDataset(
+        data_dir,
+        keep_for_blocked=learns_blocked(params),
+        blocked_near_cm=float(params["blocked_near_cm"]),
+        blocked_clear_cm=float(params["blocked_clear_cm"]),
+        turn_intent=bool(params["turn_intent"]),
+    )
+
+
+class _Targets(Dataset):
+    """学習用に、舵角と塞がっているかのラベルと、それぞれを使うかの印を付ける"""
+
+    def __init__(self, dataset: DrivingDataset):
+        self.dataset = dataset
+
+    def __len__(self) -> int:
+        return len(self.dataset)
+
+    def __getitem__(self, idx: int):
+        image, steering, _, intent = self.dataset[idx]
+        sample = self.dataset.samples[idx]
+        blocked = sample["blocked"]
+        return (
+            image,
+            steering,
+            intent,
+            torch.tensor(1.0 if sample["steer_valid"] else 0.0),
+            torch.tensor(1.0 if blocked else 0.0),
+            torch.tensor(0.0 if blocked is None else 1.0),
+        )
+
+
+def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    return (values * mask).sum() / mask.sum().clamp(min=1.0)
 
 
 def set_seed(seed: int) -> torch.Generator:
@@ -147,6 +208,10 @@ def _fit(dataset, train_idx, val_idx, params, log):
     model = SmallDrivingCNN()
     criterion = nn.MSELoss()
     optimizer = optim.Adam(model.parameters(), lr=float(params["lr"]))
+    if learns_blocked(params):
+        return _fit_with_blocked(
+            dataset, train_idx, val_idx, params, log, model, optimizer, generator
+        )
 
     train_loader = DataLoader(
         Subset(dataset, list(train_idx)),
@@ -202,23 +267,105 @@ def _fit(dataset, train_idx, val_idx, params, log):
     return model, history, best_val_loss
 
 
+def _fit_with_blocked(dataset, train_idx, val_idx, params, log, model, optimizer, generator):
+    """舵角（使えるフレームだけ）と、前方が塞がっているか（ラベルのあるフレームだけ）を一緒に学習する"""
+    weight = float(params["blocked_loss_weight"])
+    bce = nn.BCEWithLogitsLoss(reduction="none")
+    targets = _Targets(dataset)
+    batch_size = int(params["batch_size"])
+    train_loader = DataLoader(
+        Subset(targets, list(train_idx)),
+        batch_size=batch_size,
+        shuffle=True,
+        generator=generator,
+        num_workers=0,
+    )
+    val_loader = (
+        DataLoader(Subset(targets, list(val_idx)), batch_size=batch_size) if val_idx else None
+    )
+
+    def losses(batch):
+        images, steerings, intents, steer_mask, blocked, blocked_mask = batch
+        steering_pred, blocked_logit = model.forward_with_blocked(images, intents)
+        steer_loss = _masked_mean((steering_pred.squeeze(1) - steerings) ** 2, steer_mask)
+        blocked_loss = _masked_mean(bce(blocked_logit.squeeze(1), blocked), blocked_mask)
+        return steer_loss, blocked_loss
+
+    def run(loader, train: bool) -> Tuple[float, float]:
+        steer_sum, blocked_sum, batches = 0.0, 0.0, 0
+        for batch in loader:
+            if train:
+                optimizer.zero_grad()
+                steer_loss, blocked_loss = losses(batch)
+                (steer_loss + weight * blocked_loss).backward()
+                optimizer.step()
+            else:
+                with torch.no_grad():
+                    steer_loss, blocked_loss = losses(batch)
+            steer_sum += steer_loss.item()
+            blocked_sum += blocked_loss.item()
+            batches += 1
+        batches = max(batches, 1)
+        return steer_sum / batches, blocked_sum / batches
+
+    epochs = int(params["epochs"])
+    best_val_loss: Optional[float] = None
+    best_state = None
+    history: List[Dict[str, float]] = []
+
+    for epoch in range(1, epochs + 1):
+        model.train()
+        steer_loss, blocked_loss = run(train_loader, train=True)
+        entry = {
+            "epoch": epoch,
+            "train_loss": steer_loss + weight * blocked_loss,
+            "train_steering_loss": steer_loss,
+            "train_blocked_loss": blocked_loss,
+        }
+        message = f"Epoch [{epoch:02d}/{epochs:02d}] Train: {entry['train_loss']:.4f}"
+        if val_loader is not None:
+            model.eval()
+            steer_loss, blocked_loss = run(val_loader, train=False)
+            val_loss = steer_loss + weight * blocked_loss
+            entry.update(
+                {
+                    "val_loss": val_loss,
+                    "val_steering_loss": steer_loss,
+                    "val_blocked_loss": blocked_loss,
+                }
+            )
+            if best_val_loss is None or val_loss < best_val_loss:
+                best_val_loss = val_loss
+                best_state = {k: v.clone() for k, v in model.state_dict().items()}
+            message += f" | Val: {val_loss:.4f}"
+        log(message)
+        history.append(entry)
+
+    if best_state is not None:
+        model.load_state_dict(best_state)
+    model.eval()
+    return model, history, best_val_loss
+
+
 def export_onnx(model: SmallDrivingCNN, onnx_path: Path) -> None:
     dummy_input = torch.zeros(1, 3, INPUT_HEIGHT, INPUT_WIDTH)
     dummy_intent = torch.zeros(1, len(INTENTS))
     dummy_intent[0, 0] = 1.0
+    # 1つ目の出力は舵角のまま（自律走行は outputs[0] を読む）。2つ目は塞がっている確率
     torch.onnx.export(
-        model,
+        ExportModel(model).eval(),
         (dummy_input, dummy_intent),
         str(onnx_path),
         export_params=True,
         opset_version=17,
         do_constant_folding=True,
         input_names=["input", "intent"],
-        output_names=["steering"],
+        output_names=["steering", "blocked"],
         dynamic_axes={
             "input": {0: "batch_size"},
             "intent": {0: "batch_size"},
             "steering": {0: "batch_size"},
+            "blocked": {0: "batch_size"},
         },
     )
     # 新しい exporter（既定）は進捗に絵文字を出す。cp932 の端末では main() で置き換えて表示する。
@@ -231,8 +378,8 @@ def train(data_dir, output_model_dir, params: Optional[Dict[str, Any]] = None) -
     output_dir = Path(output_model_dir)
 
     print(f"Loading dataset from: {data_dir}")
-    dataset = DrivingDataset(data_dir)
-    if len(dataset) == 0:
+    dataset = load_dataset(data_dir, params)
+    if not dataset.steer_indices():
         raise TrainingError("Dataset is empty")
 
     train_idx, val_idx, val_sessions = split_by_session(dataset, params["val_sessions"])
@@ -247,13 +394,22 @@ def train(data_dir, output_model_dir, params: Optional[Dict[str, Any]] = None) -
     print("\nExporting model to ONNX...")
     export_onnx(model, output_dir / "model.onnx")
 
-    preds = predict_all(model, dataset, val_idx)
+    val_steer = dataset.steer_indices(val_idx)
+    if not val_steer:
+        raise TrainingError("Validation sessions have no frames usable for steering")
+    preds = predict_all(model, dataset, val_steer)
     validation = steering_metrics(
         preds,
-        [dataset.samples[i]["steering"] for i in val_idx],
-        [dataset.samples[i]["session_id"] for i in val_idx],
-        [dataset.samples[i]["intent"] for i in val_idx],
+        [dataset.samples[i]["steering"] for i in val_steer],
+        [dataset.samples[i]["session_id"] for i in val_steer],
+        [dataset.samples[i]["intent"] for i in val_steer],
     )
+    if learns_blocked(params):
+        val_blocked = dataset.blocked_indices(val_idx)
+        validation["blocked"] = blocked_metrics(
+            predict_blocked(model, dataset, val_blocked),
+            [dataset.samples[i]["blocked"] for i in val_blocked],
+        )
 
     metadata = {
         "model_version": output_dir.name,
@@ -264,6 +420,14 @@ def train(data_dir, output_model_dir, params: Optional[Dict[str, Any]] = None) -
         # 2つ目の入力。any, left, right の順の 0 / 1（ONNX の入力名は intent）
         "intent_input": {"shape": [1, len(INTENTS)], "order": list(INTENTS)},
         "output": "steering (-1.0 to 1.0)",
+        # ONNX の2つ目の出力。trained が False なら学習していないので使わない
+        "blocked_output": {
+            "name": "blocked",
+            "meaning": "probability that the way ahead is blocked (0.0 to 1.0)",
+            "trained": learns_blocked(params),
+            "label_near_cm": params["blocked_near_cm"],
+            "label_clear_cm": params["blocked_clear_cm"],
+        },
         "sessions": train_sessions + val_sessions,
         "total_samples": len(dataset),
         "params": params,
@@ -290,8 +454,18 @@ def train(data_dir, output_model_dir, params: Optional[Dict[str, Any]] = None) -
             "skipped_motion_mismatch": dataset.skipped_motion_mismatch,
             # 前進の指令がなく止まっていたので学習から外したフレーム
             "skipped_stopped": dataset.skipped_stopped,
+            # 舵角には使わず、塞がっているかの学習だけに使ったフレーム
+            "kept_for_blocked_only": dataset.kept_for_blocked_only,
+            # 曲がりの区間なので、意図を左右へ付け直したフレーム（turn_intent）
+            "relabeled_turn_intent": dataset.relabeled_turn_intent,
             "samples_by_intent": {
-                name: sum(1 for s in dataset.samples if s["intent"] == name) for name in INTENTS
+                name: sum(1 for s in dataset.samples if s["intent"] == name and s["steer_valid"])
+                for name in INTENTS
+            },
+            "blocked_labels": {
+                "blocked": sum(1 for s in dataset.samples if s["blocked"] is True),
+                "clear": sum(1 for s in dataset.samples if s["blocked"] is False),
+                "unknown": sum(1 for s in dataset.samples if s["blocked"] is None),
             },
         },
         "code": provenance.git_state(),
@@ -303,6 +477,8 @@ def train(data_dir, output_model_dir, params: Optional[Dict[str, Any]] = None) -
         f.write("\n")
 
     print(f"Validation MAE: {validation['steering_mae']} (±{validation['steering_mae_deg']}°)")
+    if "blocked" in validation:
+        print(f"Validation blocked: {validation['blocked']}")
     print(f"✓ Training finished. Metadata saved at: {output_dir / 'metadata.json'}")
     return metadata
 
@@ -335,6 +511,18 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--val_sessions", type=str, nargs="+", default=None, help="Session IDs for validation"
     )
+    parser.add_argument(
+        "--blocked_loss_weight",
+        type=float,
+        default=None,
+        help="Weight of the 'way ahead is blocked' loss (0 = do not learn it)",
+    )
+    parser.add_argument(
+        "--turn_intent",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Relabel turns with the direction they turned as the intent",
+    )
 
     args = parser.parse_args(argv)
     params = load_params(
@@ -345,6 +533,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             "lr": args.lr,
             "seed": args.seed,
             "val_sessions": args.val_sessions,
+            "blocked_loss_weight": args.blocked_loss_weight,
+            "turn_intent": args.turn_intent,
         },
     )
     data_input = args.data_dir[0] if len(args.data_dir) == 1 else args.data_dir

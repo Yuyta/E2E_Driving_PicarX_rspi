@@ -5,9 +5,12 @@ NVIDIA DAVE-2 / PilotNet に着想を得た、CPUでも高速動作する軽量C
 行きたい向き（意図: any / left / right）ごとに出力の頭（ヘッド）を分ける（条件付きの模倣学習の
 分岐型）。画像の特徴は共通で、意図に合う頭の舵角だけを出す。意図を特徴につなげるだけの形より、
 意図に従わせやすい（ROADMAP の M3「行きたい向きの入力」）。
+
+もう1つの頭で、前方が塞がっているか（ロジット）を出す（ROADMAP の M3「前方が塞がっているかの
+補助出力」）。ラベルは超音波の距離から自動で付ける。
 """
 
-from typing import Optional
+from typing import Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -22,6 +25,7 @@ class SmallDrivingCNN(nn.Module):
     """
     入力: 画像 (B, 3, 120, 160) と意図 (B, 3)。意図は any, left, right の順の 0 / 1
     出力: (B, 1) - ステアリング予測値 (-1.0 ~ 1.0)
+    `forward_with_blocked` は、前方が塞がっているかのロジット (B, 1) も返す
     """
 
     def __init__(self):
@@ -64,9 +68,23 @@ class SmallDrivingCNN(nn.Module):
             )
             for _ in INTENTS
         )
+        # 前方が塞がっているかの頭。乱数の状態を戻し、この頭を加える前と同じ初期値と
+        # ドロップアウトで学習が進むようにする（この頭を学習しない時の舵角の結果を変えない）
+        with torch.random.fork_rng(devices=[]):
+            self.blocked_head = nn.Sequential(
+                nn.Linear(128, 32),
+                nn.ReLU(inplace=True),
+                nn.Linear(32, 1),
+            )
 
     def forward(self, x: torch.Tensor, intent: Optional[torch.Tensor] = None) -> torch.Tensor:
         """意図を省くと おまかせ（any）"""
+        return self.forward_with_blocked(x, intent)[0]
+
+    def forward_with_blocked(
+        self, x: torch.Tensor, intent: Optional[torch.Tensor] = None
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """舵角と、前方が塞がっているかのロジット（確率にはシグモイドを通す）"""
         if intent is None:
             intent = torch.zeros(x.shape[0], len(INTENTS), dtype=x.dtype, device=x.device)
             intent[:, 0] = 1.0
@@ -75,4 +93,17 @@ class SmallDrivingCNN(nn.Module):
         x = self.fc(x)
         # 全部の頭を計算し、意図の 0 / 1 で1つを選ぶ（ONNX でも同じ形で出せる）
         outputs = torch.cat([head(x) for head in self.heads], dim=1)  # (B, 3)
-        return (outputs * intent).sum(dim=1, keepdim=True)
+        steering = (outputs * intent).sum(dim=1, keepdim=True)
+        return steering, self.blocked_head(x)
+
+
+class ExportModel(nn.Module):
+    """ONNX 用。舵角と、前方が塞がっている確率（0〜1）を出す"""
+
+    def __init__(self, model: SmallDrivingCNN):
+        super().__init__()
+        self.model = model
+
+    def forward(self, x: torch.Tensor, intent: torch.Tensor):
+        steering, blocked_logit = self.model.forward_with_blocked(x, intent)
+        return steering, torch.sigmoid(blocked_logit)
