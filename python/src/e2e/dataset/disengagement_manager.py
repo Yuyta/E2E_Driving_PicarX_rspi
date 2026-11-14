@@ -49,6 +49,7 @@ class DisengagementBuffer:
         output_base_dir: Path,
         model_name: str = "unknown",
         note: str = "",
+        extra: Optional[Dict[str, Any]] = None,
     ) -> Optional[Path]:
         """
         バッファにたまっている直前データをファイルに保存する。
@@ -59,6 +60,7 @@ class DisengagementBuffer:
             output_base_dir: 出力先親ディレクトリ (例: data/disengagements)
             model_name: 使用していたモデル名
             note: メモ
+            extra: event.json に加える項目（走行 ID、モデルの版、データの版など）
 
         Returns:
             保存されたイベントディレクトリのパス (データが空の場合は None)
@@ -110,6 +112,7 @@ class DisengagementBuffer:
             "status": "pending_review",  # pending_review, approved, rejected
             "exclude_from_training": True,
             "note": note,
+            **(extra or {}),
         }
         with open(event_dir / "event.json", "w", encoding="utf-8") as f:
             json.dump(event_meta, f, indent=2, ensure_ascii=False)

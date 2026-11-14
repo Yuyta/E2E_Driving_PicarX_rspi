@@ -128,12 +128,16 @@ class FakeSession:
     def get_inputs(self):
         return [SimpleNamespace(name=name) for name in self.names]
 
+    def get_outputs(self):
+        return [SimpleNamespace(name="steering")]
+
     def run(self, _outputs, feed):
         self.feeds.append(feed)
         return [np.array([[0.0]], dtype=np.float32)]
 
 
 def make_driver(monkeypatch, tmp_path, names, intent="any"):
+    """避ける判断は切り、渡した意図がそのままモデルへ届くかを見る"""
     session = FakeSession(names)
     monkeypatch.setattr(autonomous_driver.ort, "InferenceSession", lambda *_a, **_k: session)
     driver = autonomous_driver.RemoteAutonomousDriver(
@@ -142,21 +146,28 @@ def make_driver(monkeypatch, tmp_path, names, intent="any"):
         enable_stuck_detection=False,
         log_dir=str(tmp_path / "disengagements"),
         intent=intent,
+        enable_avoidance=False,
     )
-    return driver
+    return driver, session
+
+
+def fed_intent(driver, session):
+    driver.infer(np.zeros((1, 3, 120, 160), dtype=np.float32))
+    feed = session.feeds[-1]
+    return feed["intent"].tolist() if "intent" in feed else None
 
 
 def test_driver_feeds_the_intent_to_a_model_that_takes_it(monkeypatch, tmp_path):
-    driver = make_driver(monkeypatch, tmp_path, ["input", "intent"], intent="right")
-    assert driver._intent_feed["intent"].tolist() == [[0.0, 0.0, 1.0]]
+    driver, session = make_driver(monkeypatch, tmp_path, ["input", "intent"], intent="right")
+    assert fed_intent(driver, session) == [[0.0, 0.0, 1.0]]
     driver.set_intent("left")
-    assert driver._intent_feed["intent"].tolist() == [[0.0, 1.0, 0.0]]
+    assert fed_intent(driver, session) == [[0.0, 1.0, 0.0]]
     with pytest.raises(ValueError):
         driver.set_intent("straight")
 
 
 def test_driver_refuses_an_intent_the_model_cannot_take(monkeypatch, tmp_path):
-    driver = make_driver(monkeypatch, tmp_path, ["input"])
-    assert driver._intent_feed == {}
+    driver, session = make_driver(monkeypatch, tmp_path, ["input"])
+    assert fed_intent(driver, session) is None
     with pytest.raises(ValueError):
         driver.set_intent("left")

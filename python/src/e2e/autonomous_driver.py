@@ -14,10 +14,14 @@ Pi の反射ループが、障害物、段差、不明なセンサー値、指�
   - 3.4: Breadcrumb Safety (記録した軌跡の範囲に限った安全後退・回避ターン)
   - 3.5: Dynamic Occupancy Grid (2D確率格子地図構築 & PC画面リアルタイム可視化UI)
   - 3.6: Stuck Detector (カメラ視覚変化量による引っかかり・空転検知 & 複合脱出ビヘイビア)
+  - M3: 障害物を避ける判断（avoidance.py）。いつ、どちらへ曲がるかを決め、走行モデルへ意図で渡す。
+    モデルの「前方が塞がっている確率」は、学習済み（metadata.json）の時だけ使う
 """
 
 import argparse
+import json
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -31,8 +35,11 @@ from src.models import DRIVE_SPEED, MIN_MOVING_SPEED, DriveDirection
 from src.picarx_client.client import PicarxClient
 
 try:
+    from .avoidance import AvoidancePolicy, Decision
     from .cycle_profiler import CycleProfiler
     from .dataset.disengagement_manager import DisengagementBuffer
+    from .gamepad import Gamepad, PadInput
+    from .intervention import CorrectionRecorder, RunLog, Takeover
     from .mapping.occupancy_grid import OccupancyGridMap
     from .mapping.visualizer import MapVisualizer
     from .motion.monitor import CommandState, MotionMonitor, describe, record_motion_event
@@ -42,8 +49,11 @@ try:
     from .safety.trajectory_tracker import TrajectoryTracker
     from .safety.watchdog import CommunicationWatchdog
 except ImportError:
+    from src.e2e.avoidance import AvoidancePolicy, Decision
     from src.e2e.cycle_profiler import CycleProfiler
     from src.e2e.dataset.disengagement_manager import DisengagementBuffer
+    from src.e2e.gamepad import Gamepad, PadInput
+    from src.e2e.intervention import CorrectionRecorder, RunLog, Takeover
     from src.e2e.mapping.occupancy_grid import OccupancyGridMap
     from src.e2e.mapping.visualizer import MapVisualizer
     from src.e2e.motion.monitor import (
@@ -69,6 +79,17 @@ WAIT_SLEEP_SEC = 0.1
 OBSTACLE_ESCAPE_CYCLES = 10
 
 
+def blocked_output_trained(model_path) -> bool:
+    """モデルの隣の metadata.json で、前方が塞がっているかの出力を学習したか（不明なら False）"""
+    metadata_path = Path(model_path).parent / "metadata.json"
+    try:
+        with open(metadata_path, encoding="utf-8") as f:
+            metadata = json.load(f)
+    except (OSError, ValueError):
+        return False
+    return bool((metadata.get("blocked_output") or {}).get("trained"))
+
+
 class RemoteAutonomousDriver:
     def __init__(
         self,
@@ -92,8 +113,14 @@ class RemoteAutonomousDriver:
         log_dir="data/disengagements",
         buffer_frames=30,
         intent=INTENT_ANY,
+        enable_avoidance=True,
+        use_blocked_output=True,
+        gamepad=None,
+        runs_dir=None,
+        corrections_dir=None,
     ):
         self.model_path = model_path
+        self.min_speed = min_speed
         self.speed = speed
         self.safe_distance = safe_distance
         self.max_steering_angle = 35.0
@@ -114,6 +141,31 @@ class RemoteAutonomousDriver:
         # 行きたい向き（意図）を入力に持つモデルか。持たないモデルは常に おまかせ
         self.has_intent_input = any(i.name == "intent" for i in self.session.get_inputs())
         self.set_intent(intent)
+        # 前方が塞がっている確率（ONNX の2つ目の出力）。学習していないモデルでは使わない
+        outputs = [o.name for o in self.session.get_outputs()]
+        self.uses_blocked_output = (
+            use_blocked_output and "blocked" in outputs and blocked_output_trained(model_path)
+        )
+        self._blocked_index = outputs.index("blocked") if self.uses_blocked_output else None
+        # いつ、どちらへ曲がるかを決めて、意図でモデルへ渡す。意図を入力に持たないモデルは対象外
+        self.avoidance: Optional[AvoidancePolicy] = (
+            AvoidancePolicy() if enable_avoidance and self.has_intent_input else None
+        )
+        self.last_decision: Optional[Decision] = None
+        self.last_blocked_probability: Optional[float] = None
+
+        # 介入の記録（走行ごと）と、パッドでの引き継ぎ・人の修正操作の記録（M3）
+        # 既定は介入の記録（log_dir、既定で data/disengagements）の隣
+        self.runs_dir = Path(runs_dir) if runs_dir else self.log_dir.parent / "runs"
+        self.corrections_dir = (
+            Path(corrections_dir) if corrections_dir else self.log_dir.parent / "interventions"
+        )
+        self.run_log: Optional[RunLog] = None
+        self.gamepad = gamepad
+        self.takeover = Takeover()
+        self.corrections: Optional[CorrectionRecorder] = None
+        self.takeover_count = 0
+        self._takeover_intent = INTENT_ANY
 
         # 既存クライアント再利用 (Rust APIサーバー経由)
         self.client = PicarxClient(timeout=CONTROL_TIMEOUT_SEC)
@@ -176,11 +228,37 @@ class RemoteAutonomousDriver:
         if intent != INTENT_ANY and not self.has_intent_input:
             raise ValueError("This model has no intent input; only 'any' is possible")
         self.intent = intent
-        self._intent_feed = (
-            {"intent": np.array([one_hot(intent)], dtype=np.float32)}
-            if self.has_intent_input
-            else {}
-        )
+
+    def infer(self, input_tensor, intent: Optional[str] = None) -> Tuple[float, Optional[float]]:
+        """舵角（-1〜1）と、前方が塞がっている確率（使わないモデルでは None）"""
+        feed = {self.input_name: input_tensor}
+        if self.has_intent_input:
+            feed["intent"] = np.array([one_hot(intent or self.intent)], dtype=np.float32)
+        outputs = self.session.run(None, feed)
+        steering = float(outputs[0][0][0])
+        blocked = None
+        if self._blocked_index is not None:
+            blocked = float(outputs[self._blocked_index][0][0])
+        return steering, blocked
+
+    def decide_steering(self, input_tensor, now: float, distance_cm: Optional[float]):
+        """避ける判断をして舵角を推論する。(舵角, 判断) を返す。判断しない時の判断は None
+
+        塞がっている確率は意図に関係なく同じ特徴から出るので、まず前の判断の意図で推論し、
+        その確率で判断し直して、意図が変わった時だけ推論し直す。
+        """
+        if self.avoidance is None:
+            steering, blocked = self.infer(input_tensor)
+            self.last_blocked_probability = blocked
+            return steering, None
+        intent = self.last_decision.intent if self.last_decision else self.intent
+        steering, blocked = self.infer(input_tensor, intent)
+        self.last_blocked_probability = blocked
+        decision = self.avoidance.step(now, distance_cm, blocked, self.intent)
+        if decision.intent != intent:
+            steering, _ = self.infer(input_tensor, decision.intent)
+        self.last_decision = decision
+        return steering, decision
 
     def preprocess(self, bgr_img):
         """BGR画像 -> (1, 3, 120, 160) の正規化Tensor"""
@@ -300,7 +378,7 @@ class RemoteAutonomousDriver:
         self._stop_quietly()
 
         # Disengagement ロギング
-        saved_path = self.buffer.save_event(
+        saved_path = self._save_event(
             trigger="stuck_detected",
             output_base_dir=self.log_dir,
             model_name=self.model_path,
@@ -336,7 +414,7 @@ class RemoteAutonomousDriver:
         flag = update.newly_sustained
         self._stop_quietly()
         print(f"\n[MOTION MISMATCH] {describe(flag)} {update.check.details}")
-        saved_path = self.buffer.save_event(
+        saved_path = self._save_event(
             trigger="motion_mismatch",
             output_base_dir=self.log_dir,
             model_name=self.model_path,
@@ -348,11 +426,82 @@ class RemoteAutonomousDriver:
         print(f"[MEMORY] {summary}")
         print("Autonomous driving stopped. Check the car, then start again.")
 
+    def _save_event(self, trigger, output_base_dir=None, model_name=None, note=""):
+        """直前のフレームを介入として保存し、走行の記録にも残す"""
+        extra = {}
+        if self.run_log is not None:
+            extra = {
+                "run_id": self.run_log.run_id,
+                "model_version": self.run_log.info.get("model_version"),
+                "data_fingerprint": self.run_log.info.get("data_fingerprint"),
+            }
+        saved = self.buffer.save_event(
+            trigger=trigger,
+            output_base_dir=output_base_dir or self.log_dir,
+            model_name=model_name or self.model_path,
+            note=note,
+            extra=extra,
+        )
+        if self.run_log is not None:
+            self.run_log.intervention(
+                trigger, time.time(), note, event_dir=str(saved) if saved else None
+            )
+        return saved
+
+    def _start_run_log(self) -> None:
+        settings = {
+            "speed": self.speed,
+            "min_speed": self.min_speed,
+            "intent": self.intent,
+            "avoidance": self.avoidance is not None,
+            "blocked_output": self.uses_blocked_output,
+            "motion_check": self.enable_motion_check,
+            "gamepad": self.gamepad is not None,
+        }
+        self.run_log = RunLog(self.runs_dir, self.model_path, settings)
+        self.corrections = CorrectionRecorder(
+            self.corrections_dir, self.run_log.run_id, dict(self.run_log.info)
+        )
+        print(f"Run log: {self.run_log.dir}")
+
+    def _drive_by_hand(self, frame, status, now: float, pad) -> None:
+        """人が運転している間。パッドの操作を送り、画像と操作を修正操作として記録する"""
+        steer = int(round(pad.steer * self.max_steering_angle))
+        speed = self.speed if pad.drive != 0 and not pad.stop else 0
+        if speed == 0:
+            self._stop_quietly()
+            try:
+                self.client.steer_sync(steer)
+            except httpx.HTTPError:
+                self.watchdog.record_error()
+        else:
+            direction = DriveDirection.FORWARD if pad.drive > 0 else DriveDirection.BACKWARD
+            self._send_move(direction, speed, steer, MOVE_TTL_MS)
+        if self.corrections is not None:
+            distance = status.sensors.distance
+            recorded = pad if speed else replace(pad, drive=0)
+            self.corrections.record(
+                frame,
+                now,
+                recorded,
+                speed,
+                steer,
+                self._takeover_intent,
+                distance.cm,
+                bool(distance.far),
+                self.takeover_count,
+            )
+        print(
+            f"\r[HUMAN] Steer: {pad.steer:+.2f} | Drive: {pad.drive:+d} | Spd: {speed:02d}",
+            end="",
+            flush=True,
+        )
+
     def _log_event_once(self, flag: str, trigger: str, note: str) -> None:
         """危険が続く間に同じ介入を何度も記録しない"""
         if getattr(self, flag):
             return
-        saved_path = self.buffer.save_event(
+        saved_path = self._save_event(
             trigger=trigger,
             output_base_dir=self.log_dir,
             model_name=self.model_path,
@@ -403,6 +552,13 @@ class RemoteAutonomousDriver:
         if not self.enable_motion_check:
             motion_status = "DISABLED"
         print(f"Command vs Motion Check: {motion_status}")
+        if self.avoidance is None:
+            avoid_status = "DISABLED (the model steers by itself)"
+        elif self.uses_blocked_output:
+            avoid_status = "ACTIVE (ultrasonic + camera blocked output)"
+        else:
+            avoid_status = "ACTIVE (ultrasonic only; the model has no trained blocked output)"
+        print(f"Obstacle Avoidance Intent: {avoid_status}")
         map_status = (
             f"ACTIVE (Grid: {self.grid_map.width}x{self.grid_map.height}, "
             f"Resolution: {self.grid_map.cell_size * 100:.0f}cm)"
@@ -415,6 +571,7 @@ class RemoteAutonomousDriver:
 
         if not self._prepare_body():
             return
+        self._start_run_log()
 
         stream = self.client.open_camera_stream().start()
         last_seq = 0
@@ -468,6 +625,40 @@ class RemoteAutonomousDriver:
                         )
                     continue
 
+                # ----------------------------------------------------
+                # 2.5 パッドでの引き継ぎ（M3）。人が運転している間はモデルを使わない
+                # ----------------------------------------------------
+                cycle_s = loop_dt_ms / 1000.0
+                pad = self.gamepad.poll() if self.gamepad is not None else None
+                hand = self.takeover.update(pad, now)
+                if hand.emergency:
+                    print("\n[EMERGENCY] HOME on the gamepad. Stopping.")
+                    self._save_event("manual_intervention", note="HOME on the gamepad")
+                    break
+                if hand.started:
+                    self.takeover_count += 1
+                    self._takeover_intent = (
+                        self.last_decision.intent if self.last_decision else self.intent
+                    )
+                    print(f"\n[TAKEOVER] Human drives (#{self.takeover_count}).")
+                    self.run_log.intervention(
+                        "human_takeover",
+                        now,
+                        "Gamepad input",
+                        takeover_id=self.takeover_count,
+                        policy_intent=self._takeover_intent,
+                    )
+                if hand.ended:
+                    print("\n[TAKEOVER] No input. Back to autonomous driving.")
+                    if self.avoidance is not None:
+                        self.avoidance = AvoidancePolicy(self.avoidance.config)
+                    self.last_decision = None
+                if hand.human:
+                    self.run_log.add_time(cycle_s, human=True)
+                    self._drive_by_hand(frame, status, now, pad or PadInput())
+                    continue
+                self.run_log.add_time(cycle_s, human=False)
+
                 distance = status.sensors.distance.cm
                 if self.grid_map:
                     # 反射が戻らない時は、何も見えていないので地図を書き換えない
@@ -509,6 +700,9 @@ class RemoteAutonomousDriver:
                 if action == BodyAction.AVOID_OBSTACLE:
                     obstacle_cycles += 1
                     print(f"\r[OBSTACLE] {distance}cm", end="", flush=True)
+                    if self.avoidance is not None and not self.is_obstacle_stopped:
+                        # 曲がれずに止められた。動けるようになったら反対側へ曲がる
+                        self.last_decision = self.avoidance.on_stopped_by_obstacle(now)
                     self._log_event_once(
                         "is_obstacle_stopped",
                         "obstacle_stop",
@@ -546,10 +740,14 @@ class RemoteAutonomousDriver:
                 # ----------------------------------------------------
                 with self.profiler.stage("inference"):
                     input_tensor = self.preprocess(frame)
-                    outputs = self.session.run(
-                        None, {self.input_name: input_tensor, **self._intent_feed}
+                    # 反射が戻らない時は遠いので、避ける判断には距離なしとして渡す
+                    seen_cm = None if status.sensors.distance.far else distance
+                    steering_norm, decision = self.decide_steering(input_tensor, now, seen_cm)
+                if decision is not None and decision.event:
+                    print(
+                        f"\n[AVOID] {decision.event} -> intent {decision.intent} "
+                        f"({decision.reason or decision.state})"
                     )
-                steering_norm = float(outputs[0][0][0])  # -1.0 ~ 1.0
 
                 # ----------------------------------------------------
                 # 6. Phase 3.2: 動的車速制御 (Speed Limiter)
@@ -558,6 +756,9 @@ class RemoteAutonomousDriver:
                     steering_norm=steering_norm,
                     obstacle_distance_cm=distance,
                 )
+                if decision is not None and decision.slow:
+                    # カメラが前を塞がっていそうと見ている（超音波で見えない物かもしれない）
+                    dynamic_speed = min(dynamic_speed, self.min_speed)
                 steer_angle = int(steering_norm * self.max_steering_angle)
 
                 # 直前リングバッファに保存
@@ -621,16 +822,23 @@ class RemoteAutonomousDriver:
                         break
 
                 motion_val = self.stuck_detector.last_motion_value
+                blocked_text = (
+                    f" | Blocked: {self.last_blocked_probability:.2f}"
+                    if self.last_blocked_probability is not None
+                    else ""
+                )
+                intent_text = f" | Intent: {decision.intent}" if decision is not None else ""
                 print(
                     f"\rSteer: {steering_norm:+.2f} | Angle: {steer_angle:+02d}° | "
-                    f"Spd: {dynamic_speed:02d} | Flow: {motion_val:04.1f} | Dist: {distance}cm",
+                    f"Spd: {dynamic_speed:02d} | Flow: {motion_val:04.1f} | Dist: {distance}cm"
+                    f"{blocked_text}{intent_text}",
                     end="",
                     flush=True,
                 )
 
         except KeyboardInterrupt:
             print("\n[MANUAL INTERVENTION] Stop requested by user.")
-            saved_path = self.buffer.save_event(
+            saved_path = self._save_event(
                 trigger="manual_intervention",
                 output_base_dir=self.log_dir,
                 model_name=self.model_path,
@@ -640,6 +848,9 @@ class RemoteAutonomousDriver:
                 print(f"[DISENGAGEMENT LOGGED] Pre-event frames saved to: {saved_path}")
         finally:
             stream.stop()
+            if self.run_log is not None:
+                self.run_log.close()
+                print(f"\nRun log: {self.run_log.dir} {self.run_log.counts}")
             if self.visualizer:
                 self.visualizer.close()
             try:
@@ -663,6 +874,33 @@ def main():
         choices=INTENTS,
         default=INTENT_ANY,
         help="Preferred direction where both ways are open (any, left, right)",
+    )
+    parser.add_argument(
+        "--gamepad",
+        action="store_true",
+        help="Let a gamepad take over (records the human correction as training data)",
+    )
+    parser.add_argument(
+        "--runs_dir",
+        type=str,
+        default="data/runs",
+        help="Directory for the run and intervention log",
+    )
+    parser.add_argument(
+        "--corrections_dir",
+        type=str,
+        default="data/interventions",
+        help="Directory for human corrections recorded during takeovers",
+    )
+    parser.add_argument(
+        "--no_avoidance",
+        action="store_true",
+        help="Do not choose the turn intent from the ultrasonic and blocked output",
+    )
+    parser.add_argument(
+        "--ignore_blocked",
+        action="store_true",
+        help="Do not use the model's 'way ahead is blocked' output even if it was trained",
     )
     parser.add_argument(
         "--min_speed",
@@ -760,6 +998,11 @@ def main():
         parser.error(
             f"--min_speed は {MIN_MOVING_SPEED} 以上にしてください（それ未満では車輪が回らない）"
         )
+    gamepad = None
+    if args.gamepad:
+        gamepad = Gamepad()
+        if not gamepad.available:
+            parser.error("--gamepad needs pygame-ce (uv sync --extra e2e)")
     driver = RemoteAutonomousDriver(
         model_path=args.model,
         speed=args.speed,
@@ -780,6 +1023,11 @@ def main():
         log_dir=args.log_dir,
         buffer_frames=args.buffer_frames,
         intent=args.intent,
+        enable_avoidance=not args.no_avoidance,
+        use_blocked_output=not args.ignore_blocked,
+        gamepad=gamepad,
+        runs_dir=args.runs_dir,
+        corrections_dir=args.corrections_dir,
     )
     driver.run()
 
