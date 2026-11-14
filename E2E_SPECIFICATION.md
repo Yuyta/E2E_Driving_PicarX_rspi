@@ -183,7 +183,8 @@ PC上でカメラ映像をリアルタイム確認しながら手動操縦し、
 CPU推論を想定した4層の軽量CNN（推論時間の実測値は未記録）。
 
 - **入力**: `[Batch, 3, 120, 160]` (RGB画像、ONNX の入力名 `input`) と `[Batch, 3]` (行きたい向き。`any`, `left`, `right` の順の 0 / 1、ONNX の入力名 `intent`、2026-11-12 から)
-- **出力**: `[Batch, 1]` (予測ステアリング角, `-1.0` 〜 `+1.0`)
+- **出力**: `[Batch, 1]` (予測ステアリング角, `-1.0` 〜 `+1.0`、ONNX の出力名 `steering`) と `[Batch, 1]` (前方が塞がっている確率 `0.0` 〜 `1.0`、ONNX の出力名 `blocked`、2026-11-14 から)。`blocked` は `metadata.json` の `blocked_output.trained` が true の時だけ意味を持つ
+- **前方が塞がっているか**: 共通の 128 次元の特徴から、もう1つの頭（Linear(128 -> 32) + ReLU + Linear(32 -> 1)）でロジットを出す。ONNX ではシグモイドを通した確率を出す。意図には関係しない
 - **意図の扱い**: 意図ごとに出力の頭（ヘッド）を分ける分岐型（条件付きの模倣学習）。画像の特徴と1つ目の全結合層は共通で、意図に合う頭の値だけを出す。意図を特徴につなげるだけの形より意図に従わせやすい。意図を省くと `any`。記録に意図のない古いフレームも `any` として学習する
 - **ネットワーク構造**:
   ```text
@@ -201,17 +202,21 @@ CPU推論を想定した4層の軽量CNN（推論時間の実測値は未記録�
     ├── 頭 any  : Linear(128 -> 32) + ReLU + Linear(32 -> 1) + Tanh
     ├── 頭 left : 同上
     ├── 頭 right: 同上
-    └── 出力 = 3つの頭の値と意図の 0 / 1 の積の和（意図の頭の値）
+    ├── 出力 = 3つの頭の値と意図の 0 / 1 の積の和（意図の頭の値）
+    │
+    └── 頭 blocked: Linear(128 -> 32) + ReLU + Linear(32 -> 1)（ロジット）
   ```
 
 #### 4.3.2 学習仕様 (`training/train.py`)
-- **損失関数**: Mean Squared Error (MSE Loss)
+- **損失関数**: 舵角は Mean Squared Error (MSE Loss)。`blocked_loss_weight` が 0 より大きい時は、前方が塞がっているかの二値交差エントロピーに重みを掛けて足す。舵角の損失は舵角に使えるフレームだけ、塞がっているかの損失はラベルのあるフレームだけで計算する。重みが 0 なら、学習はこの頭がない時とまったく同じになる（乱数の使い方も含めて確認済み）
+- **前方が塞がっているかのラベル**: 超音波の距離から自動で付ける。40cm 未満で「塞がっている」、60cm 以上か反射が戻らない（`distance_far`）時は「空いている」、その間と距離のない記録は使わない（`blocked_near_cm`、`blocked_clear_cm`）。止まった、下がった、曲がれなかった（`exclude`）、食い違いの印があるフレームは舵角には使わないが、塞がっているかの学習には使う。細い家具の脚や音を吸う物は超音波で見えないので、「空いている」のラベルにも誤りが混じる
+- **曲がりの意図の付け直し** (`turn_intent`、既定の設定は true): 自動収集の曲がりの区間（`policy_state` の `avoid` と `open_turn`）と、その後に舵が中央へ戻るまでの `cruise` のフレームに、曲がった向きを意図として付ける（`dataset.turn_intents`）。どちらへ、いつまで曲がるかは直前の経過で決まり1枚の画像からは分からないため、向きは上の層（自律走行の `avoidance.py`）が意図で与える。記録のままの意図は `intent_recorded` に残る
 - **最適化**: Adam (`lr=1e-3`)
-- **設定**: `python/configs/train.toml`（エポック数、バッチサイズ、学習率、シード、検証セッション）。コマンドラインの引数で上書きできる
+- **設定**: `python/configs/train.toml`（エポック数、バッチサイズ、学習率、シード、検証セッション、`blocked_loss_weight`、`blocked_near_cm`、`blocked_clear_cm`、`turn_intent`、`flip_augment`）。コマンドラインの引数で上書きできる
 - **再現性**: シードを固定し、CPU で決定的なアルゴリズムだけを使う。同じデータと設定なら同じ指標になる
 - **データ分割**: セッション単位。検証セッションの指定がなければ名前順で最後のセッション。セッションが1つしかない、または検証が空なら学習しない
-- **交差検証** (`training/cross_validate.py`): セッションを1つずつ抜いて学習し（エポック数は固定、最後の重み）、抜いたセッションで評価する。モデルの比較はこの値で行う
-- **データ拡張**: なし
+- **交差検証** (`training/cross_validate.py`): セッションを1つずつ抜いて学習し（エポック数は固定、最後の重み）、抜いたセッションで評価する。モデルの比較はこの値で行う。画像を見ない基準（`baselines`: 常に0°、学習に使ったセッションの意図ごとの平均）も出す。意図が曲がる向きを表すので、モデルは意図ごとの平均より良い必要がある。塞がっているかを学習した時は、再現率、適合率、常に「空いている」と答えた場合の正解率も出す
+- **データ拡張**: 左右反転（`flip_augment`、既定は false）。学習用のフレームに、画像を左右反転し、舵角の符号を反転し、意図の左右を入れ替えた複製を加える。評価は元のフレームだけで行う
 - **エクスポート**:
   - 最良検証ロスの重み: `best_model.pth`
   - ONNX 形式: `model.onnx` (Opset 17, 入出力動的バッチ対応)
@@ -244,10 +249,10 @@ CPU推論を想定した4層の軽量CNN（推論時間の実測値は未記録�
 - **実行場所**: PC。Pi とは HTTP で通信する。
 - **ループの処理順**:
   1. `/api/camera/stream` の新しいフレームを待つ（処理が遅れても古いフレームは溜まらない）
-  2. `/api/status` で Pi の状態を確認
+  2. `/api/status` で Pi の状態を確認。`--gamepad` の時はパッドを読み、操作があれば人が運転を引き継ぐ（入力がなくなって1.5秒で自律に戻る、HOME で走行を終える）。引き継いでいる間はモデルを使わず、画像と人の操作を `data/interventions/<走行ID>/` に保存する（`intervention.py`）
   3. Pi が前進を拒否していれば、理由に応じて脱出または待機（`safety/body_status.py`）
   4. 指令と実際の動きの食い違いの検出（§4.7）。食い違いが1秒続くと止まり、介入（`motion_mismatch`）と記憶の出来事として記録して走行を終える。`--disable_motion_check` を付けた時だけ、旧スタック検知（後退と車体振りで脱出）を使う
-  5. 120×160 に変換し、ONNX Runtime でステアリング角を推論
+  5. 120×160 に変換し、ONNX Runtime でステアリング角を推論。モデルが意図を入力に持つ時は、障害物を避ける判断（`avoidance.py`）がいつ、どちらへ曲がるかを決めて意図で渡す。超音波が 50cm より近いか、塞がっている確率（学習済みの時だけ）が 0.6 以上で2フレーム続いたら曲がり始める。向きは上の層の意図が左右ならその向き、おまかせなら右から。超音波もカメラも空いた状態が4フレーム続き1秒たったら曲がり終え、4秒で空かないか Pi が障害物で止めたら反対側へ切り替える。塞がっている確率が 0.5 以上の間は最低の速度まで落とす。`--no_avoidance`、`--ignore_blocked` で切れる
   6. 速度リミッターで速度を決定し、介入バッファを更新
   7. `/api/drive/steer` と `/api/drive/move`（TTL 400ms）を送信。受け付けられた移動だけ軌跡と地図に反映
   8. 地図の描画
@@ -255,6 +260,7 @@ CPU推論を想定した4層の軽量CNN（推論時間の実測値は未記録�
 - **旧方式の実測周期（2026-11-03 のログ解析）**: フレーム間隔の中央値 **1.14秒**、p10 1.04秒、p90 2.59秒（2,930間隔）。主な原因は撮影ごとの `rpicam-still` 起動と推定する。常時配信に変えた新方式は **15.0Hz**（p50、p95 88.1ms、2026-11-04 実機。ROADMAP の M1）。
 - **動作の特徴**: 指令を周期ごとに更新するので、10Hz 以上なら止まらず走り続ける。指令が途絶えると TTL で止まる。
 - **開始時**: 今いる床で段差を校正する。校正に失敗すると走行を始めない。
+- **走行の記録**: 走るたびに `data/runs/<走行ID>/run.json`（モデルの版、学習に使ったデータの版、コードの版、自律と人の運転の時間、介入の数）と `interventions.jsonl`（介入ごとに1行。人の介入と安全のための自動停止を分ける）を書く。モデル別の10分あたりの介入回数は `src.e2e.evaluation.interventions` で集計する
 
 #### 安全機能の実行場所
 
@@ -342,7 +348,7 @@ PiCar-X には車輪の回転数を測るセンサーがないので、カメラ
 1. **Disengagement Logger (`dataset/disengagement_manager.py`)**:
    - `cliff_detected`、`obstacle_stop`、`communication_timeout`、`stuck_detected`、`manual_intervention` の発生時に、リングバッファの直前30フレームを保存する。
    - **制限**: 現行周期では30フレームが約30秒以上に相当する。
-   - **制限**: `steering` はモデルの出力であり人の修正ではない。`--approve` で学習対象にすると、失敗時の操舵を正解として学習する。人の修正操作を記録する仕組みができるまで、承認して学習に使わない。
+   - **制限**: `steering` はモデルの出力であり人の修正ではない。`--approve` で学習対象にすると、失敗時の操舵を正解として学習する。承認して学習に使わない。人の修正操作は、自律走行の `--gamepad` での引き継ぎで `data/interventions/` に記録する（2026-11-14）。`event.json` には走行 ID、モデルの版、データの版も入る。
 2. **Dataset Merging**: 複数セッションの統合学習に対応。
 3. **Retraining Pipeline**: 学習、クリーニング、再学習の流れは実装済み。それまでの走行データ、`clean_v1`/`clean_v2`、モデル `v001`〜`v005` は、走り方の決まりを変えたため 2026-11-12 にバックアップも含めて削除した。
    - **現状のデータ量**: なし（新しい決まりで収集し直す）。
@@ -434,7 +440,8 @@ PiCarX/
 | **クリーンデータでの再学習** | `uv run python -m src.e2e.training.train --data_dir data/processed/clean_v2 --output_dir models/<version> --epochs 25` |
 | **モデルオフライン評価** | `uv run python -m src.e2e.evaluation.evaluate --data_dir data/raw --model_path models/<version>/best_model.pth` |
 | **MLOps レジストリ確認** | `uv run python -m src.e2e.registry.compare` |
-| **実機自律走行** | `uv run python -m src.e2e.autonomous_driver --model models/<version>/model.onnx --speed 50`（行きたい向きは `--intent left` / `right`、既定は `any`） |
+| **実機自律走行** | `uv run python -m src.e2e.autonomous_driver --model models/<version>/model.onnx --speed 50`（行きたい向きは `--intent left` / `right`、既定は `any`。パッドで引き継いで修正操作を記録するなら `--gamepad`） |
+| **モデル別の介入率** | `uv run python -m src.e2e.evaluation.interventions --runs_dir data/runs` |
 | **動きの実機計測** | `uv run python -m src.e2e.m3_check run --scenario still`（走る場面は `--i-understand-the-car-will-move`） |
 | **記録の動きの解析** | `uv run python -m src.e2e.motion.analyze --data_dir data/raw/<session_id>` |
 | **介入イベント一覧確認** | `uv run python -m src.e2e.dataset.disengagement_manager --list` |
