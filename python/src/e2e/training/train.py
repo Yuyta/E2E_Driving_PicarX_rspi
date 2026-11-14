@@ -37,7 +37,7 @@ try:
         predict_blocked,
         steering_metrics,
     )
-    from ..intent import INTENTS
+    from ..intent import INTENT_LEFT, INTENT_RIGHT, INTENTS
     from . import provenance
     from .dataset import BLOCKED_CLEAR_CM, BLOCKED_NEAR_CM, DrivingDataset
     from .model import ExportModel, SmallDrivingCNN
@@ -50,7 +50,7 @@ except ImportError:
         predict_blocked,
         steering_metrics,
     )
-    from src.e2e.intent import INTENTS
+    from src.e2e.intent import INTENT_LEFT, INTENT_RIGHT, INTENTS
     from src.e2e.training import provenance
     from src.e2e.training.dataset import BLOCKED_CLEAR_CM, BLOCKED_NEAR_CM, DrivingDataset
     from src.e2e.training.model import ExportModel, SmallDrivingCNN
@@ -75,6 +75,9 @@ DEFAULT_PARAMS: Dict[str, Any] = {
     "blocked_clear_cm": BLOCKED_CLEAR_CM,
     # 曲がりの区間に、曲がった向きを意図として付け直す（dataset.turn_intents）
     "turn_intent": False,
+    # 学習用のフレームに、左右反転した複製を加える（舵角の符号と意図の左右を入れ替える）。
+    # 評価は元のフレームだけで行う
+    "flip_augment": False,
 }
 
 
@@ -139,6 +142,45 @@ class _Targets(Dataset):
             torch.tensor(1.0 if blocked else 0.0),
             torch.tensor(0.0 if blocked is None else 1.0),
         )
+
+
+_MIRRORED_NAME = {INTENT_LEFT: INTENT_RIGHT, INTENT_RIGHT: INTENT_LEFT}
+# 反転後の意図の各位置へ、元のどの位置の値を持ってくるか（any はそのまま、left と right を交換）
+_MIRROR_INTENT_ORDER = [INTENTS.index(_MIRRORED_NAME.get(name, name)) for name in INTENTS]
+
+
+class _Mirrored(Dataset):
+    """番号が n 未満なら元のまま、n 以上なら n を引いたフレームを左右反転して返す（n は元の数）
+
+    画像を左右反転し、舵角の符号を反転し、意図の左右を入れ替える。前方が塞がっているかと、
+    使うかの印は左右に関係しないのでそのまま。右へ曲がるフレームが左の半分ほどしかない偏りを補う。
+    """
+
+    def __init__(self, base: Dataset, intent_pos: int):
+        self.base = base
+        self.intent_pos = intent_pos
+
+    def __len__(self) -> int:
+        return 2 * len(self.base)
+
+    def __getitem__(self, idx: int):
+        n = len(self.base)
+        item = self.base[idx % n]
+        if idx < n:
+            return item
+        item = list(item)
+        item[0] = torch.flip(item[0], dims=[-1])  # 画像の横方向（C, H, W の W）
+        item[1] = -item[1]
+        item[self.intent_pos] = item[self.intent_pos][_MIRROR_INTENT_ORDER]
+        return tuple(item)
+
+
+def _training_subset(base: Dataset, train_idx: Sequence[int], params: Dict[str, Any], intent_pos):
+    """学習に使う集合。flip_augment なら、各フレームに左右反転した複製を加える"""
+    if not params.get("flip_augment"):
+        return Subset(base, list(train_idx))
+    n = len(base)
+    return Subset(_Mirrored(base, intent_pos), list(train_idx) + [n + i for i in train_idx])
 
 
 def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -213,8 +255,9 @@ def _fit(dataset, train_idx, val_idx, params, log):
             dataset, train_idx, val_idx, params, log, model, optimizer, generator
         )
 
+    train_set = _training_subset(dataset, train_idx, params, intent_pos=3)
     train_loader = DataLoader(
-        Subset(dataset, list(train_idx)),
+        train_set,
         batch_size=int(params["batch_size"]),
         shuffle=True,
         generator=generator,
@@ -241,7 +284,7 @@ def _fit(dataset, train_idx, val_idx, params, log):
             loss.backward()
             optimizer.step()
             train_loss += loss.item() * images.size(0)
-        train_loss /= len(train_idx)
+        train_loss /= len(train_set)
 
         entry = {"epoch": epoch, "train_loss": train_loss}
         if val_loader is not None:
@@ -274,7 +317,7 @@ def _fit_with_blocked(dataset, train_idx, val_idx, params, log, model, optimizer
     targets = _Targets(dataset)
     batch_size = int(params["batch_size"])
     train_loader = DataLoader(
-        Subset(targets, list(train_idx)),
+        _training_subset(targets, train_idx, params, intent_pos=2),
         batch_size=batch_size,
         shuffle=True,
         generator=generator,
@@ -523,6 +566,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         default=None,
         help="Relabel turns with the direction they turned as the intent",
     )
+    parser.add_argument(
+        "--flip_augment",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Add left-right mirrored copies of the training frames",
+    )
 
     args = parser.parse_args(argv)
     params = load_params(
@@ -535,6 +584,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "val_sessions": args.val_sessions,
             "blocked_loss_weight": args.blocked_loss_weight,
             "turn_intent": args.turn_intent,
+            "flip_augment": args.flip_augment,
         },
     )
     data_input = args.data_dir[0] if len(args.data_dir) == 1 else args.data_dir

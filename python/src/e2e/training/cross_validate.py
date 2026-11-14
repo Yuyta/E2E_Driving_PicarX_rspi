@@ -149,6 +149,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         default=None,
         help="Relabel turns with the direction they turned as the intent",
     )
+    parser.add_argument(
+        "--flip_augment",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Add left-right mirrored copies of the training frames",
+    )
     parser.add_argument("--output", type=str, default=None, help="Write the result as JSON")
     args = parser.parse_args(argv)
 
@@ -159,6 +165,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             "seed": args.seed,
             "blocked_loss_weight": args.blocked_loss_weight,
             "turn_intent": args.turn_intent,
+            "flip_augment": args.flip_augment,
         },
     )
     data_input = args.data_dir[0] if len(args.data_dir) == 1 else args.data_dir
