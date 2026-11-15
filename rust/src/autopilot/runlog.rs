@@ -125,6 +125,8 @@ impl RunLog {
             .open(&path)
             .map_err(|e| format!("{} を開けません: {e}", path.display()))?;
         writeln!(file, "{record}").map_err(|e| e.to_string())?;
+        // 電源を切られても残るよう、書くたびにディスクへ確定させる（2026-11-15 に一度失った）
+        file.sync_data().map_err(|e| e.to_string())?;
         self.write(now, false)
     }
 
@@ -145,8 +147,18 @@ impl RunLog {
         let path = self.dir.join("run.json");
         let tmp = self.dir.join("run.json.tmp");
         let text = serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?;
-        fs::write(&tmp, text + "\n").map_err(|e| format!("{} に書けません: {e}", tmp.display()))?;
-        fs::rename(&tmp, &path).map_err(|e| format!("{} に書けません: {e}", path.display()))
+        let mut file =
+            fs::File::create(&tmp).map_err(|e| format!("{} に書けません: {e}", tmp.display()))?;
+        file.write_all((text + "\n").as_bytes())
+            .and_then(|()| file.sync_all())
+            .map_err(|e| format!("{} に書けません: {e}", tmp.display()))?;
+        fs::rename(&tmp, &path).map_err(|e| format!("{} に書けません: {e}", path.display()))?;
+        // 名前の付け替えも確定させる（ディレクトリの fsync は Unix だけ）
+        #[cfg(unix)]
+        if let Ok(dir) = fs::File::open(&self.dir) {
+            let _ = dir.sync_all();
+        }
+        Ok(())
     }
 }
 

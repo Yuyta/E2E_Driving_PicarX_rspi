@@ -1,7 +1,8 @@
 //! 自律走行のループ（走行のスレッドで動く）。PC の `autonomous_driver.run` を Pi へ移したもの。
 //!
 //! 1周の流れ: 新しいフレームを待つ → 人の指令が来ていれば何もしない → 前へ進めるかを安全の
-//! 判定で確かめる（障害物と段差なら後退して向きを変える） → 前処理 → 引っかかりの確認 →
+//! 判定で確かめる（障害物と段差なら後退して向きを変える。後退を繰り返す時と、段差から
+//! 抜けられない時は、動き回らずに走行を終えて人を待つ） → 前処理 → 引っかかりの確認 →
 //! 推論と避ける判断 → 速度を決めて指令する。指令の期限（TTL）が切れれば車両は止まるので、
 //! このスレッドが止まっても走り続けない。
 
@@ -41,6 +42,13 @@ const STUCK_SETTLE: Duration = Duration::from_millis(500);
 /// この時間のうちにこの回数引っかかったら、人の助けが要るとして走行を終える
 const STUCK_WINDOW_S: f64 = 30.0;
 const STUCK_LIMIT: usize = 3;
+/// 後退して抜ける動作（障害物、段差、引っかかり）を、この時間のうちにこの回数まで行う。
+/// 超えたら後退と前進を繰り返さず、人の助けが要るとして走行を終える
+const ESCAPE_WINDOW_S: f64 = 30.0;
+const ESCAPE_LIMIT: usize = 4;
+/// 段差は落ちれば壊れるので、この時間のうちに2回目を見つけたら走行を終える
+const CLIFF_WINDOW_S: f64 = 60.0;
+const CLIFF_LIMIT: usize = 2;
 
 /// 走行を終えた理由
 struct End {
@@ -73,6 +81,15 @@ impl From<StopRequest> for End {
     }
 }
 
+/// 時刻を足し、`window_s` より古いものを捨てて、残りの数を返す
+fn push_within(times: &mut VecDeque<f64>, at: f64, window_s: f64) -> usize {
+    times.push_back(at);
+    while times.front().is_some_and(|&t| at - t > window_s) {
+        times.pop_front();
+    }
+    times.len()
+}
+
 fn ema(previous: Option<f64>, value: f64) -> Option<f64> {
     Some(previous.map_or(value, |p| p * 0.9 + value * 0.1))
 }
@@ -95,8 +112,11 @@ pub struct Runner {
     takeovers: u32,
     obstacle_cycles: u32,
     obstacle_logged: bool,
-    cliff_logged: bool,
+    /// 今の段差の検出で、もう後退したか（後退しても段差のままなら走行を終える）
+    cliff_escaped: bool,
     stuck_times: VecDeque<f64>,
+    escape_times: VecDeque<f64>,
+    cliff_times: VecDeque<f64>,
     /// 前進の指令が通り続けている始まり
     forward_since: Option<Instant>,
     frames: u64,
@@ -128,8 +148,10 @@ impl Runner {
             takeovers: 0,
             obstacle_cycles: 0,
             obstacle_logged: false,
-            cliff_logged: false,
+            cliff_escaped: false,
             stuck_times: VecDeque::new(),
+            escape_times: VecDeque::new(),
+            cliff_times: VecDeque::new(),
             forward_since: None,
             frames: 0,
         })
@@ -298,10 +320,12 @@ impl Runner {
             Ok(()) => {
                 self.obstacle_cycles = 0;
                 self.obstacle_logged = false;
-                self.cliff_logged = false;
+                self.cliff_escaped = false;
             }
             Err(SafetyReason::Obstacle) => return self.on_obstacle(now, distance),
-            Err(SafetyReason::Cliff) => return self.on_cliff(sensors.grayscale.map(|g| g.value)),
+            Err(SafetyReason::Cliff) => {
+                return self.on_cliff(now, sensors.grayscale.map(|g| g.value));
+            }
             Err(SafetyReason::EmergencyStop) => {
                 return Some(End::safety("manual_intervention", "emergency stop"));
             }
@@ -427,33 +451,74 @@ impl Runner {
                 Some(d) => format!("obstacle at {d:.0}cm"),
                 None => "obstacle".to_string(),
             };
-            self.intervention("obstacle_stop", &note, json!({}));
+            self.intervention(
+                "obstacle_stop",
+                &note,
+                json!({"distance_cm": distance, "intent_after": decision.intent.as_str()}),
+            );
         }
         if self.obstacle_cycles >= OBSTACLE_ESCAPE_CYCLES {
             self.obstacle_cycles = 0;
+            if let Some(end) = self.count_escape(now, "obstacle") {
+                return Some(end);
+            }
             self.escape(REVERSE_MS, None);
         }
         None
     }
 
-    fn on_cliff(&mut self, floor: Option<[u16; 3]>) -> Option<End> {
+    /// 段差（机の縁など）。軌跡に沿って1回だけ後退して向きを変える。後退しても段差のまま、
+    /// 下がる軌跡がない、短い時間に2回目、のどれかなら、動き回らずに走行を終えて人を待つ
+    fn on_cliff(&mut self, now: Instant, floor: Option<[u16; 3]>) -> Option<End> {
         self.forward_since = None;
         self.stuck.reset();
         self.set_phase("escaping", Some("cliff".to_string()));
-        if !self.cliff_logged {
-            self.cliff_logged = true;
-            self.intervention(
-                "cliff_detected",
-                &format!("floor sensors {floor:?}"),
-                json!({}),
-            );
-        }
-        let cliff = match (self.state.safety().cliff(), floor) {
+        let calibration = self.state.safety().cliff();
+        let cliff = match (calibration, floor) {
             (Some(calibration), Some(values)) => Some(calibration.is_cliff(values)),
             _ => None,
         };
+        if self.cliff_escaped {
+            return Some(End::quiet(format!(
+                "cliff still detected after backing out (floor sensors {floor:?}); needs help"
+            )));
+        }
+        self.intervention(
+            "cliff_detected",
+            &format!("floor sensors {floor:?}"),
+            json!({
+                "floor": floor,
+                "cliff_sensors": cliff,
+                "thresholds": calibration.map(|c| c.thresholds),
+                "baseline": calibration.map(|c| c.baseline),
+            }),
+        );
+        let at = self.secs(now);
+        if push_within(&mut self.cliff_times, at, CLIFF_WINDOW_S) >= CLIFF_LIMIT {
+            return Some(End::quiet(format!(
+                "cliff {CLIFF_LIMIT} times within {CLIFF_WINDOW_S:.0}s; needs help"
+            )));
+        }
+        if let Some(end) = self.count_escape(now, "cliff") {
+            return Some(end);
+        }
+        self.cliff_escaped = true;
         if !self.escape(REVERSE_MS, cliff) {
-            thread::sleep(WAIT_SLEEP);
+            return Some(End::quiet(
+                "cliff detected with no recorded path to back out along; needs help",
+            ));
+        }
+        None
+    }
+
+    /// 後退して抜ける回数を数え、多すぎれば走行を終える理由を返す
+    fn count_escape(&mut self, now: Instant, kind: &str) -> Option<End> {
+        let at = self.secs(now);
+        if push_within(&mut self.escape_times, at, ESCAPE_WINDOW_S) > ESCAPE_LIMIT {
+            return Some(End::quiet(format!(
+                "more than {ESCAPE_LIMIT} escapes within {ESCAPE_WINDOW_S:.0}s (last: {kind}); \
+                 needs help"
+            )));
         }
         None
     }
@@ -468,18 +533,13 @@ impl Runner {
             ),
             json!({"flag": "no_motion"}),
         );
-        self.stuck_times.push_back(at);
-        while self
-            .stuck_times
-            .front()
-            .is_some_and(|&t| at - t > STUCK_WINDOW_S)
-        {
-            self.stuck_times.pop_front();
-        }
-        if self.stuck_times.len() >= STUCK_LIMIT {
+        if push_within(&mut self.stuck_times, at, STUCK_WINDOW_S) >= STUCK_LIMIT {
             return Some(End::quiet(format!(
                 "stuck {STUCK_LIMIT} times within {STUCK_WINDOW_S:.0}s; needs help"
             )));
+        }
+        if let Some(end) = self.count_escape(now, "stuck") {
+            return Some(end);
         }
         let decision = self.avoidance.on_stopped_by_obstacle(at);
         self.last_intent = Some(decision.intent);
@@ -577,6 +637,7 @@ mod tests {
 
     struct Hardware {
         distance: Arc<Mutex<Option<f64>>>,
+        floor: Arc<Mutex<[u16; 3]>>,
         log: Arc<Mutex<Log>>,
     }
 
@@ -597,7 +658,7 @@ mod tests {
             let now = Instant::now();
             SensorSnapshot {
                 distance_cm: self.distance.lock().unwrap().map(|d| Timed::new(d, now)),
-                grayscale: Some(Timed::new(FLOOR, now)),
+                grayscale: Some(Timed::new(*self.floor.lock().unwrap(), now)),
                 battery: Some(Timed::new((7.6, 50), now)),
             }
         }
@@ -639,6 +700,7 @@ mod tests {
     struct Rig {
         state: Arc<AppState>,
         distance: Arc<Mutex<Option<f64>>>,
+        floor: Arc<Mutex<[u16; 3]>>,
         log: Arc<Mutex<Log>>,
         intents: Arc<Mutex<Vec<Intent>>>,
         running: Arc<AtomicBool>,
@@ -655,6 +717,7 @@ mod tests {
         fn with_camera(distance: f64, changing: bool) -> Self {
             let tmp = tempfile::tempdir().unwrap();
             let distance = Arc::new(Mutex::new(Some(distance)));
+            let floor = Arc::new(Mutex::new(FLOOR));
             let log = Arc::new(Mutex::new(Log::default()));
             let mut safety = SafetyController::new(true);
             safety
@@ -662,6 +725,7 @@ mod tests {
             let state = Arc::new(AppState {
                 hardware: Box::new(Hardware {
                     distance: Arc::clone(&distance),
+                    floor: Arc::clone(&floor),
                     log: Arc::clone(&log),
                 }),
                 safety: Mutex::new(safety),
@@ -692,6 +756,7 @@ mod tests {
             Self {
                 state,
                 distance,
+                floor,
                 log,
                 intents: Arc::new(Mutex::new(Vec::new())),
                 running,
@@ -732,6 +797,40 @@ mod tests {
                 .iter()
                 .filter(|(d, _)| *d == DriveDirection::Forward)
                 .count()
+        }
+
+        fn backward_commands(&self) -> usize {
+            self.log
+                .lock()
+                .unwrap()
+                .commands
+                .iter()
+                .filter(|(d, _)| *d == DriveDirection::Backward)
+                .count()
+        }
+
+        fn run_dir(&self) -> std::path::PathBuf {
+            std::fs::read_dir(self.tmp.path().join("runs"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path()
+        }
+
+        fn interventions(&self) -> Vec<serde_json::Value> {
+            std::fs::read_to_string(self.run_dir().join("interventions.jsonl"))
+                .unwrap_or_default()
+                .lines()
+                .map(|l| serde_json::from_str(l).unwrap())
+                .collect()
+        }
+
+        fn wait_stopped(&self, timeout: Duration) -> String {
+            self.wait_for(timeout, "the run to end", |r| {
+                !r.state.autopilot.is_running()
+            });
+            self.state.autopilot.status().stopped_reason.unwrap()
         }
 
         fn stop_and_read_run(&self) -> serde_json::Value {
@@ -859,6 +958,84 @@ mod tests {
         });
         let status = rig.state.autopilot.status();
         assert!(status.stopped_reason.unwrap().contains("needs help"));
+    }
+
+    /// 中央の床センサーだけが段差（机の縁を正面に見た時）
+    const EDGE: [u16; 3] = [500, 100, 500];
+
+    #[test]
+    fn push_within_drops_old_times() {
+        let mut times = std::collections::VecDeque::new();
+        assert_eq!(super::push_within(&mut times, 0.0, 30.0), 1);
+        assert_eq!(super::push_within(&mut times, 10.0, 30.0), 2);
+        assert_eq!(super::push_within(&mut times, 35.0, 30.0), 2); // 0.0 は捨てる
+    }
+
+    #[test]
+    fn a_cliff_backs_out_once_and_ends_the_run_if_the_edge_is_still_there() {
+        let rig = Rig::new(150.0);
+        rig.start(0.0);
+        rig.wait_until("some recorded path", |r| r.forward_commands() >= 10);
+        *rig.floor.lock().unwrap() = EDGE;
+        let reason = rig.wait_stopped(Duration::from_secs(8));
+        assert!(reason.contains("still detected"), "{reason}");
+        assert!(
+            rig.backward_commands() > 0,
+            "backed out along the path once"
+        );
+        let status = rig.state.autopilot.status();
+        assert_eq!(status.interventions.safety, 1);
+        // 電源を切られても調べられるよう、段差の値と閾値を残す
+        let records = rig.interventions();
+        let cliff = records
+            .iter()
+            .find(|r| r["trigger"] == "cliff_detected")
+            .unwrap();
+        assert_eq!(cliff["floor"], serde_json::json!(EDGE));
+        assert_eq!(
+            cliff["cliff_sensors"],
+            serde_json::json!([false, true, false])
+        );
+        assert_eq!(cliff["thresholds"], serde_json::json!([175, 175, 175]));
+    }
+
+    #[test]
+    fn a_cliff_with_no_path_behind_ends_without_reversing() {
+        let rig = Rig::new(150.0);
+        *rig.floor.lock().unwrap() = EDGE;
+        rig.start(0.0);
+        let reason = rig.wait_stopped(Duration::from_secs(5));
+        assert!(reason.contains("no recorded path"), "{reason}");
+        assert_eq!(rig.backward_commands(), 0);
+    }
+
+    #[test]
+    fn a_second_cliff_soon_after_ends_the_run() {
+        let rig = Rig::new(150.0);
+        rig.start(0.0);
+        rig.wait_until("some recorded path", |r| r.forward_commands() >= 10);
+        *rig.floor.lock().unwrap() = EDGE;
+        rig.wait_until("reverse", |r| r.backward_commands() > 0);
+        *rig.floor.lock().unwrap() = FLOOR;
+        let before = rig.forward_commands();
+        rig.wait_until("driving again", |r| r.forward_commands() >= before + 5);
+        assert!(rig.state.autopilot.is_running());
+        *rig.floor.lock().unwrap() = EDGE;
+        let reason = rig.wait_stopped(Duration::from_secs(5));
+        assert!(reason.contains("cliff 2 times"), "{reason}");
+        assert_eq!(rig.state.autopilot.status().interventions.safety, 2);
+    }
+
+    #[test]
+    fn an_obstacle_that_never_clears_ends_the_run_after_repeated_escapes() {
+        let rig = Rig::new(150.0);
+        rig.start(0.0);
+        rig.wait_until("some recorded path", |r| r.forward_commands() >= 10);
+        *rig.distance.lock().unwrap() = Some(10.0);
+        let reason = rig.wait_stopped(Duration::from_secs(15));
+        assert!(reason.contains("escapes within"), "{reason}");
+        // 障害物の停止は止められている間に1回だけ数える
+        assert_eq!(rig.state.autopilot.status().interventions.safety, 1);
     }
 
     #[test]
