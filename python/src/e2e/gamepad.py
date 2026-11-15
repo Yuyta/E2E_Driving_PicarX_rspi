@@ -159,6 +159,15 @@ class Gamepad:
             self._next_open = time.monotonic() + REOPEN_INTERVAL_S
             return None
 
+    def rumble(self, strength: float = 1.0, ms: int = 500) -> bool:
+        """パッドを震わせる（介入を頼む時の知らせ）。震わせられなければ False"""
+        if self._pad is None:
+            return False
+        try:
+            return bool(self._pad.rumble(strength, strength, ms))
+        except (AttributeError, pygame.error):
+            return False
+
     def _open_first(self) -> None:
         now = time.monotonic()
         if now < self._next_open:

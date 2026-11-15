@@ -49,6 +49,8 @@ const ESCAPE_LIMIT: usize = 4;
 /// 段差は落ちれば壊れるので、この時間のうちに2回目を見つけたら走行を終える
 const CLIFF_WINDOW_S: f64 = 60.0;
 const CLIFF_LIMIT: usize = 2;
+/// 人の助けをこれだけ待っても来なければ、走行を終える
+const HELP_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// 走行を終えた理由
 struct End {
@@ -126,6 +128,9 @@ pub struct Runner {
     escape_times: VecDeque<f64>,
     cliff_times: VecDeque<f64>,
     cycle_log_failed: bool,
+    /// 人の助けを待ち始めた時刻と理由
+    help: Option<(Instant, String)>,
+    help_requests: u32,
     /// 前進の指令が通り続けている始まり
     forward_since: Option<Instant>,
     frames: u64,
@@ -162,6 +167,8 @@ impl Runner {
             escape_times: VecDeque::new(),
             cliff_times: VecDeque::new(),
             cycle_log_failed: false,
+            help: None,
+            help_requests: 0,
             forward_since: None,
             frames: 0,
         })
@@ -310,6 +317,18 @@ impl Runner {
                 // 自律に戻る時は、曲がりの途中の判断を捨てる
                 self.avoidance = AvoidancePolicy::new(self.avoidance.config);
                 self.last_intent = None;
+                if self.help.take().is_some() {
+                    // 人が抜け出させたので、回数の数えをやり直す
+                    self.shared.status().help_reason = None;
+                    self.stuck_times.clear();
+                    self.escape_times.clear();
+                    self.cliff_times.clear();
+                    self.cliff_escaped = false;
+                    self.obstacle_cycles = 0;
+                    self.obstacle_logged = false;
+                    // 人が走らせた分は記録した軌跡と合わないので、後退に使わない
+                    self.trajectory = Trajectory::new(100);
+                }
                 self.note_event("autonomous again".to_string());
             }
             self.forward_since = None;
@@ -319,6 +338,18 @@ impl Runner {
             self.log.add_time(dt_s, true);
             self.shared.status().human_s = self.log.human_s;
             self.set_phase("human", None);
+            return None;
+        }
+        // 人の助けを待っている間は動かない（時間は自律にも人にも数えない）
+        if let Some((since, reason)) = &self.help {
+            if now.duration_since(*since) >= HELP_TIMEOUT {
+                return Some(End::quiet(format!(
+                    "no help within {}s ({reason})",
+                    HELP_TIMEOUT.as_secs()
+                )));
+            }
+            self.set_phase("needs_help", Some(reason.clone()));
+            thread::sleep(WAIT_SLEEP);
             return None;
         }
         self.log.add_time(dt_s, false);
@@ -521,9 +552,12 @@ impl Runner {
             _ => None,
         };
         if self.cliff_escaped {
-            return Some(End::quiet(format!(
-                "cliff still detected after backing out (floor sensors {floor:?}); needs help"
-            )));
+            return self.need_help(
+                now,
+                format!(
+                    "cliff still detected after backing out (floor sensors {floor:?}); needs help"
+                ),
+            );
         }
         self.intervention(
             "cliff_detected",
@@ -537,19 +571,43 @@ impl Runner {
         );
         let at = self.secs(now);
         if push_within(&mut self.cliff_times, at, CLIFF_WINDOW_S) >= CLIFF_LIMIT {
-            return Some(End::quiet(format!(
-                "cliff {CLIFF_LIMIT} times within {CLIFF_WINDOW_S:.0}s; needs help"
-            )));
+            return self.need_help(
+                now,
+                format!("cliff {CLIFF_LIMIT} times within {CLIFF_WINDOW_S:.0}s; needs help"),
+            );
         }
         if let Some(end) = self.count_escape(now, "cliff") {
             return Some(end);
         }
         self.cliff_escaped = true;
         if !self.escape(REVERSE_MS, cliff) {
-            return Some(End::quiet(
+            return self.need_help(
+                now,
                 "cliff detected with no recorded path to back out along; needs help",
-            ));
+            );
         }
+        None
+    }
+
+    /// 自分では抜け出せない。見守る人がいれば止まって助けを待ち、いなければ走行を終える
+    fn need_help(&mut self, now: Instant, reason: impl Into<String>) -> Option<End> {
+        let reason = reason.into();
+        if !self.params.wait_for_help {
+            return Some(End::quiet(reason));
+        }
+        let _ = self.state.stop_motors();
+        self.forward_since = None;
+        self.stuck.reset();
+        self.help_requests += 1;
+        self.note_event(format!("help requested: {reason}"));
+        {
+            let mut status = self.shared.status();
+            status.help_reason = Some(reason.clone());
+            status.help_requests = self.help_requests;
+        }
+        self.set_phase("needs_help", Some(reason.clone()));
+        self.log_cycle(json!({"phase": "needs_help", "reason": reason}));
+        self.help = Some((now, reason));
         None
     }
 
@@ -557,10 +615,13 @@ impl Runner {
     fn count_escape(&mut self, now: Instant, kind: &str) -> Option<End> {
         let at = self.secs(now);
         if push_within(&mut self.escape_times, at, ESCAPE_WINDOW_S) > ESCAPE_LIMIT {
-            return Some(End::quiet(format!(
-                "more than {ESCAPE_LIMIT} escapes within {ESCAPE_WINDOW_S:.0}s (last: {kind}); \
+            return self.need_help(
+                now,
+                format!(
+                    "more than {ESCAPE_LIMIT} escapes within {ESCAPE_WINDOW_S:.0}s (last: {kind}); \
                  needs help"
-            )));
+                ),
+            );
         }
         None
     }
@@ -576,9 +637,10 @@ impl Runner {
             json!({"flag": "no_motion"}),
         );
         if push_within(&mut self.stuck_times, at, STUCK_WINDOW_S) >= STUCK_LIMIT {
-            return Some(End::quiet(format!(
-                "stuck {STUCK_LIMIT} times within {STUCK_WINDOW_S:.0}s; needs help"
-            )));
+            return self.need_help(
+                now,
+                format!("stuck {STUCK_LIMIT} times within {STUCK_WINDOW_S:.0}s; needs help"),
+            );
         }
         if let Some(end) = self.count_escape(now, "stuck") {
             return Some(end);
@@ -808,6 +870,10 @@ mod tests {
         }
 
         fn start(&self, steering: f64) {
+            self.start_with(steering, RunParams::default());
+        }
+
+        fn start_with(&self, steering: f64, params: RunParams) {
             let manifest = read_manifest(&v006_bundle(self.tmp.path())).unwrap();
             let model = FixedModel {
                 manifest,
@@ -816,7 +882,7 @@ mod tests {
             };
             self.state
                 .autopilot
-                .start_with_model(&self.state, Box::new(model), RunParams::default())
+                .start_with_model(&self.state, Box::new(model), params)
                 .unwrap();
         }
 
@@ -1097,6 +1163,39 @@ mod tests {
         assert!(reason.contains("escapes within"), "{reason}");
         // 障害物の停止は止められている間に1回だけ数える
         assert_eq!(rig.state.autopilot.status().interventions.safety, 1);
+    }
+
+    #[test]
+    fn with_someone_watching_it_waits_for_help_and_resumes_after_the_human_drives() {
+        let rig = Rig::with_camera(150.0, false);
+        let params = RunParams {
+            wait_for_help: true,
+            ..RunParams::default()
+        };
+        rig.start_with(0.0, params);
+        rig.wait_for(Duration::from_secs(15), "a help request", |r| {
+            r.state.autopilot.status().phase == "needs_help"
+        });
+        let status = rig.state.autopilot.status();
+        assert!(status.running, "waiting, not ended");
+        assert!(status.help_reason.unwrap().contains("needs help"));
+        assert_eq!(status.help_requests, 1);
+        // 待っている間は動かない
+        let before = rig.log.lock().unwrap().commands.len();
+        thread::sleep(Duration::from_millis(400));
+        assert_eq!(rig.log.lock().unwrap().commands.len(), before);
+        // 人がパッドで動かし、手を離すと自律に戻る
+        rig.state.autopilot.note_manual(Instant::now());
+        rig.wait_until("human phase", |r| {
+            r.state.autopilot.status().phase == "human"
+        });
+        rig.wait_until("autonomous again", |r| {
+            r.forward_commands() > 0 && r.state.autopilot.status().phase == "driving"
+        });
+        let status = rig.state.autopilot.status();
+        assert!(status.help_reason.is_none());
+        assert_eq!(status.takeovers, 1);
+        assert_eq!(status.interventions.human, 1);
     }
 
     #[test]

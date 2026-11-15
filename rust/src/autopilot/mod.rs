@@ -110,6 +110,10 @@ pub struct RunParams {
     pub intent: Intent,
     /// 1回の指令の期限。指令が途絶えたら、この時間で止まる
     pub ttl_ms: u64,
+    /// 自分で抜け出せない時（引っかかりや段差が続く、後退を繰り返す）に、走行を終えずに
+    /// 止まって人の助けを待つ。人がパッドで動かして手を離すと自律に戻る。
+    /// 見守る人がいる時（PC の `pi_autopilot --gamepad`）だけ true にする
+    pub wait_for_help: bool,
 }
 
 impl Default for RunParams {
@@ -119,6 +123,7 @@ impl Default for RunParams {
             min_speed: speed::MIN_MOVING_SPEED,
             intent: Intent::Any,
             ttl_ms: 400,
+            wait_for_help: false,
         }
     }
 }
@@ -149,7 +154,7 @@ impl RunParams {
 #[derive(Debug, Clone, Serialize, Default)]
 pub struct AutopilotStatus {
     pub running: bool,
-    /// starting, driving, human, obstacle, escaping, waiting, stopped
+    /// starting, driving, human, obstacle, escaping, waiting, needs_help, stopped
     pub phase: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -173,6 +178,10 @@ pub struct AutopilotStatus {
     pub interventions: Counts,
     pub takeovers: u32,
     pub last_event: Option<String>,
+    /// 人の助けを待っている理由（待っていなければ None）
+    pub help_reason: Option<String>,
+    /// これまでに人の助けを求めた回数
+    pub help_requests: u32,
     pub stopped_reason: Option<String>,
 }
 
@@ -331,6 +340,7 @@ impl Autopilot {
             "min_speed": params.min_speed,
             "intent": params.intent.as_str(),
             "ttl_ms": params.ttl_ms,
+            "wait_for_help": params.wait_for_help,
             "avoidance": true,
             "blocked_output": manifest.blocked_trained,
             "motion_check": "image_change",

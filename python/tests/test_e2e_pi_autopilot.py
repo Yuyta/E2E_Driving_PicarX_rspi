@@ -1,5 +1,6 @@
 """Pi 上の自律走行を PC から始めて、見守り、パッドで引き継ぎ、止める"""
 
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -7,7 +8,7 @@ import cv2
 import numpy as np
 
 from src.e2e.gamepad import PadInput
-from src.e2e.pi_autopilot import PiAutopilotSession, format_status
+from src.e2e.pi_autopilot import Notifier, PiAutopilotSession, format_status
 from src.e2e.training.dataset import DrivingDataset
 from src.models import DriveDirection
 
@@ -29,12 +30,15 @@ class FakeClient:
         self.calls.append("calibrate")
         return True
 
-    def autopilot_start_sync(self, speed, intent):
+    def autopilot_start_sync(self, speed, intent, wait_for_help=False):
         self.calls.append(("start", speed, intent))
+        self.wait_for_help = wait_for_help
         return {"run_id": "20261114_220000", "model_version": "v006", "run_dir": "/runs/x"}
 
     def autopilot_status_sync(self):
         self.calls.append("autopilot_status")
+        if getattr(self, "status", None) is not None:
+            return self.status
         if self.running:
             return {"running": True, "phase": "driving", "intent": "right"}
         return {"running": False, "phase": "stopped", "stopped_reason": "stuck 3 times"}
@@ -128,6 +132,64 @@ def test_intent_buttons_while_not_driving_and_emergency():
     assert [c for c in client.calls if c[0] == "intent"] == [("intent", "left")]
     assert session.step(0.2).startswith("emergency")
     assert client.calls[-1] == "emergency"
+
+
+class FakeNotifier:
+    def __init__(self):
+        self.events = []
+
+    def help(self, reason):
+        self.events.append(("help", reason))
+
+    def caution(self, event):
+        self.events.append(("caution", event))
+
+
+def test_with_a_gamepad_the_pi_waits_for_help_and_the_pc_asks_for_it():
+    client = FakeClient()
+    notifier = FakeNotifier()
+    session = PiAutopilotSession(client, FakePad([]), notifier=notifier)
+    session.start()
+    assert client.wait_for_help is True
+    assert PiAutopilotSession(FakeClient()).wait_for_help is False  # 見守る人がいなければ終える
+
+    def status(phase, safety, **extra):
+        client.status = {
+            "running": True,
+            "phase": phase,
+            "interventions": {"human": 0, "safety": safety},
+            **extra,
+        }
+
+    status("obstacle", 1, last_event="obstacle_stop: obstacle at 13cm")
+    session.step(0.0)
+    assert notifier.events == [("caution", "obstacle_stop: obstacle at 13cm")]
+    status("needs_help", 4, help_reason="stuck 3 times within 30s; needs help")
+    session.step(1.0)
+    assert notifier.events[-1] == ("help", "stuck 3 times within 30s; needs help")
+    assert len(notifier.events) == 2  # 助けを求めた時は注意を重ねない
+    session.step(2.0)
+    assert len(notifier.events) == 2
+    session.step(6.5)  # 5秒たっても待っていれば知らせ直す
+    assert len(notifier.events) == 3
+    status("driving", 4)  # 人が抜け出させて自律に戻った
+    session.step(7.0)
+    status("needs_help", 5, help_reason="cliff 2 times within 60s; needs help")
+    session.step(8.0)
+    assert notifier.events[-1][0] == "help"
+    assert session.help_count == 2
+
+
+def test_notifier_prints_sounds_and_rumbles():
+    lines, sounds = [], []
+    pad = SimpleNamespace(rumble=lambda strength, ms: sounds.append(("rumble", ms)))
+    notifier = Notifier(pad, out=lines.append, beep=sounds.append)
+    notifier.help("stuck 3 times")
+    notifier.caution("obstacle_stop")
+    time.sleep(0.05)
+    assert "介入してください" in lines[0] and "stuck 3 times" in lines[0]
+    assert "注意" in lines[1]
+    assert ("rumble", 600) in sounds and Notifier.HELP_SOUND in sounds
 
 
 def test_format_status():

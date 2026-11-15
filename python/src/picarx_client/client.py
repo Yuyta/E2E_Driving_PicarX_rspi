@@ -245,10 +245,17 @@ class PicarxClient:
         return body
 
     def autopilot_start_sync(
-        self, speed: int = DRIVE_SPEED, min_speed: Optional[int] = None, intent: str = "any"
+        self,
+        speed: int = DRIVE_SPEED,
+        min_speed: Optional[int] = None,
+        intent: str = "any",
+        wait_for_help: bool = False,
     ) -> dict:
-        """Pi の使用中のモデルで自律走行を始める。run_id とモデルの版を返す"""
-        body = {"speed": speed, "intent": intent}
+        """Pi の使用中のモデルで自律走行を始める。run_id とモデルの版を返す
+
+        wait_for_help なら、自分で抜け出せない時に走行を終えずに止まって人の助けを待つ
+        """
+        body = {"speed": speed, "intent": intent, "wait_for_help": wait_for_help}
         if min_speed is not None:
             body["min_speed"] = min_speed
         resp = self._sync().post(

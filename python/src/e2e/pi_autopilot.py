@@ -11,6 +11,10 @@
   1.5 秒途絶えると自律に戻る。人が運転した間の画像と操作は、PC の `data/interventions/<run_id>/`
   に学習データの形で保存する。HOME は緊急停止（走行も終わる）。運転していない時に L / R を
   押すと、行きたい向き（意図）を Pi へ送る
+- `--gamepad` の時は、介入してほしい時に知らせる。Pi が自分で抜け出せない時（引っかかりや段差が
+  続く、後退を繰り返す）は、走行を終えずに止まって待つので、音とパッドの振動と表示で
+  「介入してください」と知らせ、人が抜け出させるまで5秒ごとに繰り返す。手を離して1.5秒で
+  自律に戻る。障害物や段差で止まった時、引っかかった時は、短い音と表示で注意を促す
 
 使い方:
     uv run python -m src.e2e.pi_autopilot --speed 50
@@ -19,6 +23,7 @@
 
 import argparse
 import sys
+import threading
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -43,6 +48,48 @@ MAX_STEER_DEG = 35
 # 人が運転している間の指令の期限
 HUMAN_TTL_MS = 400
 STATUS_PERIOD_S = 0.5
+# 人の助けを待っている間、この間隔で知らせ直す
+HELP_REMIND_S = 5.0
+
+
+def _beep(pattern) -> None:
+    """(周波数 Hz, 長さ ms) の並びを鳴らす。Windows 以外は端末のベル"""
+    try:
+        import winsound
+
+        for freq, ms in pattern:
+            winsound.Beep(freq, ms)
+    except (ImportError, RuntimeError):
+        print("\a", end="", flush=True)
+
+
+class Notifier:
+    """人に介入を頼む知らせ。音は別のスレッドで鳴らし、見守りの周期を止めない"""
+
+    HELP_SOUND = ((880, 200), (660, 200), (880, 200))
+    CAUTION_SOUND = ((990, 120),)
+
+    def __init__(self, gamepad=None, out=print, beep=_beep):
+        self.gamepad = gamepad
+        self.out = out
+        self.beep = beep
+
+    def _sound(self, pattern) -> None:
+        threading.Thread(target=self.beep, args=(pattern,), daemon=True).start()
+
+    def help(self, reason: str) -> None:
+        self.out(
+            f"\n[介入してください] 車が自分で抜け出せません: {reason}\n"
+            "  パッドで車を動かして抜け出させてください。手を離して1.5秒で自律に戻ります。"
+            "終えるなら Ctrl+C"
+        )
+        self._sound(self.HELP_SOUND)
+        if self.gamepad is not None and hasattr(self.gamepad, "rumble"):
+            self.gamepad.rumble(1.0, 600)
+
+    def caution(self, event: str) -> None:
+        self.out(f"\n[注意] {event}（危なければパッドで引き継いでください）")
+        self._sound(self.CAUTION_SOUND)
 
 
 def format_status(status: dict) -> str:
@@ -70,6 +117,7 @@ class PiAutopilotSession:
         corrections_dir="data/interventions",
         speed: int = DRIVE_SPEED,
         stream=None,
+        notifier: Optional[Notifier] = None,
     ):
         self.client = client
         self.gamepad = gamepad
@@ -84,12 +132,20 @@ class PiAutopilotSession:
         self._next_status = 0.0
         self._last_seq = 0
         self._sent_intent: Optional[str] = None
+        # 見守る人（パッド）がいる時だけ、Pi は止まって助けを待つ
+        self.wait_for_help = gamepad is not None
+        self.notifier = notifier or Notifier(gamepad)
+        self.help_count = 0
+        self._safety_seen = 0
+        self._next_help_notice: Optional[float] = None
 
     def start(self, intent: str = INTENT_ANY) -> dict:
         status = self.client.get_status_sync()
         if status.cliff.guard_enabled:
             self.client.calibrate_floor_sync()
-        self.info = self.client.autopilot_start_sync(speed=self.speed, intent=intent)
+        self.info = self.client.autopilot_start_sync(
+            speed=self.speed, intent=intent, wait_for_help=self.wait_for_help
+        )
         self._sent_intent = intent
         identity = {"model_version": self.info.get("model_version")}
         self.corrections = CorrectionRecorder(
@@ -118,7 +174,24 @@ class PiAutopilotSession:
             self.last_status = self.client.autopilot_status_sync()
             if not self.last_status.get("running"):
                 return self.last_status.get("stopped_reason") or "stopped"
+            self._notify(self.last_status, now)
         return None
+
+    def _notify(self, status: dict, now: float) -> None:
+        """Pi の状態の変化から、介入を頼むか注意を促す"""
+        safety = (status.get("interventions") or {}).get("safety", 0)
+        if safety > self._safety_seen:
+            self._safety_seen = safety
+            if status.get("phase") != "needs_help":
+                self.notifier.caution(status.get("last_event") or "safety stop")
+        if status.get("phase") == "needs_help":
+            if self._next_help_notice is None:
+                self.help_count += 1
+            if self._next_help_notice is None or now >= self._next_help_notice:
+                self.notifier.help(status.get("help_reason") or status.get("detail") or "")
+                self._next_help_notice = now + HELP_REMIND_S
+        else:
+            self._next_help_notice = None
 
     def _drive_by_hand(self, pad: PadInput, now: float) -> None:
         steer = int(round(pad.steer * MAX_STEER_DEG))
@@ -213,6 +286,8 @@ def main(argv=None) -> int:
         print(
             f"Corrections: {session.corrections.session_dir} ({session.corrections.count} frames)"
         )
+    if session.help_count:
+        print(f"Help requested {session.help_count} time(s) during the run.")
     print(f"Run log on the Pi: {info.get('run_dir')}")
     print("Copy the Pi run logs with: uv run python -m src.e2e.deploy.pi pull-runs")
     return 0
