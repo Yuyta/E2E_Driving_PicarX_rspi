@@ -47,6 +47,7 @@ def test_dpad_left_right_override_the_stick():
 def test_system_buttons():
     state = pad("PLUS", "MINUS", "X", "HOME")
     assert state.record and state.center and state.stop and state.emergency
+    assert state.resume  # 自律走行では＋で運転を返す
     assert pad("Y") == PadInput()  # Y は使わない（B の隣で押し間違えやすい）
 
 

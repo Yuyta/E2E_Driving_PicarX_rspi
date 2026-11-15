@@ -94,6 +94,15 @@ def test_takeover_starts_on_input_and_releases_after_quiet_time():
     assert not ended.human and ended.ended
 
 
+def test_takeover_hands_back_on_y_and_waits_through_a_pause():
+    takeover = Takeover(release_s=8.0)
+    takeover.update(PadInput(drive=1), 0.0)
+    assert takeover.update(PadInput(), 5.0).human  # 手を止めて考えていても続ける
+    ended = takeover.update(PadInput(resume=True), 5.5)
+    assert ended.ended and not ended.human
+    assert not takeover.update(PadInput(resume=True), 5.6).human  # Y だけでは引き継がない
+
+
 def test_takeover_emergency():
     takeover = Takeover()
     takeover.update(PadInput(drive=1), 0.0)

@@ -18,6 +18,9 @@ class FakeClient:
         self.calls = []
         self.guard = guard
         self.running = True
+        self.started = False
+        self.leftover = False
+        self.accept_moves = True
 
     def get_status_sync(self):
         self.calls.append("status")
@@ -33,12 +36,15 @@ class FakeClient:
     def autopilot_start_sync(self, speed, intent, wait_for_help=False):
         self.calls.append(("start", speed, intent))
         self.wait_for_help = wait_for_help
+        self.started = True
         return {"run_id": "20261114_220000", "model_version": "v006", "run_dir": "/runs/x"}
 
     def autopilot_status_sync(self):
         self.calls.append("autopilot_status")
         if getattr(self, "status", None) is not None:
             return self.status
+        if not self.started and not self.leftover:
+            return {"running": False, "phase": "idle"}
         if self.running:
             return {"running": True, "phase": "driving", "intent": "right"}
         return {"running": False, "phase": "stopped", "stopped_reason": "stuck 3 times"}
@@ -48,6 +54,7 @@ class FakeClient:
 
     def autopilot_stop_sync(self, intervention):
         self.calls.append(("stop", intervention))
+        self.leftover = False
         return {"running": False}
 
     def steer_sync(self, angle):
@@ -56,7 +63,7 @@ class FakeClient:
 
     def move_sync(self, direction, speed, ttl_ms):
         self.calls.append(("move", direction, speed, ttl_ms))
-        return True
+        return self.accept_moves
 
     def emergency_stop_sync(self):
         self.calls.append("emergency")
@@ -87,7 +94,7 @@ def test_start_calibrates_the_floor_and_uses_the_pi_model():
     session = PiAutopilotSession(client, speed=50)
     info = session.start("left")
     assert info["model_version"] == "v006"
-    assert client.calls == ["status", "calibrate", ("start", 50, "left")]
+    assert client.calls == ["autopilot_status", "status", "calibrate", ("start", 50, "left")]
     assert PiAutopilotSession(FakeClient(guard=False)).start()["run_id"]
 
 
@@ -190,6 +197,32 @@ def test_notifier_prints_sounds_and_rumbles():
     assert "介入してください" in lines[0] and "stuck 3 times" in lines[0]
     assert "注意" in lines[1]
     assert ("rumble", 600) in sounds and Notifier.HELP_SOUND in sounds
+
+
+def test_start_stops_a_run_left_over_from_an_earlier_pc_session():
+    client = FakeClient()
+    client.leftover = True
+    lines = []
+    session = PiAutopilotSession(client, notifier=Notifier(out=lines.append, beep=lambda p: None))
+    session.start()
+    assert client.calls[:2] == ["autopilot_status", ("stop", False)]
+    assert ("start", 50, "any") in client.calls
+    assert "still going" in lines[0]
+
+
+def test_a_refused_human_command_is_shown_but_not_repeated_every_cycle():
+    client = FakeClient()
+    client.accept_moves = False
+    lines = []
+    pad = FakePad([PadInput(drive=1, steer=0.0)] * 3)
+    notifier = Notifier(out=lines.append, beep=lambda p: None)
+    session = PiAutopilotSession(client, pad, notifier=notifier)
+    session.start()
+    session.step(0.0)
+    session.step(0.5)
+    assert sum("REFUSED" in line for line in lines) == 1
+    session.step(2.5)
+    assert sum("REFUSED" in line for line in lines) == 2
 
 
 def test_format_status():

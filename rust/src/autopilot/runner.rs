@@ -463,6 +463,10 @@ impl Runner {
             speed = speed.min(self.params.min_speed);
         }
 
+        // 推論の間に人が運転し始めていたら、自律の指令を出さない（次の周期で引き継ぐ）
+        if self.shared.manual_active(Instant::now()) {
+            return None;
+        }
         if let Err(error) = self.state.command_steer(steer_deg) {
             self.set_phase("waiting", Some(format!("steer: {error}")));
         }
@@ -668,7 +672,9 @@ impl Runner {
         let speed = self.params.speed;
         let mut reversed = 0;
         for step in sequence {
-            if self.state.command_steer(step.steer_deg).is_err() {
+            if self.shared.manual_active(Instant::now())
+                || self.state.command_steer(step.steer_deg).is_err()
+            {
                 break;
             }
             let ttl = Duration::from_millis(step.duration_ms);
@@ -686,12 +692,19 @@ impl Runner {
             }
         }
         self.trajectory.consume(reversed);
+        // 途中で人が運転し始めたら、人の指令を止めたり上書きしたりしない
+        if self.shared.manual_active(Instant::now()) {
+            self.last_cycle = Instant::now();
+            self.note_event(format!("escape handed to the human after {reversed}ms"));
+            return reversed > 0;
+        }
         let _ = self.state.stop_motors();
         if reversed == 0 {
             return false;
         }
         let turn = self.trajectory.escape_turn(cliff);
         if !self.shared.stop_requested()
+            && !self.shared.manual_active(Instant::now())
             && self.state.command_steer(turn.steer_deg).is_ok()
             && self
                 .state
@@ -705,7 +718,9 @@ impl Runner {
             self.pause(Duration::from_millis(turn.duration_ms));
             self.trajectory.record(turn.steer_deg, turn.duration_ms);
         }
-        let _ = self.state.stop_motors();
+        if !self.shared.manual_active(Instant::now()) {
+            let _ = self.state.stop_motors();
+        }
         self.last_cycle = Instant::now();
         self.note_event(format!("escaped: reversed {reversed}ms"));
         true

@@ -135,7 +135,11 @@ class TakeoverDecision:
 
 @dataclass
 class Takeover:
-    """パッドの操作で人が運転を引き継ぎ、入力がなくなって release_s たったら自律に戻す"""
+    """パッドの操作で人が運転を引き継ぎ、入力がなくなって release_s たったら自律に戻す
+
+    ＋（resume）を押せば、待たずに自律に戻す。release_s を長くすれば、人が手を止めて考えている
+    間に自律が割り込まない
+    """
 
     release_s: float = 1.5
     human: bool = False
@@ -147,6 +151,9 @@ class Takeover:
             was_human = self.human
             self.human = False
             return TakeoverDecision(human=False, ended=was_human, emergency=True)
+        if self.human and pad is not None and pad.resume:
+            self.human = False
+            return TakeoverDecision(human=False, ended=True)
         active = pad_active(pad)
         if active:
             self.last_input = now

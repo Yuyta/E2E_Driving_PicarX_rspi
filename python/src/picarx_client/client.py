@@ -31,6 +31,7 @@ MAX_DRIVE_MS = 5000
 STREAM_READ_TIMEOUT_SEC = 5.0
 # Pi の自律走行の開始は、モデルの確認と読み込みを待つ
 AUTOPILOT_START_TIMEOUT_SEC = 30.0
+CALIBRATE_TIMEOUT_SEC = 10.0
 
 
 class AutopilotError(RuntimeError):
@@ -229,7 +230,10 @@ class PicarxClient:
 
     def calibrate_floor_sync(self) -> bool:
         """今いる床を基準に段差の閾値を校正する。失敗時は例外を送出する。"""
-        resp = self._sync().post(f"{self.base_url}/api/safety/calibrate")
+        # Pi は床センサーを最長2秒読むので、ふだんの短い待ち時間では足りない
+        resp = self._sync().post(
+            f"{self.base_url}/api/safety/calibrate", timeout=CALIBRATE_TIMEOUT_SEC
+        )
         resp.raise_for_status()
         return True
 

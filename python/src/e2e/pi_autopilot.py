@@ -7,14 +7,15 @@
 - Pi の状態を一定の間隔で表示する。Pi が走行を終えたら（引っかかりが続いた、カメラが止まった
   など）理由を表示して終わる
 - Ctrl+C で止める（人の介入として Pi が記録する）
-- `--gamepad` なら、パッドを操作した間は人が運転する。Pi は人の指令が来ると自律の指令を止め、
-  1.5 秒途絶えると自律に戻る。人が運転した間の画像と操作は、PC の `data/interventions/<run_id>/`
-  に学習データの形で保存する。HOME は緊急停止（走行も終わる）。運転していない時に L / R を
-  押すと、行きたい向き（意図）を Pi へ送る
+- `--gamepad` なら、パッドを操作すると人が運転を引き継ぐ。＋を押すか、8秒何も触らなければ
+  自律に戻す（手を止めて考えている間に自律が割り込まないよう、短くしない）。Pi は人の指令が
+  来ると自律の指令を止め、途絶えて 1.5 秒で自律に戻る。人が運転した間の画像と操作は、PC の
+  `data/interventions/<run_id>/` に学習データの形で保存する。HOME は緊急停止（走行も
+  終わる）。運転していない時に L / R を押すと、行きたい向き（意図）を Pi へ送る
 - `--gamepad` の時は、介入してほしい時に知らせる。Pi が自分で抜け出せない時（引っかかりや段差が
   続く、後退を繰り返す）は、走行を終えずに止まって待つので、音とパッドの振動と表示で
-  「介入してください」と知らせ、人が抜け出させるまで5秒ごとに繰り返す。手を離して1.5秒で
-  自律に戻る。障害物や段差で止まった時、引っかかった時は、短い音と表示で注意を促す
+  「介入してください」と知らせ、人が抜け出させるまで5秒ごとに繰り返す。抜け出させたら＋で
+  自律に戻す。障害物や段差で止まった時、引っかかった時は、短い音と表示で注意を促す
 
 使い方:
     uv run python -m src.e2e.pi_autopilot --speed 50
@@ -50,6 +51,10 @@ HUMAN_TTL_MS = 400
 STATUS_PERIOD_S = 0.5
 # 人の助けを待っている間、この間隔で知らせ直す
 HELP_REMIND_S = 5.0
+# 引き継いだ運転は＋で返す。押し忘れた時だけ、この時間何も触らなければ自律に戻す
+TAKEOVER_RELEASE_S = 8.0
+# 人の指令が止められた時の表示の間隔
+REFUSED_REMIND_S = 2.0
 
 
 def _beep(pattern) -> None:
@@ -80,7 +85,7 @@ class Notifier:
     def help(self, reason: str) -> None:
         self.out(
             f"\n[介入してください] 車が自分で抜け出せません: {reason}\n"
-            "  パッドで車を動かして抜け出させてください。手を離して1.5秒で自律に戻ります。"
+            "  パッドで車を動かして抜け出させてください。＋で自律に戻ります。"
             "終えるなら Ctrl+C"
         )
         self._sound(self.HELP_SOUND)
@@ -133,7 +138,7 @@ class PiAutopilotSession:
         self.corrections_dir = Path(corrections_dir)
         self.speed = speed
         self.stream = stream
-        self.takeover = Takeover()
+        self.takeover = Takeover(release_s=TAKEOVER_RELEASE_S)
         self.takeover_count = 0
         self.info: dict = {}
         self.corrections: Optional[CorrectionRecorder] = None
@@ -147,9 +152,18 @@ class PiAutopilotSession:
         self.help_count = 0
         self._safety_seen = 0
         self._next_help_notice: Optional[float] = None
+        self._next_refused_notice = 0.0
+        self.cliff_guard = True
 
     def start(self, intent: str = INTENT_ANY) -> dict:
+        # 前の PC が途中で落ちると、Pi の走行が残って次を始められない。残っていれば終える
+        leftover = self.client.autopilot_status_sync()
+        if leftover.get("running"):
+            run_id = leftover.get("run_id")
+            self.notifier.out(f"[NOTE] A run was still going on the Pi ({run_id}). Stopping it.")
+            self.client.autopilot_stop_sync(intervention=False)
         status = self.client.get_status_sync()
+        self.cliff_guard = status.cliff.guard_enabled
         if status.cliff.guard_enabled:
             self.client.calibrate_floor_sync()
         self.info = self.client.autopilot_start_sync(
@@ -171,6 +185,9 @@ class PiAutopilotSession:
             return "emergency stop (HOME on the gamepad)"
         if hand.started:
             self.takeover_count += 1
+            self.notifier.out("\n[TAKEN OVER] You are driving. Press + to hand back.")
+        if hand.ended and not hand.emergency:
+            self.notifier.out("\n[AUTOPILOT] Handed back to the autopilot.")
         if hand.human:
             self._drive_by_hand(pad or PadInput(), now)
         elif pad is not None and pad.intent != self._sent_intent:
@@ -208,7 +225,17 @@ class PiAutopilotSession:
         self.client.steer_sync(steer)
         direction = DriveDirection.BACKWARD if pad.drive < 0 else DriveDirection.FORWARD
         # 止まる時も速度 0 の指令を送る（停止の指令は Pi の自律走行を終えてしまうので使わない）
-        self.client.move_sync(direction, speed=self.speed if moving else 0, ttl_ms=HUMAN_TTL_MS)
+        accepted = self.client.move_sync(
+            direction, speed=self.speed if moving else 0, ttl_ms=HUMAN_TTL_MS
+        )
+        if moving and not accepted and now >= self._next_refused_notice:
+            # Pi の安全装置が人の指令も止めている。黙っていると「介入できない」ように見える
+            self._next_refused_notice = now + REFUSED_REMIND_S
+            way = "forward" if pad.drive > 0 else "backward"
+            self.notifier.out(
+                f"\n[REFUSED] The Pi blocked driving {way} (obstacle or floor sensors). "
+                "Try the other direction."
+            )
         self._record_correction(pad if moving else replace(pad, drive=0), now, steer, moving)
 
     def _record_correction(self, pad: PadInput, now: float, steer: int, moving: bool) -> None:
@@ -271,6 +298,8 @@ def main(argv=None) -> int:
         f"Autopilot on the Pi: run {info['run_id']}, model {info['model_version']}, "
         f"server {info.get('server_build', 'unknown')}"
     )
+    if not session.cliff_guard:
+        print("Floor sensors on the Pi: OFF (PICARX_DISABLE_CLIFF_GUARD=1). Keep away from steps.")
     print("Press Ctrl+C to stop." + (" Move the gamepad to take over." if gamepad else ""))
     reason = None
     try:

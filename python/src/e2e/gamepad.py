@@ -76,6 +76,7 @@ class PadInput:
     stop: bool = False  # X
     emergency: bool = False  # HOME
     intent: str = INTENT_ANY  # L / R
+    resume: bool = False  # ＋。引き継いだ運転を自律に返す（自律走行の時。収集では record）
 
 
 def stick_value(raw: float, deadzone: float = STICK_DEADZONE) -> float:
@@ -106,6 +107,7 @@ def to_input(left_x: float, zl: float, zr: float, pressed: Iterable[str]) -> Pad
         center="MINUS" in pressed,
         stop="X" in pressed,
         emergency="HOME" in pressed,
+        resume="PLUS" in pressed,
         intent=intent_of("L" in pressed, "R" in pressed),
     )
 
