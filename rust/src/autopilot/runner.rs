@@ -90,6 +90,14 @@ fn push_within(times: &mut VecDeque<f64>, at: f64, window_s: f64) -> usize {
     times.len()
 }
 
+fn round1(v: f64) -> f64 {
+    (v * 10.0).round() / 10.0
+}
+
+fn round3(v: f64) -> f64 {
+    (v * 1000.0).round() / 1000.0
+}
+
 fn ema(previous: Option<f64>, value: f64) -> Option<f64> {
     Some(previous.map_or(value, |p| p * 0.9 + value * 0.1))
 }
@@ -117,6 +125,7 @@ pub struct Runner {
     stuck_times: VecDeque<f64>,
     escape_times: VecDeque<f64>,
     cliff_times: VecDeque<f64>,
+    cycle_log_failed: bool,
     /// 前進の指令が通り続けている始まり
     forward_since: Option<Instant>,
     frames: u64,
@@ -152,6 +161,7 @@ impl Runner {
             stuck_times: VecDeque::new(),
             escape_times: VecDeque::new(),
             cliff_times: VecDeque::new(),
+            cycle_log_failed: false,
             forward_since: None,
             frames: 0,
         })
@@ -180,6 +190,16 @@ impl Runner {
         status.interventions = self.log.counts;
     }
 
+    /// 1周分の判断を `cycles.jsonl` に残す。書けなくなっても走行は続け、警告は1回だけ出す
+    fn log_cycle(&mut self, record: serde_json::Value) {
+        if let Err(error) = self.log.cycle(unix_now(), record)
+            && !self.cycle_log_failed
+        {
+            self.cycle_log_failed = true;
+            eprintln!("⚠ 1周ごとの記録に書けません: {error}");
+        }
+    }
+
     pub fn run(mut self) {
         let end = self.drive_loop();
         if let Err(error) = self.state.stop_motors() {
@@ -189,7 +209,7 @@ impl Runner {
         if let Some(trigger) = end.trigger.clone() {
             self.intervention(&trigger, &end.note, json!({"ends_run": true}));
         }
-        if let Err(error) = self.log.close(unix_now()) {
+        if let Err(error) = self.log.close(unix_now(), &end.note) {
             eprintln!("⚠ 走行の記録を閉じられません: {error}");
         }
         let mut status = self.shared.status();
@@ -322,9 +342,14 @@ impl Runner {
                 self.obstacle_logged = false;
                 self.cliff_escaped = false;
             }
-            Err(SafetyReason::Obstacle) => return self.on_obstacle(now, distance),
+            Err(SafetyReason::Obstacle) => {
+                self.log_cycle(json!({"phase": "obstacle", "distance_cm": distance.map(round1)}));
+                return self.on_obstacle(now, distance);
+            }
             Err(SafetyReason::Cliff) => {
-                return self.on_cliff(now, sensors.grayscale.map(|g| g.value));
+                let floor = sensors.grayscale.map(|g| g.value);
+                self.log_cycle(json!({"phase": "cliff", "floor": floor}));
+                return self.on_cliff(now, floor);
             }
             Err(SafetyReason::EmergencyStop) => {
                 return Some(End::safety("manual_intervention", "emergency stop"));
@@ -421,6 +446,20 @@ impl Runner {
                 None
             }
         };
+
+        self.log_cycle(json!({
+            "phase": if applied.is_some() { "driving" } else { "refused" },
+            "distance_cm": distance.map(round1),
+            "steering": round3(output.steering),
+            "steer_deg": steer_deg,
+            "speed": applied,
+            "slow": decision.slow,
+            "intent": decision.intent.as_str(),
+            "avoid": decision.state.as_str(),
+            "blocked": output.blocked.map(round3),
+            "image_change": self.stuck.last_diff.map(round3),
+            "infer_ms": round1(inference_ms),
+        }));
 
         let mut status = self.shared.status();
         if applied.is_some() {
@@ -958,6 +997,20 @@ mod tests {
         });
         let status = rig.state.autopilot.status();
         assert!(status.stopped_reason.unwrap().contains("needs help"));
+        // 終えた理由と、1周ごとの判断がファイルに残る
+        let dir = rig.run_dir();
+        let run: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("run.json")).unwrap()).unwrap();
+        assert!(run["end_reason"].as_str().unwrap().contains("needs help"));
+        let cycles = std::fs::read_to_string(dir.join("cycles.jsonl")).unwrap();
+        let driving: Vec<serde_json::Value> = cycles
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .filter(|c: &serde_json::Value| c["phase"] == "driving")
+            .collect();
+        assert!(!driving.is_empty());
+        assert_eq!(driving[0]["distance_cm"], 150.0);
+        assert_eq!(driving[0]["intent"], "any");
     }
 
     /// 中央の床センサーだけが段差（机の縁を正面に見た時）

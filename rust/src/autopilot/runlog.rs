@@ -3,14 +3,20 @@
 //!
 //! `<runs>/<run_id>/run.json` は介入のたびに書き直し、`interventions.jsonl` に1行ずつ足す。
 //! 人の介入（引き継ぎ、停止の指示、緊急停止）と、安全のための自動停止を分ける。
+//! 走行を終えた理由は `run.json` の `end_reason` に残す。
+//! `cycles.jsonl` には1周ごとの判断（距離、舵角、速度、意図、避ける状態、画像の変化）を残し、
+//! 介入の前に何が起きていたかを後から追えるようにする（約5秒ごとにディスクへ確定させる）。
 
 use super::model::Manifest;
 use serde_json::{Value, json};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs::{self, File, OpenOptions};
+use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 pub const HUMAN_TRIGGERS: [&str; 2] = ["human_takeover", "manual_intervention"];
+/// 1周ごとの記録をこの行数ごとに OS へ渡し、その5倍ごとにディスクへ確定させる（15Hz で約1秒と5秒）
+const CYCLE_FLUSH_LINES: u32 = 15;
+const CYCLE_SYNC_LINES: u32 = CYCLE_FLUSH_LINES * 5;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize)]
 pub struct Counts {
@@ -26,6 +32,9 @@ pub struct RunLog {
     pub autonomous_s: f64,
     pub human_s: f64,
     pub counts: Counts,
+    end_reason: Option<String>,
+    cycles: Option<BufWriter<File>>,
+    cycle_lines: u32,
 }
 
 pub fn unix_now() -> f64 {
@@ -76,6 +85,9 @@ impl RunLog {
             autonomous_s: 0.0,
             human_s: 0.0,
             counts: Counts::default(),
+            end_reason: None,
+            cycles: None,
+            cycle_lines: 0,
         };
         log.write(now, false)?;
         Ok(log)
@@ -130,7 +142,44 @@ impl RunLog {
         self.write(now, false)
     }
 
-    pub fn close(&self, now: f64) -> Result<(), String> {
+    /// 1周分の記録を足す。`t` に走行の開始からの秒を入れる
+    pub fn cycle(&mut self, now: f64, record: Value) -> Result<(), String> {
+        if self.cycles.is_none() {
+            let path = self.dir.join("cycles.jsonl");
+            let file = OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&path)
+                .map_err(|e| format!("{} を開けません: {e}", path.display()))?;
+            self.cycles = Some(BufWriter::new(file));
+        }
+        let mut line = json!({"t": round3(now - self.started_at)});
+        if let (Some(line), Value::Object(record)) = (line.as_object_mut(), record) {
+            line.extend(record);
+        }
+        let Some(writer) = self.cycles.as_mut() else {
+            return Ok(());
+        };
+        writeln!(writer, "{line}").map_err(|e| e.to_string())?;
+        self.cycle_lines += 1;
+        if self.cycle_lines.is_multiple_of(CYCLE_FLUSH_LINES) {
+            writer.flush().map_err(|e| e.to_string())?;
+        }
+        if self.cycle_lines.is_multiple_of(CYCLE_SYNC_LINES) {
+            writer.get_ref().sync_data().map_err(|e| e.to_string())?;
+        }
+        Ok(())
+    }
+
+    /// 走行を終える。`reason` は終えた理由（人が止めた時も含む）
+    pub fn close(&mut self, now: f64, reason: &str) -> Result<(), String> {
+        if let Some(mut writer) = self.cycles.take() {
+            writer
+                .flush()
+                .and_then(|()| writer.get_ref().sync_data())
+                .map_err(|e| e.to_string())?;
+        }
+        self.end_reason = Some(reason.to_string());
         self.write(now, true)
     }
 
@@ -143,6 +192,9 @@ impl RunLog {
             obj.insert("autonomous_s".into(), json!(round3(self.autonomous_s)));
             obj.insert("human_s".into(), json!(round3(self.human_s)));
             obj.insert("interventions".into(), json!(self.counts));
+            if let Some(reason) = &self.end_reason {
+                obj.insert("end_reason".into(), json!(reason));
+            }
         }
         let path = self.dir.join("run.json");
         let tmp = self.dir.join("run.json.tmp");
@@ -190,7 +242,10 @@ mod tests {
             json!({"takeover_id": 1}),
         )
         .unwrap();
-        log.close(1040.0).unwrap();
+        log.cycle(1001.0, json!({"distance_cm": 80.0, "steer_deg": 5}))
+            .unwrap();
+        log.close(1040.0, "stuck 3 times within 30s; needs help")
+            .unwrap();
 
         let run: Value =
             serde_json::from_str(&fs::read_to_string(log.dir().join("run.json")).unwrap()).unwrap();
@@ -200,6 +255,13 @@ mod tests {
         assert_eq!(run["autonomous_s"], 30.0);
         assert_eq!(run["human_s"], 5.0);
         assert_eq!(run["ended"], true);
+        assert_eq!(run["end_reason"], "stuck 3 times within 30s; needs help");
+        let cycles = fs::read_to_string(log.dir().join("cycles.jsonl")).unwrap();
+        let first: Value = serde_json::from_str(cycles.lines().next().unwrap()).unwrap();
+        assert_eq!(
+            first,
+            json!({"t": 1.0, "distance_cm": 80.0, "steer_deg": 5})
+        );
         assert_eq!(run["settings"]["speed"], 50);
         let lines: Vec<Value> = fs::read_to_string(log.dir().join("interventions.jsonl"))
             .unwrap()
