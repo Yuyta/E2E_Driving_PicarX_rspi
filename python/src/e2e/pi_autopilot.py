@@ -181,7 +181,10 @@ def main(argv=None) -> int:
     except (AutopilotError, httpx.HTTPError) as e:
         print(f"[START REFUSED] {e}")
         return 1
-    print(f"Autopilot on the Pi: run {info['run_id']}, model {info['model_version']}")
+    print(
+        f"Autopilot on the Pi: run {info['run_id']}, model {info['model_version']}, "
+        f"server {info.get('server_build', 'unknown')}"
+    )
     print("Press Ctrl+C to stop." + (" Move the gamepad to take over." if gamepad else ""))
     reason = None
     try:

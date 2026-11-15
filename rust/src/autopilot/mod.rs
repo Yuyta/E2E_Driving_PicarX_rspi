@@ -225,6 +225,8 @@ impl Shared {
 #[derive(Debug, Clone, Serialize)]
 pub struct StartInfo {
     pub run_id: String,
+    /// 動いている走行サーバーのビルド（どのバイナリが動いているかを PC から確かめる）
+    pub server_build: String,
     pub model_version: String,
     pub blocked_output: bool,
     pub run_dir: String,
@@ -336,6 +338,7 @@ impl Autopilot {
         let log = RunLog::create(&self.runs_dir, &manifest, settings, unix_now())?;
         let info = StartInfo {
             run_id: log.run_id.clone(),
+            server_build: crate::server_build(),
             model_version: manifest.model_version.clone(),
             blocked_output: manifest.blocked_trained,
             run_dir: log.dir().display().to_string(),

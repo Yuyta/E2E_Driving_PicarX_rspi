@@ -73,7 +73,7 @@ impl RunLog {
             "model_version": manifest.model_version,
             "data_fingerprint": manifest.data_fingerprint,
             "model_commit": manifest.model_commit,
-            "code": {"server": format!("picar-x-rust {}", env!("CARGO_PKG_VERSION"))},
+            "code": {"server": crate::server_build()},
             "where": "pi",
             "settings": settings,
         });
