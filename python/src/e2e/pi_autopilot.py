@@ -92,6 +92,15 @@ class Notifier:
         self._sound(self.CAUTION_SOUND)
 
 
+def response_message(response: httpx.Response) -> str:
+    """Pi の応答の message（なければ本文）"""
+    try:
+        message = response.json().get("message")
+    except ValueError:
+        message = None
+    return message or response.text or f"HTTP {response.status_code}"
+
+
 def format_status(status: dict) -> str:
     def num(key, fmt):
         value = status.get(key)
@@ -251,6 +260,10 @@ def main(argv=None) -> int:
             print(f"[START REFUSED] Model on the Pi: {model.get('error')}")
             return 1
         info = session.start(args.intent)
+    except httpx.HTTPStatusError as e:
+        # 段差の校正を断られた時など。Pi の理由をそのまま出す
+        print(f"[START REFUSED] {response_message(e.response)}")
+        return 1
     except (AutopilotError, httpx.HTTPError) as e:
         print(f"[START REFUSED] {e}")
         return 1

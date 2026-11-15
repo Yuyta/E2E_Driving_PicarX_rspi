@@ -998,10 +998,10 @@ mod tests {
         rig.wait_until("a right intent", |r| {
             r.intents.lock().unwrap().contains(&Intent::Right)
         });
-        assert_eq!(
-            rig.state.autopilot.status().avoid_state.as_deref(),
-            Some("avoid")
-        );
+        // 推論の後に状態を書くので、意図が見えてから少し待つことがある
+        rig.wait_until("the avoid state", |r| {
+            r.state.autopilot.status().avoid_state.as_deref() == Some("avoid")
+        });
         // モデルが 0°でも、避けている間は右へ下限まで切る
         rig.wait_until("the steering floor", |r| {
             r.state.autopilot.status().steer_deg == Some(AVOID_MIN_STEER_DEG)

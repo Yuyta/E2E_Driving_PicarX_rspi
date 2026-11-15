@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 
 from src.e2e.gamepad import PadInput
-from src.e2e.pi_autopilot import Notifier, PiAutopilotSession, format_status
+from src.e2e.pi_autopilot import Notifier, PiAutopilotSession, format_status, response_message
 from src.e2e.training.dataset import DrivingDataset
 from src.models import DriveDirection
 
@@ -207,3 +207,11 @@ def test_format_status():
     )
     assert "steer -7°" in text and "spd 48" in text and "human 1 safety 2" in text
     assert "--" in format_status({})
+
+
+def test_response_message_shows_why_the_pi_refused():
+    import httpx
+
+    refused = httpx.Response(422, json={"status": "error", "message": "床センサー2の値が低い"})
+    assert response_message(refused) == "床センサー2の値が低い"
+    assert response_message(httpx.Response(500, text="boom")) == "boom"
