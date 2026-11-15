@@ -6,7 +6,7 @@
 //! 推論と避ける判断 → 速度を決めて指令する。指令の期限（TTL）が切れれば車両は止まるので、
 //! このスレッドが止まっても走り続けない。
 
-use super::avoidance::{AvoidanceConfig, AvoidancePolicy};
+use super::avoidance::{AVOID_MIN_STEER_DEG, AvoidanceConfig, AvoidancePolicy, turn_floor};
 use super::model::Steering;
 use super::preprocess::{decode_jpeg, resize, to_tensor};
 use super::runlog::{RunLog, unix_now};
@@ -422,13 +422,15 @@ impl Runner {
         let inference_ms = started.elapsed().as_secs_f64() * 1000.0;
 
         // 速度と舵角
-        let mut speed = self.limiter.calculate(output.steering, seen);
+        let scale = self.model.manifest().steering_scale_deg;
+        let model_deg =
+            ((output.steering * scale).round() as i32).clamp(-MAX_STEER_DEG, MAX_STEER_DEG);
+        let steer_deg = turn_floor(model_deg, &decision, AVOID_MIN_STEER_DEG);
+        // 速度は実際に切る舵角で決める（下限で強く切った分も落とす）
+        let mut speed = self.limiter.calculate(f64::from(steer_deg) / scale, seen);
         if decision.slow {
             speed = speed.min(self.params.min_speed);
         }
-        let scale = self.model.manifest().steering_scale_deg;
-        let steer_deg =
-            ((output.steering * scale).round() as i32).clamp(-MAX_STEER_DEG, MAX_STEER_DEG);
 
         if let Err(error) = self.state.command_steer(steer_deg) {
             self.set_phase("waiting", Some(format!("steer: {error}")));
@@ -451,6 +453,7 @@ impl Runner {
             "phase": if applied.is_some() { "driving" } else { "refused" },
             "distance_cm": distance.map(round1),
             "steering": round3(output.steering),
+            "model_deg": model_deg,
             "steer_deg": steer_deg,
             "speed": applied,
             "slow": decision.slow,
@@ -649,6 +652,7 @@ impl Runner {
 
 #[cfg(test)]
 mod tests {
+    use super::super::avoidance::AVOID_MIN_STEER_DEG;
     use super::super::model::tests::v006_bundle;
     use super::super::model::{Manifest, Output, read_manifest};
     use super::super::{Autopilot, Intent, RunParams};
@@ -932,6 +936,10 @@ mod tests {
             rig.state.autopilot.status().avoid_state.as_deref(),
             Some("avoid")
         );
+        // モデルが 0°でも、避けている間は右へ下限まで切る
+        rig.wait_until("the steering floor", |r| {
+            r.state.autopilot.status().steer_deg == Some(AVOID_MIN_STEER_DEG)
+        });
     }
 
     #[test]

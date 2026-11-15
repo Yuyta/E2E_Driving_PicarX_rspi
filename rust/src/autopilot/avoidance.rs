@@ -211,6 +211,23 @@ impl AvoidancePolicy {
     }
 }
 
+/// 避けている間の舵角の下限（度）。自動収集の手本は避ける時に30°まで切っていたが、
+/// 床での最初の走行（2026-11-15）では右の意図で 8〜17°しか切らず、椅子やテーブルの脚へ
+/// 寄っていった（左は 18〜30°）。避けている間は、意図の向きへ少なくともこれだけ切る
+pub const AVOID_MIN_STEER_DEG: i32 = 20;
+
+/// 避けている間だけ、モデルの舵角を意図の向きへ `min_deg` 以上にする。それ以外はそのまま
+pub fn turn_floor(steer_deg: i32, decision: &Decision, min_deg: i32) -> i32 {
+    if decision.state != AvoidState::Avoid {
+        return steer_deg;
+    }
+    match decision.intent {
+        Intent::Right => steer_deg.max(min_deg),
+        Intent::Left => steer_deg.min(-min_deg),
+        Intent::Any => steer_deg,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -298,5 +315,32 @@ mod tests {
             let d = p.step(0.2 + f64::from(i) * 0.1, None, Some(0.5), Intent::Any);
             assert_eq!(d.state, AvoidState::Avoid);
         }
+    }
+
+    #[test]
+    fn avoiding_turns_at_least_the_floor_toward_the_intent() {
+        let decision = |intent, state| Decision {
+            intent,
+            slow: false,
+            state,
+            event: None,
+            reason: "",
+        };
+        let right = decision(Intent::Right, AvoidState::Avoid);
+        assert_eq!(turn_floor(8, &right, 20), 20);
+        assert_eq!(turn_floor(-5, &right, 20), 20);
+        assert_eq!(turn_floor(30, &right, 20), 30); // 強く切っていればそのまま
+        let left = decision(Intent::Left, AvoidState::Avoid);
+        assert_eq!(turn_floor(-8, &left, 20), -20);
+        assert_eq!(turn_floor(-30, &left, 20), -30);
+        // 避けていない時（上の層が意図を与えただけの時も含む）はモデルのまま
+        assert_eq!(
+            turn_floor(8, &decision(Intent::Right, AvoidState::Cruise), 20),
+            8
+        );
+        assert_eq!(
+            turn_floor(3, &decision(Intent::Any, AvoidState::Avoid), 20),
+            3
+        );
     }
 }
