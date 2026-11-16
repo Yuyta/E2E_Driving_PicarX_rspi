@@ -130,6 +130,18 @@ def test_stats_and_drill_down(viewer):
     assert {viewer.table.rows[i]["session"] for i in viewer.model.visible} == {first}
 
 
+def test_new_columns_follow_their_default_after_saved_settings(app, viewer, tmp_path):
+    # 列を増やす前の設定（記録にない列）があっても、増えた列は最初の表示に従う
+    viewer.qsettings.setValue("column_visible", '{"session": true}')
+    again = DataViewer([tmp_path / "data" / "raw"], Settings(turn_intent=False))
+    try:
+        keys = [c.key for c in again.model.columns]
+        assert not again.view.horizontalHeader().isSectionHidden(keys.index("warnings"))
+        assert again.view.horizontalHeader().isSectionHidden(keys.index("battery_v"))
+    finally:
+        again.close()
+
+
 def test_hidden_columns_are_remembered(app, viewer, tmp_path):
     col = [c.key for c in viewer.model.columns].index("distance_cm")
     viewer._set_column_visible(col, False)
@@ -138,3 +150,40 @@ def test_hidden_columns_are_remembered(app, viewer, tmp_path):
         assert again.view.horizontalHeader().isSectionHidden(col)
     finally:
         again.close()
+
+
+def test_quick_filter_shows_frames_with_warnings(app, tmp_path):
+    data = tmp_path / "data"
+    make_session(data, "20261116_140000", [moving(0.0, 100), moving(0.9, 150), moving(0.0, 10)])
+    window = DataViewer([data / "raw"], Settings(turn_intent=False))
+    try:
+        window.quick_filter.setCurrentIndex(1)  # 注意のあるフレーム
+        assert [window.table.rows[i]["index"] for i in window.model.visible] == [1, 2]
+        assert "注意 2" in window.count_label.text()
+        window.quick_filter.setCurrentIndex(0)
+        assert window.model.rowCount() == 3
+    finally:
+        window.close()
+
+
+def test_range_selection_from_the_timeline_and_marks(viewer):
+    viewer.select_frame_range(0, 0, 2)  # 1つ目のセッションの3フレーム
+    assert viewer.selected_table_rows() == [0, 1, 2]
+    assert viewer.timeline.selection == (0, 2)
+    viewer.set_exclude(True)
+    assert [r["training"] for r in viewer.table.rows[:3]] == [EXCLUDED_BY_HAND] * 3
+    assert viewer.table.rows[3]["training"] != EXCLUDED_BY_HAND
+
+    # I と O で、2つ目のセッションの範囲を選ぶ
+    select(viewer, [4])
+    viewer.mark_range_start()
+    select(viewer, [3])
+    viewer.mark_range_end()
+    assert viewer.selected_table_rows() == [3, 4]
+
+    # 絞り込みで隠れた行は選ばない
+    viewer.filter_column.setCurrentIndex(viewer.filter_column.findData("motion"))
+    viewer.filter_value.setCurrentText("前進")
+    viewer.add_condition()
+    viewer.select_frame_range(0, 0, 2)
+    assert viewer.selected_table_rows() == [0, 1]

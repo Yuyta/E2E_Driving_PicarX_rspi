@@ -231,3 +231,30 @@ def test_statistics():
     assert counts[("raw", USED)] == 2
     assert counts[("x", EXCLUDED_STOPPED)] == 1
     assert set(row_labels) == {"raw", "x"}
+
+
+# ---- 怪しいフレームの印 ----
+
+
+def test_warnings_point_at_frames_worth_checking():
+    from src.e2e.dataset.frame_table import (
+        WARN_AGAINST_INTENT,
+        WARN_JUMP,
+        WARN_MISMATCH,
+        WARN_STRAIGHT_NEAR,
+        WARN_STUCK,
+        WARN_TURN_IN_CLEAR,
+        warnings_of,
+    )
+
+    clear = moving(0.8, 120)
+    assert warnings_of(clear, None, "any", False) == [WARN_TURN_IN_CLEAR]
+    assert warnings_of(clear, None, "right", False) == []  # 右の意図なら正しい
+    assert warnings_of(clear, None, "any", True) == []  # 塞がっていれば避けている
+    assert warnings_of(moving(0.5, 120), None, "left", False) == [WARN_AGAINST_INTENT]
+    assert warnings_of(moving(0.0, 12), None, "any", None) == [WARN_STRAIGHT_NEAR]
+    assert warnings_of(moving(0.7), moving(-0.7), "any", None) == [WARN_JUMP]
+    flagged = moving(0.0, motion_check={"flags": ["no_motion", "turn_mismatch"]})
+    assert warnings_of(flagged, None, "any", None) == [WARN_STUCK, WARN_MISMATCH]
+    # 止まっているフレームの舵は手本にならないので、舵の規則は見ない
+    assert warnings_of({**stopped(), "steering": 1.0}, None, "left", False) == []

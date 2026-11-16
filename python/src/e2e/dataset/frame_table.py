@@ -49,35 +49,61 @@ class Column:
 
 COLUMNS: Tuple[Column, ...] = (
     Column("session", "セッション", "cat"),
-    Column("source", "種類", "cat"),
     Column("index", "番号", "num"),
     Column("time_s", "経過秒", "num"),
-    Column("collector", "収集", "cat", False),
+    Column("warnings", "注意", "cat"),
+    Column("tags", "タグ", "cat"),
+    Column("training", "学習", "cat"),
     Column("motion", "動き", "cat"),
-    Column("speed", "速度", "num", False),
     Column("steering_deg", "舵角°", "num"),
     Column("direction", "向き", "cat"),
-    Column("intent_recorded", "意図(記録)", "cat", False),
     Column("intent", "意図(学習)", "cat"),
-    Column("policy_state", "走行状態", "cat", False),
     Column("distance_cm", "距離cm", "num"),
     Column("blocked", "塞がり", "cat"),
+    Column("overrides", "手作業", "cat"),
+    Column("note", "メモ", "cat"),
+    Column("source", "種類", "cat", False),
+    Column("collector", "収集", "cat", False),
+    Column("speed", "速度", "num", False),
+    Column("intent_recorded", "意図(記録)", "cat", False),
+    Column("policy_state", "走行状態", "cat", False),
     Column("motion_flags", "食い違い", "cat", False),
     Column("battery_v", "電池V", "num", False),
     Column("floor_min", "床の最小", "num", False),
-    Column("training", "学習", "cat"),
-    Column("tags", "タグ", "cat"),
-    Column("overrides", "手作業", "cat"),
-    Column("note", "メモ", "cat", False),
     Column("frame", "画像", "cat", False),
 )
 COLUMN_BY_KEY = {c.key: c for c in COLUMNS}
+# 1つのフレームに複数の値がある列（カンマ区切り）
+MULTI_VALUE_KEYS = ("tags", "overrides", "motion_flags", "warnings")
 
 USED = "使う"
 EXCLUDED_BY_HAND = "除外(手作業)"
 EXCLUDED_STOPPED = "止まっている"
 EXCLUDED_MISMATCH = "動きの食い違い"
 EXCLUDED_FLAG = "除外(記録)"
+
+# 怪しいフレームの印（`warnings_of`）。学習から自動で外すものではなく、人が確かめる手がかり
+WARN_MISMATCH = "動きの食い違い"
+WARN_STUCK = "引っかかり"
+WARN_AGAINST_INTENT = "意図と逆の舵"
+WARN_TURN_IN_CLEAR = "空いているのに曲がる"
+WARN_STRAIGHT_NEAR = "近いのに直進"
+WARN_JUMP = "舵の急変"
+WARNINGS = (
+    WARN_MISMATCH,
+    WARN_STUCK,
+    WARN_AGAINST_INTENT,
+    WARN_TURN_IN_CLEAR,
+    WARN_STRAIGHT_NEAR,
+    WARN_JUMP,
+)
+# 意図が any で前が空いているのに、これより大きく切っている（約17°）。2026-11-16 の介入の修正は、
+# 左へ寄る車を戻すために、空いていても右へ 20〜30° 切っていた
+TURN_IN_CLEAR = 0.5
+# これより近いのにまっすぐ進んでいる（cm）
+STRAIGHT_NEAR_CM = 20.0
+# 1フレームでこれより大きく舵が変わった（左いっぱいから右へ、など。約42°）
+STEERING_JUMP = 1.2
 
 
 @dataclass
@@ -120,6 +146,41 @@ def motion_of(record: Dict[str, Any]) -> str:
     if speed < 0:
         return "後退"
     return "停止"
+
+
+def warnings_of(
+    record: Dict[str, Any],
+    previous: Optional[Dict[str, Any]],
+    intent: str,
+    blocked: Optional[bool],
+) -> List[str]:
+    """人が確かめたほうがよいフレームの理由。前進中のフレームの舵の規則と、動きの食い違い"""
+    found = []
+    flags = (record.get("motion_check") or {}).get("flags") or []
+    if "no_motion" in flags:
+        found.append(WARN_STUCK)
+    if any(f != "no_motion" for f in flags):
+        found.append(WARN_MISMATCH)
+    if motion_of(record) != "前進":
+        return found
+    steering = float(record.get("steering", 0.0))
+    if (intent == "left" and steering > STRAIGHT_LIMIT) or (
+        intent == "right" and steering < -STRAIGHT_LIMIT
+    ):
+        found.append(WARN_AGAINST_INTENT)
+    if intent == INTENT_ANY and blocked is False and abs(steering) >= TURN_IN_CLEAR:
+        found.append(WARN_TURN_IN_CLEAR)
+    distance = record.get("distance_cm")
+    if (
+        distance is not None
+        and float(distance) < STRAIGHT_NEAR_CM
+        and abs(steering) <= STRAIGHT_LIMIT
+    ):
+        found.append(WARN_STRAIGHT_NEAR)
+    if previous is not None and motion_of(previous) == "前進":
+        if abs(steering - float(previous.get("steering", 0.0))) >= STEERING_JUMP:
+            found.append(WARN_JUMP)
+    return found
 
 
 def blocked_text(value: Optional[bool]) -> str:
@@ -178,6 +239,8 @@ def build_row(
         training = USED
 
     overrides = [k for k in ("exclude", "intent", "blocked") if k in note]
+    previous = session.records[i - 1] if i > 0 else None
+    warnings = warnings_of(record, previous, intent, blocked)
     return {
         "session": session.session_dir.name,
         "source": session.session_dir.parent.name,
@@ -201,6 +264,7 @@ def build_row(
         "battery_v": record.get("battery_v"),
         "floor_min": min(floor) if isinstance(floor, list) and floor else None,
         "training": training,
+        "warnings": ",".join(warnings),
         "tags": ",".join(note.get("tags", [])),
         "overrides": ",".join(overrides),
         "note": note.get("note", ""),
@@ -294,7 +358,7 @@ def count_by(rows: Sequence[Dict[str, Any]], key: str) -> List[Tuple[str, int]]:
     counter: Counter = Counter()
     for row in rows:
         value = row.get(key)
-        if key in ("tags", "overrides", "motion_flags"):
+        if key in MULTI_VALUE_KEYS:
             parts = [p for p in str(value or "").split(",") if p]
             counter.update(parts or ["(なし)"])
         else:
