@@ -14,10 +14,11 @@
 ### 1.1 基本思想
 - **家庭内フリースペース自律走行**: コース・白線・標識のない家庭内（部屋・廊下・家具の間）を縦横無尽に走行し、障害物や行き止まりを自律回避して開けた空間へナビゲートする。
 - **GPU不要 (CPU前提)**: PC・Raspberry PiともにCPUのみで動作する軽量設計。
-- **現行アーキテクチャ (Plan A Remote Control)**: 推論と安全判断の多くをPC側で行う暫定構成。安全機能は Pi へ移し、実機で確認した（ROADMAP の M1。Wi-Fi 切断時の停止だけ未確認）。推論は M3 で移す計画。
-  - PC側: データ収集GUI、データクリーニング、PyTorch学習、ONNX Runtime推論、MLOpsレジストリを担当。
-  - Raspberry Pi側: Rust/Axum HTTPサーバー経由でカメラ撮影、超音波センサー計測、モーター・サーボPWM制御を担当。
-  - 両者間は標準 HTTP/JSON 通信（Base64 JPEG画像伝送）で疎結合に連携。
+- **現行アーキテクチャ**: 安全系と自律走行のループは Pi で動く（ROADMAP の M1、D-7）。PC は収集、学習、評価、データの管理と、走行の開始、見守り、引き継ぎを担当する。
+  - PC側: データ収集 GUI、データビューア、学習と ONNX 出力、交差検証、モデルの配置、Pi の自律走行の操作（`pi_autopilot.py`）。PC で推論して走る `autonomous_driver.py` も残す（比較と地図の表示用）。
+  - Raspberry Pi側: Rust/Axum の HTTP サーバー。カメラの常時配信、センサー、反射ループ、自律走行（`tract` で推論、§4.5.1）、走行の記録。
+  - 両者の間は HTTP/JSON とカメラの MJPEG 配信。
+- **走行データの収集は M6 の後**: 今の装備では、舵0でも左へ曲がる、細い脚と布が超音波に映らない、黒いマットと段差を区別できない。新しい走行データは、装備を見直して直進を確かめてから集める（ROADMAP の D-8、2026-11-17）。
 
 ### 1.2 対象外 (スコープ外)
 - ❌ **フレーム単位の制御への大規模モデル（Vision Transformer / LLM）の使用**: GPUを要し推論遅延が大きいため採用しない。LLMは行き先などの上位の意図のみを扱う（ROADMAP の M5）。
@@ -28,7 +29,7 @@
 - ⭕ **MLOps & 実験管理**: データセット・モデルのバージョン管理と定量評価の自動化。
 - ⭕ **継続学習（Human-in-the-loop）**: 失敗ケースの切り出しとデータリバランスによる実走性能向上。
 - ⭕ **車載安全系（Safety Layer）**: AI推論に依存しない多重センサーFail-Safeの構築。
-- ⭕ **エッジ推論（Rust）**: Raspberry Pi単体で完結するONNX推論（未着手、ROADMAP の M3）。
+- ⭕ **エッジ推論（Rust）**: Raspberry Pi 単体で完結する ONNX 推論（`tract`、2026-11-14 実装、§4.5.1）。
 - ⭕ **ツール前提**: Python環境操作は常に `uv`（`uv run` / `uv pip`）を使用する。
 
 ---
@@ -175,6 +176,12 @@ PC上でカメラ映像をリアルタイム確認しながら手動操縦し、
   - `metadata.json`: レジストリ互換の統計メタデータ
 - **注意**: モデルと一致しないフレームを除外するため、「前後MAE」は改善して見えやすい。走行性能の改善の根拠には使わない。
 
+#### 4.2.3 手作業のラベル (`dataset/annotations.py`)
+- 走行データ（`labels.jsonl`）は書き換えず、人が付けたラベルを `python/data/annotations/<セッションID>.json` に置く（2026-11-16 から）。フレームはファイル名で指す
+- フレームごとの値: `tags`（自由なタグ。絞り込みと集計用）、`exclude`（学習と評価に使わない）、`intent`（学習の意図の上書き）、`blocked`（前方が塞がっているかの上書き。`null` は不明にする）、`note`
+- 学習（`configs/train.toml` の `annotations = true`）: `exclude` のフレームは舵角にも塞がっているかの学習にも使わない。`intent` と `blocked` は、自動のラベル（意図の付け直し、超音波、引っかかり）より優先する。セッションごとの注釈の中身のハッシュと使った数を、`metadata.json` と交差検証の結果の `annotations` に残す
+- 保存は一時ファイルに書いてから置き換える。注釈のファイルを消せば元のデータに戻る
+
 ---
 
 ### 4.3 モデルアーキテクチャ & 学習 (`training/model.py`, `train.py`)
@@ -295,8 +302,11 @@ CPU推論を想定した4層の軽量CNN（推論時間の実測値は未記録�
 - **速度** (`speed.rs`): PC の `SpeedLimiter` と同じ式。反射が戻らない時は距離なしとして扱う
 - **後退** (`trajectory.rs`): 記録した前進の軌跡の範囲だけ、同じ舵角で戻る。周期が速くて1段が 50ms より短い時はまとめる
 - **引っかかり** (`stuck.rs`): 40x30 の明るさで 0.5 秒前の画像と比べ、差の平均が 2.5 未満の状態が 0.3 秒続いたら、引っかかったとして記録し、避ける向きを切り替えて後退する。30 秒に3回なら走行を終える
-- **人の引き継ぎ**: 走行中に `/api/drive/move` か `/api/drive/steer` が来たら、自律の指令を止める（`human_takeover` を記録）。1.5 秒途絶えたら、曲がりの途中の判断を捨てて自律に戻る。`/api/drive/stop` と緊急停止では走行を終える（`manual_intervention`）
-- **走行の記録** (`runlog.rs`): PC の `RunLog` と同じ形式で `~/picarx/runs/<run_id>/` に書く（`PICARX_RUNS_DIR`）。`model_version` と `data_fingerprint` はマニフェストから
+- **人の引き継ぎ**: 走行中に `/api/drive/move` か `/api/drive/steer` が来たら、自律の指令を止める（`human_takeover` を記録）。推論の途中や後退の途中に引き継がれたら、自律の指令は出さない。人の指令が 1.5 秒途絶えたら、曲がりの途中の判断を捨てて自律に戻る。PC の `pi_autopilot --gamepad` は、人がパッドの `＋` を押すか8秒何も触らないまで人の操作を送り続ける。`/api/drive/stop` と緊急停止では走行を終える（`manual_intervention`）
+- **避ける間の舵**: 避けている間は、意図の向きへ少なくとも20°切る（`AVOID_MIN_STEER_DEG`。モデルがそれより強く切っていればモデルのまま）。速度も実際に切る舵角で決める
+- **抜け出せない時**: 段差では軌跡に沿って1回だけ下がり、下がっても段差のまま、下がる軌跡がない、60秒に2回目の段差、のどれか。引っかかりが30秒に3回。後退して抜ける動作が30秒に4回を超える。これらで走行を終える。`wait_for_help`（`pi_autopilot --gamepad` の時）なら、終えずに止まって人を待つ（状態 `needs_help`、180秒で終える）。PC は音、パッドの振動、表示で「介入してください」と知らせる。人が抜け出させて手を離すと、数えと軌跡をやり直して自律に戻る
+- **開始時の床の校正**: 一番明るいセンサーの 40% より暗いセンサーがあれば校正を断る（コードやマットの上で校正すると閾値が低くなりすぎるため）。PC は断られた理由を表示する。黒いマットは段差と区別できないので、段差のない床で走らせる時は走行サーバーを `PICARX_DISABLE_CLIFF_GUARD=1` で起動する（PC が表示で知らせる）
+- **走行の記録** (`runlog.rs`): PC の `RunLog` と同じ形式で `~/picarx/runs/<run_id>/` に書く（`PICARX_RUNS_DIR`）。`run.json`（`model_version` と `data_fingerprint` はマニフェストから、終えた理由 `end_reason`、走行サーバーのビルドのコミット `code.server`）、`interventions.jsonl`（段差は床センサーの値と閾値、障害物は距離も残す）、`cycles.jsonl`（1周ごとの距離、モデルの舵角 `model_deg`、実際の舵角、速度、意図、避ける状態、画像の変化、推論時間）。書くたびにディスクへ確定させる（電源を切っても残る）。PC へは `deploy.pi pull-runs` で持ってくる
 - **モデルの版** (`store.rs`、`picar-x-rust model ...`): `~/picarx/models/versions/<版>/` に置き、`current` のシンボリックリンクを張り替えて一度に切り替える。使用中と前の2つの版を残す。走行サーバーは `current` を読むだけ（`PICARX_MODELS_DIR`）
 - **窓口**: `POST /api/autopilot/start`（`speed`、`min_speed`、`intent`）、`POST /api/autopilot/stop`（`intervention`）、`POST /api/autopilot/intent`、`GET /api/autopilot/status`、`GET /api/autopilot/model`
 - **PC 側**: `src/e2e/pi_autopilot.py`（始める、見守る、止める、パッドでの引き継ぎと修正操作の記録）、`src/e2e/deploy/`（バンドルの作成、送信、戻し、走行の記録の取り込み）
@@ -322,7 +332,7 @@ PiCar-X実機のサーボモーターギア個体差（数度の傾き）と、�
   - 舵を切っている時は内側の車輪を遅くする（`wheel_speeds`。舵角 θ の時、内側は速度 ×(100−|θ|)/100）。
   - その後に `MOTOR_BALANCE`（%、±30まで、既定0）で左右の差を補正する（`balance_wheels`、2026-11-11 から）。正なら右輪を、負なら左輪をその分だけ遅くする。正は右へ寄せる向きで `DIR_SERVO_OFFSET` と同じ。前進と後退の両方に効く。
   - 起動時に `✓ Servo offsets applied: Dir=…` と `✓ Motor balance applied: …%` を表示する。
-- **今の実機の値**（Pi の `~/.env` にだけあり、リポジトリには含まれない）: `DIR_SERVO_OFFSET=6`、`MOTOR_BALANCE=10`。直進は3秒で −0.8°、舵 −30 / +30 は3秒で −26° / +24°（2026-11-11、`m3_check` の forward / left / right）。
+- **今の実機の値**（Pi の `~/.env` にだけあり、リポジトリには含まれない）: `DIR_SERVO_OFFSET=6`。`MOTOR_BALANCE` は 2026-11-11 に 10 にして直進3秒で −0.8° だったが、2026-11-16 には同じ値で3秒 −23.8°（毎秒約 −14°）まで左へ寄った。前輪は舵0で左を向かず、手で回した回り方も左右同じ。調整は M6（前輪の点検、ジャイロ）まで行わず、0 に戻すと決めた（利用者の判断）。
 
 ---
 
@@ -352,7 +362,7 @@ PiCar-X には車輪の回転数を測るセンサーがないので、カメラ
 
 ## 5. 機能の詳細
 
-各機能の状態は [ROADMAP.md §6](ROADMAP.md) を正とする。ここでは実装内容と制限を記載する。
+計画と進み具合は [ROADMAP.md](ROADMAP.md) を正とする。ここでは実装内容と制限を記載する。
 
 ### Phase 1: 軽量 MLOps & モデルレジストリ
 - **Dataset Registry (`registry/dataset.py`)**: 各走行ログの統計情報（総フレーム数、走行時間、FPS、直進/左折/右折比率、平均舵角）を算出。
@@ -389,15 +399,22 @@ PiCar-X には車輪の回転数を測るセンサーがないので、カメラ
 ---
 
 ### 計画中の機能
-Pi 上の推論（旧 Phase 4）は ROADMAP の M3 に統合した。現時点で性能を実測していないので、達成値は完了条件で管理する。
+- **回帰テスト（門番）**: データビューアのタグで選んだ過去の失敗場面とふつうの場面で、新しいモデルを1フレームずつ採点し、合格しないモデルを `deploy.pi push` で送らない（ROADMAP の M3）
+- 走行データの収集し直し、「前方が塞がっているか」の見直し、実走での介入回数の比較は、M6 の装備の見直しの後に行う
 
-データとモデルの管理は M3 で進めている（詳細は [ROADMAP.md の M3](ROADMAP.md)）。マニフェスト、バックアップ、画像を複製しないクリーナー、再現できる学習、交差検証は実装した（§4.2〜4.4）。次は未実装。
+MLflow、DVC、モデルの署名は採用しない（[ROADMAP.md §7](ROADMAP.md)）。
 
-- 使用中のモデルより悪いモデルは採用しない（同じデータで両方の設定の交差検証を行って比べる）。使用中のモデルの版を記録する
-- 介入の記録にセッション、モデルの版、データの版を入れ、モデル別の介入率を集計する
-- Pi へ送るモデルには、SHA256、入力の大きさ、正規化の値を書いたマニフェストを付ける。Pi は確認してから読み込み、版ごとのフォルダとリンクの張り替えで切り替え、前の版へ戻せるようにする
+---
 
-MLflow、DVC、モデルの署名は採用しない（[ROADMAP.md §8](ROADMAP.md)）。
+### 4.8 データビューア (`data_viewer.py`)
+
+走行データの確認、手作業のラベル付け、分布と統計の画面（PySide6、2026-11-16 から）。`uv run python -m src.e2e.data_viewer`（既定で `data/raw` と `data/interventions`）。
+
+- **フレームの表** (`dataset/frame_table.py`): 学習と同じ規則で「学習に使うか」と学習で使う意図と塞がっているかのラベルを計算し、手作業のラベルを重ねる。列の見出しで並べ替え、右クリックで表示する列を選ぶ（列ごとの表示は INI 形式の設定に残る）。条件（`=`、`≠`、数値は `>10`、`10..20`、`(なし)`）を重ねて絞り込む
+- **注意の印**（`warnings_of`）: 人が確かめる手がかりで、自動では学習から外さない。動きの食い違い、引っかかり、意図と逆の舵、前が空いているのに曲がる（意図が `any`、前方が空き、17°以上）、近いのに直進（20cm 未満）、舵の急変（1フレームで約42°以上）。注意のある行は黄色、手作業で除外した行は赤い取り消し線、学習に使わない行は灰色
+- **範囲の選択**: 表の下の帯に今のセッションの全フレームの状態と舵角を描き、ドラッグで範囲を選ぶ。表の Shift+クリック、`I` と `O` でも選べる。絞り込みで隠れた行は選ばない
+- **ラベル**: 選んだフレームにまとめて、タグ、除外（`X`）、意図、塞がり、メモを付ける。変えるたびに保存し、`Ctrl+Z` で戻す。`Space` で再生
+- **統計**: 絞り込んだフレームの、列ごとの数と割合（横棒）、数値の度数分布、2つの列の組み合わせ（積み上げの横棒）。表の行をダブルクリックすると、その値で絞り込んでフレームへ戻る
 
 ---
 
@@ -413,16 +430,25 @@ PiCarX/
 │   ├── configs/                   # train.toml（学習）、motion.toml（動きの判定）
 │   ├── data/                      # 走行データ（git 管理外）
 │   │   ├── raw/<session_id>/      # images/, labels.jsonl, manifest.json
+│   │   ├── interventions/<run_id>/ # 引き継ぎ中の画像と人の操作（images/, labels.jsonl）
+│   │   ├── annotations/<id>.json  # 手作業のラベル（データビューア）
+│   │   ├── runs/<run_id>/         # run.json, interventions.jsonl, cycles.jsonl
+│   │   ├── cv/                    # 交差検証の結果
 │   │   ├── processed/clean_vX/    # labels.jsonl（raw を参照）, bad_cases.jsonl, cleaning_report.json
 │   │   └── disengagements/<id>/   # images/, labels.jsonl, event.json
 │   ├── models/vXXX/               # best_model.pth, model.onnx, metadata.json, eval_metrics.json
 │   ├── src/e2e/
 │   │   ├── README.md              # 操作マニュアル
-│   │   ├── autonomous_driver.py   # 自律走行
+│   │   ├── autonomous_driver.py   # PC で推論する自律走行
+│   │   ├── pi_autopilot.py        # Pi の自律走行の開始、見守り、引き継ぎ
+│   │   ├── data_viewer.py         # データビューア
+│   │   ├── avoidance.py           # 障害物を避ける判断（Pi と同じ規則）
+│   │   ├── deploy/                # モデルのバンドル、Pi への送信と戻し、走行の記録の取り込み
 │   │   ├── gui_collector.py       # データ収集 GUI
 │   │   ├── gamepad.py             # プロコンの読み取り（収集 GUI 用）
-│   │   ├── dataset/               # cleaner.py, disengagement_manager.py, manifest.py
-│   │   ├── evaluation/            # evaluate.py, metrics.py
+│   │   ├── dataset/               # cleaner.py, disengagement_manager.py, manifest.py,
+│   │   │                          # annotations.py, frame_table.py, session_report.py
+│   │   ├── evaluation/            # evaluate.py, metrics.py, compare_cv.py, interventions.py
 │   │   ├── mapping/               # occupancy_grid.py, visualizer.py
 │   │   ├── motion/                # estimator.py, checker.py, monitor.py, analyze.py
 │   │   ├── registry/              # compare.py, dataset.py, models.py
@@ -435,6 +461,7 @@ PiCarX/
 └── rust/src/
     ├── api/                       # HTTP API
     ├── safety/                    # 反射ループ（障害物、段差、TTL、緊急停止）
+    ├── autopilot/                 # Pi 上の自律走行（前処理、推論、避ける判断、記録、モデルの版）
     ├── rpi_camera/                # カメラの常時配信
     ├── sensor_monitor/            # センサーのポーリング
     └── picarx/core.rs             # ハードウェア制御（校正値の自動読込）
@@ -447,6 +474,7 @@ PiCarX/
 | 目的 | コマンド (PowerShell) |
 |---|---|
 | **データ収集GUI起動** | `uv run python -m src.e2e.gui_collector` |
+| **データビューア（確認、ラベル、統計）** | `uv run python -m src.e2e.data_viewer`（別のフォルダは `--data_dir`） |
 | **決まったルールで走って自動で収集** | `uv run python -m src.e2e.auto_collector --seconds 150 --i-understand-the-car-will-move`（車が動く。床のケーブルと布団などの柔らかい物を片付けてから。ルールは `auto_collector.py` の冒頭） |
 | **プロコンの接続と割り当ての確認** | `uv run python -m src.e2e.gamepad`（押したボタンの刻印と操作を表示） |
 | **収集したセッションの確認** | `uv run python -m src.e2e.dataset.session_report --data_dir data/raw`（fps、走行中の割合、左右と舵角の偏り、食い違いの印、取りこぼし） |
@@ -482,3 +510,52 @@ PiCarX/
   - ユニットテスト: `uv run pytest tests`
   - 新機能追加時もテスト全件合格を維持する。Python は `.github/workflows/python-ci.yml` で `ruff check` と `pytest` を実行する。
 - **機密情報と個人データ**: `.env`、走行データ（室内画像を含む）、音声、記憶 DB は git に追加しない（`.gitignore` で除外）。
+
+---
+
+## 9. 実機の確認手順と結果
+
+ROADMAP の完了条件を実機で確かめる手順。PC の `python/` で実行する。走る手順は `--i-understand-the-car-will-move` が必要。
+
+### 9.1 M1: 安全系（2026-11-04〜09）
+
+| 順 | 確認 | 手順 | 合格基準 | 結果 |
+|---|---|---|---|---|
+| 1 | 状態と反射ループ | `m1_check status` | 20Hz 以上、電池とセンサーが実測値 | 39.9Hz、最大間隔 28.1ms |
+| 2 | カメラ | `m1_check camera` | 10fps 以上 | 15.0fps（中央値 66.7ms） |
+| 3 | 切断時の停止 | 広い床で `m1_check ttl` | `ttl_expired`、TTL + 100ms 以内 | 336ms（TTL 300ms） |
+| 4 | Wi-Fi 切断 | `m1_check wifi --simulate --ssh_host <Pi> --ssh_key <鍵>`（Pi 側で TCP 8080 の受信を8秒破棄する疑似切断） | 期限から 100ms 以内に止まる | 期限から 11.4ms |
+| 5 | 障害物 | 壁へ向けて走り `m1_check events` | `obstacle`、100ms 以下 | 最大 16.9ms。速度50は 14.3cm で検知、惰性約1.7cm |
+| 6 | 段差 | **落下防止措置つき** で段差へ | `cliff` で止まり車輪が手前に残る | 20.0ms、惰性約2.3cm。斜めの進入では前輪が縁に近い |
+| 7 | 床の種類 | よく使う床を走らせる | 段差でない所で止まらない | 明るい床は合格。黒いマットは段差と判定する（2026-11-16） |
+| 8 | 周期の内訳 | `autonomous_driver` の終了時の表 | 10Hz 以上 | 15.0Hz（p95 88.1ms） |
+
+疑似切断は `scripts/pi/picarx-netcut.sh`（`nft` で受信を1〜30秒破棄し、時間切れ、中断、SSH の切断で元に戻す）を `scripts/pi/install-netcut.sh` で Pi に置いて使う。PC からはパスフレーズなしの専用の鍵で SSH する（`PICARX_SSH_HOST`、`PICARX_SSH_KEY`）。
+
+**車輪が回る最低の速度**（`speed_check`、2026-11-09、電池 8.1V、前進）: Pi は速度をそのまま PWM のデューティ比（%）にし、モーターは約50%未満では回らない。
+
+| 速度 | 止まった状態から | 走行中に落とす |
+|---|---|---|
+| 30 | 動かない | 動かない |
+| 35 | 約3.7cm/s で這う | 約2.7cm/s |
+| 40 | 約10cm/s | 約7cm/s |
+| 50 | 動く（動き出しに約1秒） | - |
+
+`MIN_MOVING_SPEED = 40`（減速の下限、動きの判定）と `DRIVE_SPEED = 50`（既定）を `python/src/models.py` に置く。後退で動く最低の速度は未計測。
+
+### 9.2 M3: 指令と実際の動きの食い違い（2026-11-09、速度50）
+
+準備: 模様のある床、前方に 1.5m 以上の空き、手順6のために正面に壁。記録は `data/m3_checks/` に残る（画像は含まない）。
+
+| 順 | 確認 | 手順 | 合格基準 | 結果 |
+|---|---|---|---|---|
+| 1 | 静止 | `m3_check run --scenario still` | 印なし | 合格（p99 0.18px/s） |
+| 2 | 人が横切る | `--scenario walk` | 印なし | 合格（隠れたフレームは不明） |
+| 3 | 押される | `--scenario push`（2秒ほど押す） | `uncommanded_motion` | 合格（3.3秒で続いた） |
+| 4 | 直進 | `--scenario forward --seconds 3` | 印なし | 補正後に合格（下記） |
+| 5 | 旋回 | `--scenario left` / `right --seconds 2` | 左は負、右は正 | 左 −15.6°/s、右 +17.5°/s |
+| 6 | 壁へ直進 | 壁の約1.2m 手前から `forward --note wall` | 接近速度が記録される | 毎秒 11.3cm |
+| 7 | 車輪を浮かせる | 後輪だけを台からはみ出させて `--scenario lifted`（車体ごと持ち上げると段差で拒否される） | `no_motion` で止まる | 1.61秒 |
+| 8 | 校正 | `m3_check calibrate --still ... --moving ... --push ... --turn ... --straight ... --wall ...` | 提案値を `configs/motion.toml` へ | `moving_px_s` 5.1、`uncommanded_px_s` 6.7、`speed_cm_s_per_unit` 0.227 |
+
+直進の記録（手順4）: 2026-11-09 は舵0で毎秒約20°左へ曲がり、`DIR_SERVO_OFFSET=6` で3秒 −0.4°。2026-11-11 は左右の後輪の差として `MOTOR_BALANCE=10` を足し3秒 −0.8°。2026-11-16 は同じ設定で3秒 −23.8°（§4.6）。

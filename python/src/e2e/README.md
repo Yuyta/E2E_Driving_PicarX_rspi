@@ -124,6 +124,14 @@ uv run python -m src.e2e.dataset.manifest --data_dir data/raw --verify   # 変�
 cd ..; powershell -ExecutionPolicy Bypass -File scripts\backup.ps1       # D:\PiCarX-backup へ複製（GUI を閉じてから）
 ```
 
+### データの確認とラベル付け（データビューア）
+怪しいフレーム（黄色の行、「注意」の列）を確かめ、範囲を選んでタグや学習からの除外を付けます。統計の画面で、向き、意図、学習に使うかなどの分布を見られます。付けたラベルは `data/annotations/` に保存され、走行データは書き換えません。
+```powershell
+uv run python -m src.e2e.data_viewer
+```
+- 表の下の帯をドラッグ（または Shift+クリック、`I` と `O`）で範囲を選び、「付ける」「除外する (X)」でまとめて付けます。`Ctrl+Z` で戻せます
+- 見出しの右クリックで表示する列を選び、見出しのクリックで並べ替えます
+
 ---
 
 ## ステップ 2: モデル学習 & ONNXエクスポート (PC)
