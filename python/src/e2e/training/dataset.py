@@ -13,9 +13,11 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 
 try:
+    from ..dataset.annotations import AnnotationStore
     from ..evaluation.metrics import STRAIGHT_LIMIT
     from ..intent import INTENT_ANY, INTENT_LEFT, INTENT_RIGHT, one_hot
 except ImportError:
+    from src.e2e.dataset.annotations import AnnotationStore
     from src.e2e.evaluation.metrics import STRAIGHT_LIMIT
     from src.e2e.intent import INTENT_ANY, INTENT_LEFT, INTENT_RIGHT, one_hot
 
@@ -212,6 +214,7 @@ class DrivingDataset(Dataset):
         blocked_clear_cm: float = BLOCKED_CLEAR_CM,
         turn_intent: bool = False,
         blocked_stuck: bool = True,
+        annotations: Union[bool, AnnotationStore] = True,
     ):
         """
         Args:
@@ -230,6 +233,9 @@ class DrivingDataset(Dataset):
                 （`turn_intents`）。記録のままの意図は `intent_recorded` に残る
             blocked_stuck: True の場合、引っかかったフレームを塞がっているとし、前後の
                 「空いている」を不明にする（`blocked_labels`）
+            annotations: 手作業のラベル（`data/annotations`、`dataset.annotations`）を使うか。
+                除外の印が付いたフレームは学習にも評価にも使わず、意図と塞がっているかは
+                上書きがあればそれを使う。読み込み済みの `AnnotationStore` も渡せる
         """
         self.session_dirs = resolve_session_dirs(data_dir)
         self.samples: List[Dict[str, Any]] = []
@@ -243,6 +249,18 @@ class DrivingDataset(Dataset):
         self.stuck_blocked = 0
         # 引っかかったフレームの近くなので、「空いている」から不明にしたフレーム
         self.stuck_unknown = 0
+        # 手作業のラベルで除外したフレームと、意図、塞がっているかを上書きしたフレーム
+        self.annotated_excluded = 0
+        self.annotated_intent = 0
+        self.annotated_blocked = 0
+        # セッションごとの注釈の中身のハッシュ（注釈がなければ None）。学習の記録に残す
+        self.annotation_hashes: Dict[str, Optional[str]] = {}
+        if annotations is True:
+            store: Optional[AnnotationStore] = AnnotationStore()
+        elif annotations is False:
+            store = None
+        else:
+            store = annotations
 
         for s_dir in self.session_dirs:
             labels_file = s_dir / "labels.jsonl"
@@ -262,11 +280,29 @@ class DrivingDataset(Dataset):
             by_stuck = [bool(b and not a) for a, b in zip(plain, labels)]
             self.stuck_blocked += sum(by_stuck)
             self.stuck_unknown += sum(1 for a, b in zip(plain, labels) if a is False and b is None)
+            notes = store.session(s_dir) if store is not None else None
+            if notes is not None:
+                self.annotation_hashes[s_dir.name] = notes.content_hash()
 
             for record, intent, intent_recorded, blocked, blocked_by_stuck in zip(
                 records, intents, recorded, labels, by_stuck
             ):
                 steer_valid = True
+                note = notes.get(record.get("frame", "")) if notes is not None else {}
+                turn_label = intent
+                if note.get("exclude"):
+                    # 人がおかしいと判断したフレームは、塞がっているかの学習にも使わない
+                    self.annotated_excluded += 1
+                    continue
+                if "intent" in note:
+                    if note["intent"] != intent:
+                        self.annotated_intent += 1
+                    intent = note["intent"]
+                if "blocked" in note:
+                    if note["blocked"] != blocked:
+                        self.annotated_blocked += 1
+                    blocked = note["blocked"]
+                    blocked_by_stuck = False
 
                 # 学習除外フラグの確認 (未承認の介入データや外れ値データをスキップ)
                 if not include_excluded and (
@@ -289,7 +325,7 @@ class DrivingDataset(Dataset):
                     if not (keep_for_blocked and blocked is not None):
                         continue
                     self.kept_for_blocked_only += 1
-                elif intent != intent_recorded:
+                elif turn_label != intent_recorded:
                     self.relabeled_turn_intent += 1
 
                 frame_name = record.get("frame", "")
@@ -321,6 +357,7 @@ class DrivingDataset(Dataset):
                         "blocked": blocked,
                         # 超音波ではなく、引っかかったことから塞がっているとした
                         "blocked_by_stuck": blocked_by_stuck,
+                        "tags": note.get("tags", []),
                         # 分割と集計は元のセッション単位で行う。
                         # 画像を複製していた旧形式の出力は cleaned_meta から元を読む
                         "session_id": (

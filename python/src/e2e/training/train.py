@@ -80,6 +80,8 @@ DEFAULT_PARAMS: Dict[str, Any] = {
     # 学習用のフレームに、左右反転した複製を加える（舵角の符号と意図の左右を入れ替える）。
     # 評価は元のフレームだけで行う
     "flip_augment": False,
+    # 手作業のラベル（data/annotations）を使う。除外の印、意図と塞がっているかの上書き
+    "annotations": True,
 }
 
 
@@ -108,6 +110,16 @@ def load_params(
     return params
 
 
+def annotation_record(dataset: DrivingDataset) -> Dict[str, Any]:
+    """学習の記録に残す、手作業のラベルの版と使った数"""
+    return {
+        "hashes": dict(dataset.annotation_hashes),
+        "excluded": dataset.annotated_excluded,
+        "intent_overridden": dataset.annotated_intent,
+        "blocked_overridden": dataset.annotated_blocked,
+    }
+
+
 def learns_blocked(params: Dict[str, Any]) -> bool:
     return float(params.get("blocked_loss_weight", 0.0)) > 0.0
 
@@ -121,6 +133,7 @@ def load_dataset(data_dir, params: Dict[str, Any]) -> DrivingDataset:
         blocked_clear_cm=float(params["blocked_clear_cm"]),
         turn_intent=bool(params["turn_intent"]),
         blocked_stuck=bool(params["blocked_stuck"]),
+        annotations=bool(params.get("annotations", True)),
     )
 
 
@@ -508,6 +521,8 @@ def train(data_dir, output_model_dir, params: Optional[Dict[str, Any]] = None) -
             # 引っかかったので塞がっているとしたフレームと、その近くで不明にしたフレーム
             "stuck_blocked": dataset.stuck_blocked,
             "stuck_unknown": dataset.stuck_unknown,
+            # 手作業のラベル（data/annotations）。セッションごとの中身のハッシュと、使った数
+            "annotations": annotation_record(dataset),
             "samples_by_intent": {
                 name: sum(1 for s in dataset.samples if s["intent"] == name and s["steer_valid"])
                 for name in INTENTS

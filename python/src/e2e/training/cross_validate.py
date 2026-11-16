@@ -27,6 +27,7 @@ try:
     from . import provenance
     from .train import (
         TrainingError,
+        annotation_record,
         fit,
         learns_blocked,
         load_dataset,
@@ -43,6 +44,7 @@ except ImportError:
     from src.e2e.training import provenance
     from src.e2e.training.train import (
         TrainingError,
+        annotation_record,
         fit,
         learns_blocked,
         load_dataset,
@@ -169,6 +171,7 @@ def cross_validate(data_dir, params: Optional[Dict[str, Any]] = None, log=print)
         "baselines": baselines,
         "folds": folds,
         "data_fingerprint": provenance.data_fingerprint(dataset.samples),
+        "annotations": annotation_record(dataset),
         "code": provenance.git_state(),
     }
 
