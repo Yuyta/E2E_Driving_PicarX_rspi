@@ -284,12 +284,14 @@ class FrameTable:
         self.settings = settings or Settings()
         self.store = store or AnnotationStore()
         self.sessions: List[SessionData] = []
+        self._image_roots: Dict[Tuple[int, Optional[str]], Path] = {}
         for session_dir in resolve_session_dirs([Path(d) for d in data_dirs]):
             self.sessions.append(load_session(session_dir, self.settings))
             self.store.session(session_dir)
         # 行 → (セッションの番号, フレームの番号)
         self.keys: List[Tuple[int, int]] = []
         self.rows: List[Dict[str, Any]] = []
+        self.rows_by_session: List[List[int]] = []
         # セッションの最初の時刻（経過秒の起点）
         self._starts = [
             next(
@@ -300,10 +302,13 @@ class FrameTable:
         ]
         for s, session in enumerate(self.sessions):
             notes = self.store.session(session.session_dir)
+            session_rows = []
             for i in range(len(session.records)):
                 frame = session.records[i].get("frame", "")
+                session_rows.append(len(self.rows))
                 self.keys.append((s, i))
                 self.rows.append(build_row(session, i, notes.get(frame), self._starts[s]))
+            self.rows_by_session.append(session_rows)
 
     def __len__(self) -> int:
         return len(self.rows)
@@ -316,13 +321,21 @@ class FrameTable:
         return self.sessions[s].records[i]
 
     def image_path(self, row: int) -> Path:
-        session = self.session_of(row)
+        session_index, _ = self.keys[row]
+        session = self.sessions[session_index]
         record = self.record(row)
         frame = record.get("frame", "")
         source_dir = record.get("source_dir")
-        base = (session.session_dir / source_dir).resolve() if source_dir else session.session_dir
-        path = base / "images" / frame
-        return path if path.exists() else base / frame
+        key = (session_index, source_dir)
+        root = self._image_roots.get(key)
+        if root is None:
+            base = (
+                (session.session_dir / source_dir).resolve() if source_dir else session.session_dir
+            )
+            image_dir = base / "images"
+            root = image_dir if image_dir.is_dir() else base
+            self._image_roots[key] = root
+        return root / frame
 
     def note(self, row: int) -> Dict[str, Any]:
         session = self.session_of(row)

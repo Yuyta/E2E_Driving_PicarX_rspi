@@ -29,6 +29,7 @@ import json
 import math
 import re
 import sys
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -48,10 +49,14 @@ from PySide6.QtCore import (
     QItemSelectionModel,
     QMargins,
     QModelIndex,
+    QObject,
     QPointF,
     QRectF,
+    QRunnable,
     QSettings,
     Qt,
+    QThread,
+    QThreadPool,
     QTimer,
     Signal,
 )
@@ -60,9 +65,12 @@ from PySide6.QtGui import (
     QBrush,
     QColor,
     QFont,
+    QImage,
+    QImageReader,
     QKeySequence,
     QPainter,
     QPainterPath,
+    QPalette,
     QPen,
     QPixmap,
     QShortcut,
@@ -84,10 +92,13 @@ from PySide6.QtWidgets import (
     QMenu,
     QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
     QPushButton,
     QSizePolicy,
     QSplitter,
+    QStyle,
     QStyledItemDelegate,
+    QStyleOptionViewItem,
     QTableView,
     QTableWidget,
     QTableWidgetItem,
@@ -348,6 +359,13 @@ class FrameModel(QAbstractTableModel):
         self._strike.setStrikeOut(True)
         self._bold = QFont()
         self._bold.setBold(True)
+        self._danger_background = QBrush(QColor(C_DANGER_SOFT))
+        self._warning_background = QBrush(QColor(C_WARN_SOFT))
+        self._warning_foreground = QBrush(QColor(C_WARN))
+        self._accent_foreground = QBrush(QColor(C_ACCENT))
+        self._danger_foreground = QBrush(QColor(C_DANGER))
+        self._muted_foreground = QBrush(QColor(C_MUTED))
+        self._display_cache: OrderedDict[Tuple[int, int], str] = OrderedDict()
 
     def rowCount(self, parent=QModelIndex()) -> int:
         return 0 if parent.isValid() else len(self.visible)
@@ -356,47 +374,72 @@ class FrameModel(QAbstractTableModel):
         return 0 if parent.isValid() else len(self.columns)
 
     def data(self, index: QModelIndex, role=Qt.DisplayRole):
+        if role not in (
+            Qt.DisplayRole,
+            Qt.BackgroundRole,
+            Qt.ForegroundRole,
+            Qt.FontRole,
+            Qt.ToolTipRole,
+            Qt.TextAlignmentRole,
+        ):
+            return None
         if not index.isValid():
+            return None
+        if role == Qt.TextAlignmentRole:
+            if self.columns[index.column()].kind == "num":
+                return Qt.AlignRight | Qt.AlignVCenter
             return None
         row = self.table.rows[self.visible[index.row()]]
         key = self.columns[index.column()].key
-        value = row.get(key)
         if role == Qt.DisplayRole:
+            cache_key = (self.visible[index.row()], index.column())
+            cached = self._display_cache.get(cache_key)
+            if cached is not None:
+                self._display_cache.move_to_end(cache_key)
+                return cached
+            value = row.get(key)
             if value is None:
-                return ""
-            if key == "warnings" and value:
-                return "⚠ " + str(value).replace(",", "、")
-            if key in ("tags", "overrides") and value:
-                return str(value).replace(",", "、")
-            return str(value)
+                display = ""
+            elif key == "warnings" and value:
+                display = "⚠ " + str(value).replace(",", "、")
+            elif key in ("tags", "overrides") and value:
+                display = str(value).replace(",", "、")
+            else:
+                display = str(value)
+            self._display_cache[cache_key] = display
+            if len(self._display_cache) > 4096:
+                self._display_cache.popitem(last=False)
+            return display
         excluded = row["training"] == EXCLUDED_BY_HAND
         if role == Qt.BackgroundRole:
             if excluded:
-                return QBrush(QColor(C_DANGER_SOFT))
+                return self._danger_background
             if row["warnings"]:
-                return QBrush(QColor(C_WARN_SOFT))
+                return self._warning_background
             return None
         if role == Qt.ForegroundRole:
+            value = row.get(key)
             if key == "warnings" and value:
-                return QBrush(QColor(C_WARN))
+                return self._warning_foreground
             if key == "tags" and value:
-                return QBrush(QColor(C_ACCENT))
+                return self._accent_foreground
             if excluded:
-                return QBrush(QColor(C_DANGER))
+                return self._danger_foreground
             if row["training"] != USED:
-                return QBrush(QColor(C_MUTED))
+                return self._muted_foreground
             return None
         if role == Qt.FontRole:
             if excluded:
                 return self._strike
+            value = row.get(key)
             if key in ("warnings", "tags") and value:
                 return self._bold
             return None
-        if role == Qt.TextAlignmentRole and self.columns[index.column()].kind == "num":
-            return Qt.AlignRight | Qt.AlignVCenter
-        if role == Qt.ToolTipRole and key in ("warnings", "tags", "note") and value:
+        if role == Qt.ToolTipRole and key in ("warnings", "tags", "note") and row.get(key):
+            value = row[key]
             return str(value).replace(",", "\n")
         return None
+
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
         if role == Qt.DisplayRole and orientation == Qt.Horizontal:
@@ -430,6 +473,10 @@ class FrameModel(QAbstractTableModel):
 
     def refresh_rows(self, table_rows: Sequence[int]) -> None:
         """手作業のラベルを変えた行の表示を更新する（絞り込みは掛け直さない）"""
+        changed_rows = set(table_rows)
+        self._display_cache = OrderedDict(
+            (key, value) for key, value in self._display_cache.items() if key[0] not in changed_rows
+        )
         for r in table_rows:
             i = self._where.get(r)
             if i is not None:
@@ -440,6 +487,109 @@ class FrameModel(QAbstractTableModel):
 
     def view_row(self, table_row: int) -> Optional[int]:
         return self._where.get(table_row)
+
+
+class FastFrameDelegate(QStyledItemDelegate):
+    """Draw visible cells directly instead of asking Qt to resolve every model role."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._cell_cache: OrderedDict[Tuple[int, int, int, int], QPixmap] = OrderedDict()
+        self._cache_limit = 2048
+        if isinstance(parent, QTableView) and isinstance(parent.model(), FrameModel):
+            parent.model().dataChanged.connect(self._data_changed)
+
+    def _data_changed(self, top_left: QModelIndex, bottom_right: QModelIndex, *_):
+        model = self.parent().model()
+        rows = {
+            model.table_row(view_row)
+            for view_row in range(top_left.row(), bottom_right.row() + 1)
+            if view_row < model.rowCount()
+        }
+        self._cell_cache = OrderedDict(
+            (key, pixmap) for key, pixmap in self._cell_cache.items() if key[0] not in rows
+        )
+
+    def clear_cache(self) -> None:
+        self._cell_cache.clear()
+
+    def paint(self, painter: QPainter, option: QStyleOptionViewItem, index: QModelIndex) -> None:
+        model = index.model()
+        if not isinstance(model, FrameModel) or not index.isValid():
+            super().paint(painter, option, index)
+            return
+
+        option = QStyleOptionViewItem(option)
+        table_row = model.visible[index.row()]
+        row = model.table.rows[table_row]
+        key = model.columns[index.column()].key
+        option.text = model.data(index, Qt.DisplayRole) or ""
+        option.displayAlignment = (
+            Qt.AlignRight | Qt.AlignVCenter
+            if model.columns[index.column()].kind == "num"
+            else Qt.AlignLeft | Qt.AlignVCenter
+        )
+        excluded = row["training"] == EXCLUDED_BY_HAND
+        selected = bool(option.state & QStyle.State_Selected)
+        font = option.font
+        if excluded:
+            font.setStrikeOut(True)
+        elif (key == "warnings" and row["warnings"]) or (key == "tags" and row.get(key)):
+            font.setBold(True)
+        cache_key = (table_row, index.column(), option.rect.width(), option.rect.height())
+        if selected:
+            painter.fillRect(option.rect, option.palette.brush(QPalette.Highlight))
+            foreground = option.palette.color(QPalette.HighlightedText)
+            self._draw_text(painter, option, font, foreground)
+            return
+
+        pixmap = self._cell_cache.get(cache_key)
+        if pixmap is None:
+            pixmap = self._render_cell(model, row, key, option, font)
+            self._cell_cache[cache_key] = pixmap
+            if len(self._cell_cache) > self._cache_limit:
+                self._cell_cache.popitem(last=False)
+        else:
+            self._cell_cache.move_to_end(cache_key)
+        painter.drawPixmap(option.rect.topLeft(), pixmap)
+
+    @staticmethod
+    def _draw_text(painter, option, font, foreground) -> None:
+        painter.save()
+        painter.setFont(font)
+        painter.setPen(foreground)
+        painter.drawText(
+            option.rect.adjusted(8, 0, -6, 0),
+            option.displayAlignment | Qt.TextSingleLine,
+            option.text,
+        )
+        painter.restore()
+
+    def _render_cell(self, model, row, key, option, font) -> QPixmap:
+        pixmap = QPixmap(option.rect.size())
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        excluded = row["training"] == EXCLUDED_BY_HAND
+        if excluded:
+            painter.fillRect(pixmap.rect(), model._danger_background)
+            foreground = model._danger_foreground.color()
+        else:
+            if row["warnings"]:
+                painter.fillRect(pixmap.rect(), model._warning_background)
+            value = row.get(key)
+            if key == "warnings" and value:
+                foreground = model._warning_foreground.color()
+            elif key == "tags" and value:
+                foreground = model._accent_foreground.color()
+            elif row["training"] != USED:
+                foreground = model._muted_foreground.color()
+            else:
+                foreground = option.palette.color(QPalette.Text)
+        local_option = QStyleOptionViewItem(option)
+        local_option.rect = pixmap.rect()
+        self._draw_text(painter, local_option, font, foreground)
+        painter.end()
+        return pixmap
 
 
 # ---- 画像 ----
@@ -455,13 +605,46 @@ class FrameImage(QLabel):
         self.setStyleSheet(f"background: #11161d; border-radius: 6px; color: {C_MUTED};")
         self._pixmap: Optional[QPixmap] = None
         self._steering_deg = 0.0
+        self._request_id = 0
+        self._cache: OrderedDict[str, QPixmap] = OrderedDict()
+        self._pool = QThreadPool(self)
+        self._pool.setMaxThreadCount(2)
 
     def show_frame(self, path: Optional[Path], steering_deg: float) -> None:
+        self._request_id += 1
+        request_id = self._request_id
         self._steering_deg = steering_deg
-        self._pixmap = QPixmap(str(path)) if path and path.exists() else None
-        if self._pixmap is None or self._pixmap.isNull():
+        cache_key = str(path) if path else ""
+        cached = self._cache.get(cache_key)
+        if cached is not None:
+            self._cache.move_to_end(cache_key)
+            self._pixmap = cached
+            self._render()
+            return
+        if not path:
             self._pixmap = None
             self.setText("画像がありません")
+            self.setPixmap(QPixmap())
+            return
+        self._pixmap = None
+        self.setText("画像を読み込み中…")
+        worker = _ImageLoadTask(request_id, path, self._image_loaded)
+        self._pool.start(worker)
+
+    def _image_loaded(self, request_id: int, path: str, image: QImage) -> None:
+        if image.isNull():
+            if request_id == self._request_id:
+                self.setText("画像を読み込めません")
+            return
+        pixmap = QPixmap.fromImage(image)
+        self._cache[path] = pixmap
+        self._cache.move_to_end(path)
+        while len(self._cache) > 32:
+            self._cache.popitem(last=False)
+        if request_id != self._request_id:
+            return
+        self._pixmap = pixmap
+        self.setText("")
         self._render()
 
     def resizeEvent(self, event) -> None:
@@ -484,6 +667,25 @@ class FrameImage(QLabel):
         painter.drawLine(base, tip)
         painter.end()
         self.setPixmap(scaled)
+
+
+class _ImageLoadSignals(QObject):
+    loaded = Signal(int, str, QImage)
+
+
+class _ImageLoadTask(QRunnable):
+    def __init__(self, request_id: int, path: Path, callback):
+        super().__init__()
+        self.request_id = request_id
+        self.path = path
+        self.signals = _ImageLoadSignals()
+        self.signals.loaded.connect(callback)
+
+    def run(self) -> None:
+        reader = QImageReader(str(self.path))
+        reader.setAutoTransform(True)
+        image = reader.read()
+        self.signals.loaded.emit(self.request_id, str(self.path), image)
 
 
 # ---- セッションの流れ ----
@@ -529,12 +731,19 @@ class SessionTimeline(QWidget):
         self.selection: Optional[Tuple[int, int]] = None
         self._drag_start: Optional[int] = None
         self._hover: Optional[int] = None
+        self._base_pixmap: Optional[QPixmap] = None
+        self._base_cache: OrderedDict[Tuple[int, int, int], QPixmap] = OrderedDict()
 
     def set_session(self, table: FrameTable, session_index: int) -> None:
         self.table = table
         self.session_index = session_index
-        self.rows = [r for r, (s, _) in enumerate(table.keys) if s == session_index]
+        self.rows = table.rows_by_session[session_index]
         self.selection = None
+        self._base_pixmap = self._base_cache.get(
+            (session_index, self.width(), self.height())
+        )
+        if self._base_pixmap is not None:
+            self._base_cache.move_to_end((session_index, self.width(), self.height()))
         self.update()
 
     def set_current(self, position: Optional[int]) -> None:
@@ -544,6 +753,16 @@ class SessionTimeline(QWidget):
     def set_selection(self, selection: Optional[Tuple[int, int]]) -> None:
         self.selection = selection
         self.update()
+
+    def invalidate(self) -> None:
+        """Drop the static session drawing after labels or frame data change."""
+        self._base_cache.clear()
+        self._base_pixmap = None
+        self.update()
+
+    def resizeEvent(self, event) -> None:
+        self._base_pixmap = None
+        super().resizeEvent(event)
 
     def _plot_rect(self) -> QRectF:
         # 右に、舵角の線の向きの文字を置く余白を残す
@@ -561,30 +780,72 @@ class SessionTimeline(QWidget):
         return min(max(p, 0), max(0, n - 1))
 
     def paintEvent(self, event) -> None:
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing)
-        rect = self._plot_rect()
-        painter.fillRect(self.rect(), QColor(C_SURFACE))
         if not self.rows or self.table is None:
+            painter = QPainter(self)
+            painter.fillRect(self.rect(), QColor(C_SURFACE))
             painter.setPen(QColor(C_MUTED))
             painter.drawText(
-                rect, Qt.AlignCenter, "フレームを選ぶと、そのセッションの流れを表示します"
+                self._plot_rect(),
+                Qt.AlignCenter,
+                "フレームを選ぶと、そのセッションの流れを表示します",
             )
             return
+        cache_key = (self.session_index, self.width(), self.height())
+        if self._base_pixmap is None:
+            self._base_pixmap = self._base_cache.get(cache_key)
+        if self._base_pixmap is None:
+            self._base_pixmap = self._render_base()
+            self._base_cache[cache_key] = self._base_pixmap
+            self._base_cache.move_to_end(cache_key)
+            while len(self._base_cache) > 8:
+                self._base_cache.popitem(last=False)
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.drawPixmap(0, 0, self._base_pixmap)
+        rect = self._plot_rect()
+        band_top = self.BAND_TOP
+        if self._hover is not None:
+            hover = self.table.rows[self.rows[self._hover]]
+            text = f"#{hover['index']}  {hover['time_s']} 秒  {hover['steering_deg']}°"
+            painter.setPen(QColor(C_MUTED))
+            painter.drawText(
+                QRectF(rect.left() + 190, 0, rect.width() - 190, 18), Qt.AlignLeft, text
+            )
+
+        if self.selection is not None:
+            a, b = self.selection
+            x0, x1 = self._x(a), self._x(b + 1)
+            painter.fillRect(
+                QRectF(x0, band_top - 6, max(2.0, x1 - x0), rect.bottom() - band_top + 6),
+                QColor(47, 111, 222, 45),
+            )
+            painter.setPen(QPen(QColor(C_ACCENT), 1))
+            painter.drawRect(
+                QRectF(x0, band_top - 6, max(2.0, x1 - x0), rect.bottom() - band_top + 6)
+            )
+        if self.current is not None:
+            x = self._x(self.current + 0.5)
+            painter.setPen(QPen(QColor(C_TEXT), 2))
+            painter.drawLine(QPointF(x, band_top - 6), QPointF(x, rect.bottom()))
+
+    def _render_base(self) -> QPixmap:
+        """Render session-sized chart content once; selection and hover stay cheap."""
+        pixmap = QPixmap(self.size())
+        pixmap.fill(QColor(C_SURFACE))
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = self._plot_rect()
         rows = [self.table.rows[r] for r in self.rows]
         n = len(rows)
-        width = int(rect.width())
-
-        # 見出し
+        width = max(1, int(rect.width()))
         session = self.table.sessions[self.session_index].session_dir.name
         painter.setPen(QColor(C_MUTED))
-        text = f"{session}  ・  {n:,} フレーム  ・  ドラッグで範囲を選択"
-        if self._hover is not None:
-            hover = rows[self._hover]
-            text += f"  ・  #{hover['index']}  {hover['time_s']} 秒  {hover['steering_deg']}°"
-        painter.drawText(QRectF(rect.left(), 0, rect.width(), 18), Qt.AlignLeft, text)
-
-        # 状態の帯とタグの印（1ピクセルに複数のフレームが入る時は強い状態を描く）
+        painter.drawText(
+            QRectF(rect.left(), 0, rect.width(), 18),
+            Qt.AlignLeft,
+            f"{session}  ・  {n:,} フレーム  ・  ドラッグで範囲を選択",
+        )
         band_top = self.BAND_TOP
         for x in range(width):
             lo = int(x * n / width)
@@ -592,17 +853,15 @@ class SessionTimeline(QWidget):
             chunk = rows[lo:hi]
             if not chunk:
                 continue
-            status = max((frame_status(r) for r in chunk), key=_STATUS_ORDER.index)
+            status = max((frame_status(row) for row in chunk), key=_STATUS_ORDER.index)
             painter.fillRect(
                 QRectF(rect.left() + x, band_top, 1, self.BAND_H), QColor(_STATUS_COLOR[status])
             )
-            if any(r["tags"] for r in chunk):
+            if any(row["tags"] for row in chunk):
                 painter.fillRect(
                     QRectF(rect.left() + x, band_top - self.TAG_H - 1, 1, self.TAG_H),
                     QColor(C_ACCENT),
                 )
-
-        # 舵角の線（上が右、下が左）
         trace_top = band_top + self.BAND_H + 8
         trace_h = rect.bottom() - trace_top
         mid = trace_top + trace_h / 2
@@ -620,26 +879,10 @@ class SessionTimeline(QWidget):
         painter.setPen(QPen(QColor("#5b6b7f"), 1.2))
         painter.drawPath(path)
         painter.setPen(QColor(C_MUTED))
-        # 線と重ならないよう、右端の外側に置く
         painter.drawText(QRectF(rect.right() + 6, trace_top - 2, 40, 14), Qt.AlignLeft, "右 ↑")
         painter.drawText(QRectF(rect.right() + 6, rect.bottom() - 13, 40, 14), Qt.AlignLeft, "左 ↓")
-
-        # 選んだ範囲と今のフレーム
-        if self.selection is not None:
-            a, b = self.selection
-            x0, x1 = self._x(a), self._x(b + 1)
-            painter.fillRect(
-                QRectF(x0, band_top - 6, max(2.0, x1 - x0), rect.bottom() - band_top + 6),
-                QColor(47, 111, 222, 45),
-            )
-            painter.setPen(QPen(QColor(C_ACCENT), 1))
-            painter.drawRect(
-                QRectF(x0, band_top - 6, max(2.0, x1 - x0), rect.bottom() - band_top + 6)
-            )
-        if self.current is not None:
-            x = self._x(self.current + 0.5)
-            painter.setPen(QPen(QColor(C_TEXT), 2))
-            painter.drawLine(QPointF(x, band_top - 6), QPointF(x, rect.bottom()))
+        painter.end()
+        return pixmap
 
     def mousePressEvent(self, event) -> None:
         if self.rows and event.button() == Qt.LeftButton:
@@ -694,7 +937,12 @@ class ShareDelegate(QStyledItemDelegate):
 
 
 class DataViewer(QMainWindow):
-    def __init__(self, data_dirs: Sequence[Path], settings: Optional[Settings] = None):
+    def __init__(
+        self,
+        data_dirs: Sequence[Path],
+        settings: Optional[Settings] = None,
+        table: Optional[FrameTable] = None,
+    ):
         super().__init__()
         self.setWindowTitle("PiCar-X 走行データ")
         self.resize(1600, 960)
@@ -704,12 +952,13 @@ class DataViewer(QMainWindow):
         )
         self.data_dirs = [Path(d) for d in data_dirs]
         self.label_settings = settings or load_label_settings()
-        self.store = AnnotationStore()
+        self.store = table.store if table is not None else AnnotationStore()
         self.undo_stack: List[List[Tuple[Any, str, Optional[Dict[str, Any]]]]] = []
-        self.table = FrameTable(self.data_dirs, self.label_settings, self.store)
+        self.table = table or FrameTable(self.data_dirs, self.label_settings, self.store)
         self.model = FrameModel(self.table)
         self.range_start: Optional[int] = None  # I で決めた範囲の始まり（表の行）
         self._stats_drill: Optional[Tuple[str, Optional[str]]] = None
+        self._selection_update_pending = False
 
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_frames_tab(), "フレーム")
@@ -799,10 +1048,13 @@ class DataViewer(QMainWindow):
         # 表
         self.view = QTableView()
         self.view.setModel(self.model)
+        self.view.setItemDelegate(FastFrameDelegate(self.view))
         # 並べ替えを有効にすると今の見出しで並べ替わるので、最初は記録の順のままにする
         self.view.horizontalHeader().setSortIndicator(-1, Qt.AscendingOrder)
         self.view.setSortingEnabled(True)
         self.view.setShowGrid(False)
+        self.view.setWordWrap(False)
+        self.view.setTextElideMode(Qt.ElideRight)
         self.view.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.view.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.view.verticalHeader().setVisible(False)
@@ -815,8 +1067,8 @@ class DataViewer(QMainWindow):
         header.customContextMenuRequested.connect(self._column_menu)
         for key, width in (("session", 130), ("warnings", 190), ("tags", 120), ("training", 110)):
             header.resizeSection([c.key for c in self.model.columns].index(key), width)
-        self.view.selectionModel().selectionChanged.connect(self._on_selection)
-        self.view.selectionModel().currentRowChanged.connect(self._on_selection)
+        self.view.selectionModel().selectionChanged.connect(self._queue_selection_update)
+        self.view.selectionModel().currentRowChanged.connect(self._queue_selection_update)
 
         self.timeline = SessionTimeline()
         self.timeline.range_selected.connect(self.select_frame_range)
@@ -1108,11 +1360,13 @@ class DataViewer(QMainWindow):
         self._after_filter()
 
     def _after_filter(self) -> None:
-        rows = self.visible_rows()
-        used = sum(1 for r in rows if r["training"] == USED)
-        warned = sum(1 for r in rows if r["warnings"])
+        used = warned = 0
+        for row_index in self.model.visible:
+            row = self.table.rows[row_index]
+            used += row["training"] == USED
+            warned += bool(row["warnings"])
         self.count_label.setText(
-            f"{len(rows):,} / {len(self.table):,} フレーム ・ 学習に使う {used:,}"
+            f"{self.model.rowCount():,} / {len(self.table):,} フレーム ・ 学習に使う {used:,}"
             f" ・ 注意 {warned:,}"
         )
         if self.tabs.currentIndex() == 1:
@@ -1130,6 +1384,17 @@ class DataViewer(QMainWindow):
     def current_table_row(self) -> Optional[int]:
         index = self.view.currentIndex()
         return self.model.table_row(index.row()) if index.isValid() else None
+
+    def _queue_selection_update(self, *_) -> None:
+        """Coalesce Qt's selection/current-row signals into one detail/image refresh."""
+        if self._selection_update_pending:
+            return
+        self._selection_update_pending = True
+        QTimer.singleShot(0, self._flush_selection_update)
+
+    def _flush_selection_update(self) -> None:
+        self._selection_update_pending = False
+        self._on_selection()
 
     def _on_selection(self, *_) -> None:
         selected = self.selected_table_rows()
@@ -1194,7 +1459,7 @@ class DataViewer(QMainWindow):
     def timeline_rows(self, session_index: int) -> List[int]:
         if self.timeline.session_index == session_index and self.timeline.table is self.table:
             return self.timeline.rows
-        return [r for r, (s, _) in enumerate(self.table.keys) if s == session_index]
+        return self.table.rows_by_session[session_index]
 
     def _show_selection_on_timeline(self, selected: List[int], session_index: int) -> None:
         positions = [
@@ -1301,7 +1566,7 @@ class DataViewer(QMainWindow):
         self.table.refresh(rows)
         self.model.refresh_rows(rows)
         self._refresh_tag_choices()
-        self.timeline.update()
+        self.timeline.invalidate()
         self._on_selection()
         self._after_filter()
 
@@ -1638,10 +1903,12 @@ class DataViewer(QMainWindow):
         self.range_start = None
         self.table = table
         self.model.table = table
+        self.model._display_cache.clear()
+        self.view.itemDelegate().clear_cache()
         self.model.apply()
         self.timeline.session_index = None
         self.timeline.rows = []
-        self.timeline.update()
+        self.timeline.invalidate()
         self._update_source_label()
         self._fill_filter_values()
         self._refresh_tag_choices()
@@ -1665,6 +1932,58 @@ def load_label_settings(config: Path = TRAIN_CONFIG) -> Settings:
         return Settings.from_params(tomllib.load(f))
 
 
+class DataTableLoader(QThread):
+    """Read and prepare a full dataset off the GUI thread."""
+
+    loaded = Signal(object)
+    failed = Signal(str)
+
+    def __init__(self, data_dirs: Sequence[Path], settings: Settings, parent=None):
+        super().__init__(parent)
+        self.data_dirs = list(data_dirs)
+        self.settings = settings
+
+    def run(self) -> None:
+        try:
+            store = AnnotationStore()
+            table = FrameTable(self.data_dirs, self.settings, store)
+        except (OSError, ValueError) as error:
+            self.failed.emit(str(error))
+        else:
+            self.loaded.emit(table)
+
+
+class ViewerStartup(QMainWindow):
+    """Responsive loading surface that hands the prepared table to the viewer."""
+
+    def __init__(self, data_dirs: Sequence[Path]):
+        super().__init__()
+        self.setWindowTitle("PiCar-X 走行データ")
+        self.resize(520, 180)
+        self.viewer: Optional[DataViewer] = None
+        panel = QWidget(self)
+        layout = QVBoxLayout(panel)
+        layout.addWidget(QLabel("走行データを読み込んでいます。件数により少し時間がかかります。"))
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 0)
+        self.progress.setTextVisible(False)
+        layout.addWidget(self.progress)
+        self.setCentralWidget(panel)
+        self.loader = DataTableLoader(data_dirs, load_label_settings(), self)
+        self.loader.loaded.connect(self._on_loaded)
+        self.loader.failed.connect(self._on_failed)
+        self.loader.start()
+
+    def _on_loaded(self, table: FrameTable) -> None:
+        self.viewer = DataViewer(self.loader.data_dirs, self.loader.settings, table=table)
+        self.viewer.show()
+        self.close()
+
+    def _on_failed(self, message: str) -> None:
+        QMessageBox.critical(self, "読み込めません", message)
+        self.close()
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="View, label and summarize driving data")
     parser.add_argument(
@@ -1684,8 +2003,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     app = QApplication.instance() or QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setStyleSheet(STYLE)
-    viewer = DataViewer(dirs)
-    viewer.show()
+    startup = ViewerStartup(dirs)
+    startup.show()
     return app.exec()
 
 

@@ -10,7 +10,7 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PySide6.QtCore import QEvent  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
+from PySide6.QtWidgets import QApplication, QGroupBox, QLabel, QPushButton, QScrollArea  # noqa: E402
 
 from src.config import ModelPreset  # noqa: E402
 from src.gui.app import PicarxMainWindow  # noqa: E402
@@ -73,6 +73,41 @@ def wait_until(predicate, app, timeout=2.0):
             return True
         time.sleep(0.01)
     return False
+
+
+def test_camera_controls_do_not_overlap_in_scrollable_column(window):
+    win, _, app = window
+    scroll = win.findChild(QScrollArea, "controlColumnScrollArea")
+    camera = win.findChild(QGroupBox, "cameraGroup")
+    preview = win.findChild(QLabel, "cameraPreview")
+    snapshot = win.findChild(QPushButton, "snapshotButton")
+    groups = [
+        win.findChild(QGroupBox, name)
+        for name in (
+            "modelSelectionGroup",
+            "cameraGroup",
+            "sensorGroup",
+            "manualControlsGroup",
+        )
+    ]
+    assert scroll is not None and camera is not None
+    assert preview is not None and snapshot is not None
+    assert all(groups)
+
+    win.resize(980, 700)
+    win.show()
+    app.processEvents()
+    assert not preview.geometry().intersects(snapshot.geometry())
+    assert preview.geometry().bottom() < snapshot.geometry().top()
+    for index, first in enumerate(groups):
+        for second in groups[index + 1 :]:
+            assert not first.geometry().intersects(second.geometry())
+    assert scroll.verticalScrollBar().maximum() > 0
+
+    win.resize(1180, 820)
+    app.processEvents()
+    assert not preview.geometry().intersects(snapshot.geometry())
+    assert preview.geometry().bottom() < snapshot.geometry().top()
 
 
 def test_emergency_stop_reaches_robot_while_agent_is_busy(window):

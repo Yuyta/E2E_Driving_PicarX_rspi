@@ -11,6 +11,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
+    QAbstractScrollArea,
     QApplication,
     QComboBox,
     QGridLayout,
@@ -20,6 +21,7 @@ from PySide6.QtWidgets import (
     QLineEdit,
     QMainWindow,
     QPushButton,
+    QScrollArea,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -28,6 +30,7 @@ from PySide6.QtWidgets import (
 from src.agents.stop_intent import StopIntent, parse_stop_intent
 from src.config import ModelPreset, settings
 from src.gui.async_runner import AsyncRunner
+from src.gui.theme import APP_STYLE
 from src.memory.events import EventRecorder
 from src.memory.store import get_memory_store
 from src.metrics import turn_timing
@@ -53,7 +56,7 @@ class PicarxMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("PiCar-X Agentic AI Controller")
-        self.resize(950, 700)
+        self.resize(1180, 820)
 
         self.client = PicarxClient()
         self._speaker = Speaker(self.client, on_error=self._on_speech_stop_failed)
@@ -82,6 +85,8 @@ class PicarxMainWindow(QMainWindow):
         self._warm_up_vision()
 
     def _init_ui(self):
+        self.setStyleSheet(APP_STYLE)
+        self.setMinimumSize(980, 700)
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
@@ -91,6 +96,7 @@ class PicarxMainWindow(QMainWindow):
 
         # 1. モデル選択セクション (4種モデル切り替え)
         model_group = QGroupBox("LLM Model Selection (4 Presets)")
+        model_group.setObjectName("modelSelectionGroup")
         model_layout = QHBoxLayout(model_group)
         model_layout.addWidget(QLabel("Active Model:"))
 
@@ -107,20 +113,26 @@ class PicarxMainWindow(QMainWindow):
 
         # 2. カメラプレビューエリア
         camera_group = QGroupBox("Camera Stream / Snapshot")
+        camera_group.setObjectName("cameraGroup")
         camera_layout = QVBoxLayout(camera_group)
         self.camera_label = QLabel("Camera Connecting...")
+        self.camera_label.setObjectName("cameraPreview")
         self.camera_label.setAlignment(Qt.AlignCenter)
         self.camera_label.setScaledContents(True)
-        self.camera_label.setStyleSheet("background-color: #222; color: #aaa; min-height: 240px;")
+        self.camera_label.setMinimumHeight(200)
+        self.camera_label.setMaximumHeight(280)
+        self.camera_label.setStyleSheet("background-color: #222; color: #aaa;")
         camera_layout.addWidget(self.camera_label)
 
         snap_btn = QPushButton("Capture On-Demand Snapshot (Save Tokens)")
+        snap_btn.setObjectName("snapshotButton")
         snap_btn.clicked.connect(self._on_snapshot_clicked)
         camera_layout.addWidget(snap_btn)
         left_layout.addWidget(camera_group)
 
         # 3. センサー状態モニタ
         sensor_group = QGroupBox("Telemetry & Sensor Monitor")
+        sensor_group.setObjectName("sensorGroup")
         sensor_layout = QGridLayout(sensor_group)
         sensor_layout.addWidget(QLabel("Obstacle Distance:"), 0, 0)
         self.lbl_distance = QLabel("-- cm")
@@ -138,6 +150,7 @@ class PicarxMainWindow(QMainWindow):
 
         # 4. 手動制御パネル (緊急停止含む)
         control_group = QGroupBox("Manual Vehicle Controls")
+        control_group.setObjectName("manualControlsGroup")
         grid = QGridLayout(control_group)
 
         btn_forward = QPushButton("▲ Forward")
@@ -178,7 +191,16 @@ class PicarxMainWindow(QMainWindow):
         grid.addWidget(btn_calibrate, 5, 0, 1, 3)
         left_layout.addWidget(control_group)
 
-        main_layout.addLayout(left_layout, 1)
+        left_content = QWidget()
+        left_content.setLayout(left_layout)
+        left_scroll = QScrollArea()
+        left_scroll.setObjectName("controlColumnScrollArea")
+        left_scroll.setFrameShape(QScrollArea.NoFrame)
+        left_scroll.setSizeAdjustPolicy(QAbstractScrollArea.AdjustIgnored)
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        left_scroll.setWidget(left_content)
+        main_layout.addWidget(left_scroll, 1)
 
         # 右カラム: チャット対話 & エージェントログ
         right_layout = QVBoxLayout()
@@ -187,6 +209,8 @@ class PicarxMainWindow(QMainWindow):
 
         self.chat_history = QTextEdit()
         self.chat_history.setReadOnly(True)
+        # 会話・エージェントログの肥大化で、長時間利用時の再描画が遅くなるのを防ぐ。
+        self.chat_history.document().setMaximumBlockCount(4000)
         self.chat_history.setPlaceholderText(
             "Agentic AIの推論過程や対話ログがここに表示されます..."
         )

@@ -35,6 +35,7 @@ from src.e2e.motion.monitor import (
     describe,
     record_motion_event,
 )
+from src.gui.theme import APP_STYLE
 from src.models import DRIVE_SPEED, MIN_MOVING_SPEED, DriveDirection, RobotStatus
 from src.picarx_client.client import PicarxClient
 
@@ -88,7 +89,7 @@ class CameraWorker(QThread):
     以前は静止画と超音波を毎回別々に取りに行っていて、10fps に届かなかった（M3）。
     """
 
-    frame_received = Signal(bytes, int, object)  # JPEG、配信の通し番号、RobotStatus か None
+    frame_received = Signal(bytes, int, object, object)  # JPEG、番号、状態、デコード済み画像
 
     def __init__(self, client: PicarxClient):
         super().__init__()
@@ -108,8 +109,18 @@ class CameraWorker(QThread):
                     status = self.client.get_status_sync()
                 except Exception:
                     status = None
+                # JPEG の展開はフレームごとに重いため、Qt の UI スレッドでは行わない。
+                # OpenCV がない環境では、受信側で Qt の JPEG デコーダーへフォールバックする。
+                img = None
+                if cv2 is not None and np is not None:
+                    try:
+                        img = cv2.imdecode(
+                            np.frombuffer(frame.jpeg, np.uint8), cv2.IMREAD_COLOR
+                        )
+                    except cv2.error:
+                        img = None
                 if self.running:
-                    self.frame_received.emit(frame.jpeg, frame.seq, status)
+                    self.frame_received.emit(frame.jpeg, frame.seq, status, img)
         finally:
             stream.stop()
 
@@ -122,7 +133,7 @@ class E2ECollectorWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("PiCar-X E2E Data Collector")
-        self.resize(850, 680)
+        self.resize(1180, 800)
 
         # 既存クライアントの再利用
         self.client = PicarxClient()
@@ -187,6 +198,8 @@ class E2ECollectorWindow(QMainWindow):
             self.lbl_pad.setText("pygame-ce なし（uv sync --extra e2e）")
 
     def _init_ui(self):
+        self.setStyleSheet(APP_STYLE)
+        self.setMinimumSize(980, 700)
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
         main_layout = QHBoxLayout(central_widget)
@@ -199,7 +212,7 @@ class E2ECollectorWindow(QMainWindow):
         self.camera_label = QLabel("Connecting to Camera...")
         self.camera_label.setAlignment(Qt.AlignCenter)
         self.camera_label.setScaledContents(True)
-        self.camera_label.setMinimumSize(480, 360)
+        self.camera_label.setMinimumSize(320, 240)
         self.camera_label.setStyleSheet(
             "background-color: #111; color: #888; border: 2px solid #444;"
         )
@@ -218,7 +231,9 @@ class E2ECollectorWindow(QMainWindow):
         self.lbl_rec_count = QLabel("Saved: 0 frames")
         self.lbl_rec_count.setStyleSheet("font-size: 14px; font-weight: bold;")
         rec_layout.addWidget(self.lbl_rec_count)
+        rec_group.setMaximumHeight(100)
         left_layout.addWidget(rec_group)
+        left_layout.addStretch(1)
 
         main_layout.addLayout(left_layout, stretch=3)
 
@@ -268,6 +283,7 @@ class E2ECollectorWindow(QMainWindow):
         self.spin_speed.setValue(DRIVE_SPEED)
         self.spin_speed.valueChanged.connect(self._on_speed_changed)
         speed_layout.addWidget(self.spin_speed)
+        speed_group.setMaximumHeight(100)
         right_layout.addWidget(speed_group)
 
         # 操作ガイド
@@ -498,8 +514,10 @@ class E2ECollectorWindow(QMainWindow):
         except Exception as exc:
             self.lbl_dist.setText(f"E-STOP RESET FAILED: {exc}")
 
-    @Slot(bytes, int, object)
-    def _on_frame_received(self, img_bytes: bytes, seq: int, status: Optional[RobotStatus]):
+    @Slot(bytes, int, object, object)
+    def _on_frame_received(
+        self, img_bytes: bytes, seq: int, status: Optional[RobotStatus], img=None
+    ):
         now = time.time()
         sensors = sensor_fields(status)
         distance_cm = sensors["distance_cm"]
@@ -509,13 +527,15 @@ class E2ECollectorWindow(QMainWindow):
             self.lbl_dist.setText("far")
         self._update_rate(now)
 
-        qimg = QImage()
-        if qimg.loadFromData(img_bytes, "JPEG"):
+        if img is not None:
+            height, width = img.shape[:2]
+            qimg = QImage(
+                img.data, width, height, img.strides[0], QImage.Format_BGR888
+            ).copy()
+        else:
+            qimg = QImage.fromData(img_bytes, "JPEG")
+        if not qimg.isNull():
             self.camera_label.setPixmap(QPixmap.fromImage(qimg))
-
-        img = None
-        if cv2 is not None and np is not None:
-            img = cv2.imdecode(np.frombuffer(img_bytes, np.uint8), cv2.IMREAD_COLOR)
 
         update = None
         if img is not None:
