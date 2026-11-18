@@ -446,8 +446,10 @@ Raspberry Pi に SSH 接続し、送信されたバイナリを実行します�
 ```powershell
 cd <project_root>\python
 uv sync --extra dev
-uv run python -m src.gui.app
+uv run python -m src.gui.launcher
 ```
+
+統合ランチャーは会話・手動操作、E2E データ収集と確認、学習・評価、車体チェック、走行ツールを用途別に表示する。既存ツールは個別プロセスで起動し、標準出力とエラーをランチャーのログに表示する。車体を動かす走行ツールは起動前に確認を求める。会話・手動操作GUIを直接起動する場合は `uv run python -m src.gui.app` を使う。
 
 ### 10.3 接続確認
 

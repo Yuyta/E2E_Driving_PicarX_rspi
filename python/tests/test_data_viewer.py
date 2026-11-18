@@ -174,6 +174,7 @@ def test_quick_filter_shows_frames_with_warnings(app, tmp_path):
 
 
 def test_range_selection_from_the_timeline_and_marks(viewer):
+    assert viewer.table.rows_by_session == [[0, 1, 2], [3, 4]]
     viewer.select_frame_range(0, 0, 2)  # 1つ目のセッションの3フレーム
     assert viewer.selected_table_rows() == [0, 1, 2]
     assert viewer.timeline.selection == (0, 2)
