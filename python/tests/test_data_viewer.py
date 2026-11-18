@@ -5,7 +5,7 @@ import os
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import pytest  # noqa: E402
-from PySide6.QtCore import QItemSelectionModel, QSettings, Qt  # noqa: E402
+from PySide6.QtCore import QEvent, QItemSelectionModel, QSettings, Qt  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from src.e2e.data_viewer import Condition, DataViewer  # noqa: E402
@@ -21,6 +21,13 @@ def app(tmp_path):
     return QApplication.instance() or QApplication([])
 
 
+def cleanup_widget(window, app):
+    window.close()
+    window.deleteLater()
+    app.sendPostedEvents(None, QEvent.DeferredDelete)
+    app.processEvents()
+
+
 @pytest.fixture
 def viewer(app, tmp_path):
     data = tmp_path / "data"
@@ -28,7 +35,7 @@ def viewer(app, tmp_path):
     make_session(data, "20261116_130000", [moving(-1.0, 20), moving(0.0)])
     window = DataViewer([data / "raw"], Settings(turn_intent=False))
     yield window
-    window.close()
+    cleanup_widget(window, app)
 
 
 def select(viewer, view_rows):
@@ -139,7 +146,7 @@ def test_new_columns_follow_their_default_after_saved_settings(app, viewer, tmp_
         assert not again.view.horizontalHeader().isSectionHidden(keys.index("warnings"))
         assert again.view.horizontalHeader().isSectionHidden(keys.index("battery_v"))
     finally:
-        again.close()
+        cleanup_widget(again, app)
 
 
 def test_hidden_columns_are_remembered(app, viewer, tmp_path):
@@ -149,7 +156,7 @@ def test_hidden_columns_are_remembered(app, viewer, tmp_path):
     try:
         assert again.view.horizontalHeader().isSectionHidden(col)
     finally:
-        again.close()
+        cleanup_widget(again, app)
 
 
 def test_quick_filter_shows_frames_with_warnings(app, tmp_path):
@@ -163,7 +170,7 @@ def test_quick_filter_shows_frames_with_warnings(app, tmp_path):
         window.quick_filter.setCurrentIndex(0)
         assert window.model.rowCount() == 3
     finally:
-        window.close()
+        cleanup_widget(window, app)
 
 
 def test_range_selection_from_the_timeline_and_marks(viewer):
