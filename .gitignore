@@ -29,6 +29,7 @@
 *.png
 *.heic
 *.log
+!rust/tests/fixtures/*.jpg
 
 # Local-only documents (articles and temporary build notes)
 /articles/
