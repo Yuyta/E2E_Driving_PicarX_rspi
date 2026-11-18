@@ -19,6 +19,8 @@ IMAGE_NAME   := picar-builder
 TARGET       := aarch64-unknown-linux-gnu
 PROJECT_ROOT := $(shell which cygpath > /dev/null 2>&1 && cygpath -w $(PARENT_DIR) || echo "$(PARENT_DIR)")
 APP_NAME     := picar-x-rust
+# 走行サーバーが起動時と run.json に出すビルドの印（変更が残っていれば -dirty）
+BUILD_COMMIT := $(shell git describe --always --dirty 2>/dev/null || echo unknown)
 
 # deploy
 RPI_HOST   ?= pi@raspberrypi.local
@@ -42,6 +44,7 @@ build:
 		-v cargo-cache:/usr/local/cargo/registry \
 		-v cargo-git:/usr/local/cargo/git \
 		-e RUSTFLAGS="-C target-cpu=$(TARGET_CPU)" \
+		-e PICARX_BUILD_COMMIT="$(BUILD_COMMIT)" \
 		$(IMAGE_NAME) \
 		cargo build --target $(TARGET) --release
 

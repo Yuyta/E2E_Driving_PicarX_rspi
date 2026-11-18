@@ -28,6 +28,9 @@ pub const CALIBRATION_SAMPLES: usize = 15;
 /// 床がこの値より暗いと段差と区別できないので校正を拒否する
 const MIN_FLOOR_ADC: u16 = 60;
 const CLIFF_THRESHOLD_PERCENT: u32 = 35;
+/// 校正の時、一番明るいセンサーのこの割合（%）より暗いセンサーがあれば、コードや暗い物の上で
+/// 校正したとみなして断る（2026-11-15、右だけコードの上で校正し、右の閾値が 77 になった）
+const MIN_SENSOR_RATIO_PERCENT: u32 = 40;
 /// 明るい床で校正しても、暗い敷物を段差と誤認しないための上限。暗い床では実機で要確認
 const MAX_CLIFF_THRESHOLD: u16 = 300;
 
@@ -165,6 +168,14 @@ impl CliffCalibration {
             baseline[sensor] = median;
             let scaled = u32::from(median) * CLIFF_THRESHOLD_PERCENT / 100;
             thresholds[sensor] = scaled.min(u32::from(MAX_CLIFF_THRESHOLD)) as u16;
+        }
+        let brightest = u32::from(*baseline.iter().max().unwrap_or(&0));
+        for (sensor, &value) in baseline.iter().enumerate() {
+            if u32::from(value) * 100 < brightest * MIN_SENSOR_RATIO_PERCENT {
+                return Err(format!(
+                    "床センサー{sensor}の値 ({value}) が他のセンサー ({brightest}) よりずっと低いです。                     コードや暗い物の上にないか確かめて、何もない床の上に置いてください"
+                ));
+            }
         }
         Ok(Self {
             baseline,
@@ -787,10 +798,10 @@ mod tests {
 
     #[test]
     fn calibration_scales_per_sensor_and_caps_the_threshold() {
-        let cliff = CliffCalibration::from_samples(&[[100, 120, 1000]; CALIBRATION_SAMPLES])
+        let cliff = CliffCalibration::from_samples(&[[500, 600, 1000]; CALIBRATION_SAMPLES])
             .expect("floor values are valid");
-        assert_eq!(cliff.baseline, [100, 120, 1000]);
-        assert_eq!(cliff.thresholds, [35, 42, MAX_CLIFF_THRESHOLD]);
+        assert_eq!(cliff.baseline, [500, 600, 1000]);
+        assert_eq!(cliff.thresholds, [175, 210, MAX_CLIFF_THRESHOLD]);
     }
 
     #[test]
@@ -807,6 +818,16 @@ mod tests {
         assert!(CliffCalibration::from_samples(&[[8, 13, 11]; CALIBRATION_SAMPLES]).is_err());
         assert!(CliffCalibration::from_samples(&[[500, 500, 11]; CALIBRATION_SAMPLES]).is_err());
         assert!(CliffCalibration::from_samples(&[FLOOR; 3]).is_err());
+    }
+
+    #[test]
+    fn calibration_is_rejected_when_one_sensor_is_over_a_cord() {
+        // 2026-11-15 の走行で、右だけコードの上で校正した値
+        let error =
+            CliffCalibration::from_samples(&[[1053, 958, 221]; CALIBRATION_SAMPLES]).unwrap_err();
+        assert!(error.contains("床センサー2"), "{error}");
+        // 床の模様くらいの違いは受け付ける
+        assert!(CliffCalibration::from_samples(&[[1007, 1006, 991]; CALIBRATION_SAMPLES]).is_ok());
     }
 
     #[test]

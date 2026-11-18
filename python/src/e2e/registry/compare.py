@@ -49,27 +49,31 @@ def show_models(models_dir: str = "models"):
     reg = ModelRegistry(models_dir)
     models = reg.list_models()
 
-    print("\n" + "=" * 85)
+    print("\n" + "=" * 108)
     print("                      PiCar-X Model Registry & Benchmark")
-    print("=" * 85)
+    print("=" * 108)
 
     if not models:
         print(f"No trained models found in: {models_dir}")
-        print("=" * 85 + "\n")
+        print("=" * 108 + "\n")
         return
 
     header = (
         f"{'Model Version':<14} | {'Epochs':<6} | {'Batch':<5} | {'Val Loss':<9} | "
-        f"{'MAE (Norm)':<10} | {'MAE (Deg)':<10} | {'Artifacts':<10}"
+        f"{'MAE (Norm)':<10} | {'MAE (Deg)':<10} | {'Artifacts':<9} | {'Data':<8} | "
+        f"{'Commit':<8}"
     )
     print(header)
-    print("-" * 85)
+    print("-" * 108)
 
     for m in models:
         ev = m.get("evaluation", {})
-        has_norm = "steering_mae_normalized" in ev
-        mae_norm = f"{ev['steering_mae_normalized']:.4f}" if has_norm else "--"
-        mae_deg = f"±{ev['steering_mae_degrees']:.1f}°" if "steering_mae_degrees" in ev else "--"
+        # オフライン評価がなければ、学習の時の検証の値（metadata.json）を出す
+        val = m.get("validation_metrics", {})
+        norm = ev.get("steering_mae_normalized", val.get("steering_mae"))
+        deg = ev.get("steering_mae_degrees", val.get("steering_mae_deg"))
+        mae_norm = f"{norm:.4f}" if norm is not None else "--"
+        mae_deg = f"±{deg:.1f}°" if deg is not None else "--"
 
         artifacts = []
         if m.get("has_weights"):
@@ -78,7 +82,11 @@ def show_models(models_dir: str = "models"):
             artifacts.append("ONNX")
         art_str = "+".join(artifacts) if artifacts else "None"
 
-        val_loss = f"{m.get('best_val_loss', 0.0):.4f}" if "best_val_loss" in m else "--"
+        val_loss = f"{m['best_val_loss']:.4f}" if m.get("best_val_loss") is not None else "--"
+        # 来歴は M3 以降に学習したモデルだけが持つ
+        data_hash = (m.get("data", {}).get("fingerprint") or "--")[:8]
+        code = m.get("code", {})
+        commit = (code.get("commit") or "--")[:7] + ("*" if code.get("dirty") else "")
 
         row = (
             f"{m.get('model_version', 'unknown'):<14} | "
@@ -87,10 +95,13 @@ def show_models(models_dir: str = "models"):
             f"{val_loss:<9} | "
             f"{mae_norm:<10} | "
             f"{mae_deg:<10} | "
-            f"{art_str:<10}"
+            f"{art_str:<9} | "
+            f"{data_hash:<8} | "
+            f"{commit:<8}"
         )
         print(row)
-    print("=" * 85 + "\n")
+    print("Data: hash of the training samples. Commit: * means uncommitted changes.")
+    print("=" * 108 + "\n")
 
 
 def main():

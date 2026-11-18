@@ -6,7 +6,7 @@ PiCar-X Dataset Cleaner (Outlier & Bad-Data Filter)
 
 import argparse
 import json
-import shutil
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -16,9 +16,11 @@ from PIL import Image
 from torchvision import transforms
 
 try:
+    from ..intent import one_hot
     from ..training.dataset import DrivingDataset
     from ..training.model import SmallDrivingCNN
 except ImportError:
+    from src.e2e.intent import one_hot
     from src.e2e.training.dataset import DrivingDataset
     from src.e2e.training.model import SmallDrivingCNN
 
@@ -26,6 +28,14 @@ try:
     import onnxruntime as ort
 except ImportError:
     ort = None
+
+
+def _relative_or_absolute(target: Path, start: Path) -> str:
+    """出力先から元のセッションへの相対パス。ドライブが違うなど相対にできなければ絶対パス"""
+    try:
+        return Path(os.path.relpath(target, start)).as_posix()
+    except ValueError:
+        return target.as_posix()
 
 
 class DatasetCleaner:
@@ -67,6 +77,9 @@ class DatasetCleaner:
                 raise ImportError("onnxruntime is required to run ONNX models.")
             self.ort_session = ort.InferenceSession(str(self.model_path))
             self.input_name = self.ort_session.get_inputs()[0].name
+            self.has_intent_input = any(
+                i.name == "intent" for i in self.ort_session.get_inputs()
+            )
         else:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             self.torch_model = SmallDrivingCNN().to(self.device)
@@ -75,18 +88,21 @@ class DatasetCleaner:
             )
             self.torch_model.eval()
 
-    def predict(self, image: Image.Image) -> float:
-        """単一画像のステアリング角を推論 (-1.0 to 1.0)"""
+    def predict(self, image: Image.Image, intent: Optional[str] = None) -> float:
+        """単一画像のステアリング角を推論 (-1.0 to 1.0)。意図を省くと おまかせ"""
         tensor = self.transform(image).unsqueeze(0)
+        intent_tensor = torch.tensor([one_hot(intent)], dtype=torch.float32)
 
         if self.is_onnx:
             input_feed = {self.input_name: tensor.numpy()}
+            if self.has_intent_input:
+                input_feed["intent"] = intent_tensor.numpy()
             output = self.ort_session.run(None, input_feed)[0]
             return float(output[0][0])
         else:
             with torch.no_grad():
                 tensor = tensor.to(self.device)
-                output = self.torch_model(tensor)
+                output = self.torch_model(tensor, intent_tensor.to(self.device))
                 return float(output.cpu().item())
 
     def analyze_dataset(
@@ -106,7 +122,7 @@ class DatasetCleaner:
 
             try:
                 img = Image.open(img_path).convert("RGB")
-                pred_steering = self.predict(img)
+                pred_steering = self.predict(img, info["intent"])
             except Exception as e:
                 print(f"Warning: Failed to process {img_path}: {e}")
                 continue
@@ -117,6 +133,7 @@ class DatasetCleaner:
             item = {
                 "index": i,
                 "session_id": info["session_id"],
+                "session_dir": info["session_dir"],
                 "image_path": img_path,
                 "target_steering": target_steering,
                 "pred_steering": pred_steering,
@@ -174,8 +191,7 @@ class DatasetCleaner:
         データを検査・フィルタリングし、クリーンなデータセットとレポートを出力
         """
         out_p = Path(output_dir)
-        out_images_dir = out_p / "images"
-        out_images_dir.mkdir(parents=True, exist_ok=True)
+        out_p.mkdir(parents=True, exist_ok=True)
 
         analyzed = self.analyze_dataset(data_dir)
         clean_samples, bad_samples = self.filter_samples(analyzed)
@@ -193,22 +209,16 @@ class DatasetCleaner:
 
         print("\nWriting cleaned dataset...")
 
-        # クリーンデータの保存 (画像コピー & labels.jsonl 作成)
+        # クリーンデータの保存。画像は複製せず、元のセッションを参照する labels.jsonl だけを書く
+        # （元のデータを唯一の正とする。ROADMAP の M3）
         labels_file = out_p / "labels.jsonl"
         with open(labels_file, "w", encoding="utf-8") as f_clean:
-            for new_idx, item in enumerate(clean_samples):
-                src_img = item["image_path"]
-                # 衝突防止のため session_id をプレフィックスに付与
-                dst_frame_name = f"{item['session_id']}_{src_img.name}"
-                dst_img = out_images_dir / dst_frame_name
-
-                # 画像をコピー
-                if src_img.resolve() != dst_img.resolve():
-                    shutil.copy2(src_img, dst_img)
-
-                # レコード構築
+            for item in clean_samples:
                 new_record = dict(item["raw_record"])
-                new_record["frame"] = dst_frame_name
+                new_record["frame"] = Path(item["image_path"]).name
+                new_record["source_dir"] = _relative_or_absolute(
+                    Path(item["session_dir"]).resolve(), out_p.resolve()
+                )
                 new_record["cleaned_meta"] = {
                     "original_session": item["session_id"],
                     "pred_steering": round(item["pred_steering"], 4),

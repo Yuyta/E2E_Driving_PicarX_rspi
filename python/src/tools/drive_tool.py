@@ -1,14 +1,22 @@
 from langchain_core.tools import tool
 
-from src.models import DriveDirection
+from src.models import DRIVE_SPEED, MIN_MOVING_SPEED, DriveDirection
 from src.picarx_client.client import PicarxClient
 
 _client = PicarxClient()
 
 
+def _moving_speed(speed: int) -> int:
+    """0 以外で車輪が回らない遅さの速度は、動く最低の速度に上げる。"""
+    if 0 < speed < MIN_MOVING_SPEED:
+        return MIN_MOVING_SPEED
+    return speed
+
+
 @tool
-async def drive_forward(speed: int = 30, duration_ms: int = 500) -> str:
-    """PiCar-Xを前進させます。speedは0-100、duration_msは走行時間(ミリ秒)です。"""
+async def drive_forward(speed: int = DRIVE_SPEED, duration_ms: int = 500) -> str:
+    """PiCar-Xを前進させます。speedは40-100(40未満では車輪が回らないので40にします。普段は50)、duration_msは走行時間(ミリ秒)です。"""
+    speed = _moving_speed(speed)
     try:
         ok = await _client.drive_for(DriveDirection.FORWARD, speed, duration_ms)
         return f"前進成功 (速度:{speed}, 時間:{duration_ms}ms)" if ok else "前進失敗"
@@ -17,8 +25,9 @@ async def drive_forward(speed: int = 30, duration_ms: int = 500) -> str:
 
 
 @tool
-async def drive_backward(speed: int = 30, duration_ms: int = 500) -> str:
-    """PiCar-Xを後退させます。speedは0-100、duration_msは走行時間(ミリ秒)です。"""
+async def drive_backward(speed: int = DRIVE_SPEED, duration_ms: int = 500) -> str:
+    """PiCar-Xを後退させます。speedは40-100(40未満では車輪が回らないので40にします。普段は50)、duration_msは走行時間(ミリ秒)です。"""
+    speed = _moving_speed(speed)
     try:
         ok = await _client.drive_for(DriveDirection.BACKWARD, speed, duration_ms)
         return f"後退成功 (速度:{speed}, 時間:{duration_ms}ms)" if ok else "後退失敗"

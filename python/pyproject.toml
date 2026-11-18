@@ -38,6 +38,7 @@ e2e = [
     "onnxscript>=0.7.0",
     "onnxruntime>=1.17.0",
     "opencv-python>=4.8.0",
+    "pygame-ce>=2.5.0",
 ]
 
 [build-system]

@@ -1,0 +1,265 @@
+{
+  "model_version": "v006",
+  "epochs": 15,
+  "batch_size": 32,
+  "best_val_loss": 0.057477482201952805,
+  "input_shape": [
+    1,
+    3,
+    120,
+    160
+  ],
+  "intent_input": {
+    "shape": [
+      1,
+      3
+    ],
+    "order": [
+      "any",
+      "left",
+      "right"
+    ]
+  },
+  "output": "steering (-1.0 to 1.0)",
+  "blocked_output": {
+    "name": "blocked",
+    "meaning": "probability that the way ahead is blocked (0.0 to 1.0)",
+    "trained": false,
+    "label_near_cm": 40.0,
+    "label_clear_cm": 60.0
+  },
+  "sessions": [
+    "20261112_235654",
+    "20261113_000023",
+    "20261113_000453",
+    "20261113_000756",
+    "20261113_001058",
+    "20261113_001348",
+    "20261113_001657",
+    "20261113_001948"
+  ],
+  "total_samples": 10149,
+  "params": {
+    "epochs": 15,
+    "batch_size": 32,
+    "lr": 0.001,
+    "seed": 42,
+    "val_sessions": [],
+    "blocked_loss_weight": 0.0,
+    "blocked_near_cm": 40.0,
+    "blocked_clear_cm": 60.0,
+    "turn_intent": true,
+    "flip_augment": false
+  },
+  "split": {
+    "method": "session",
+    "train_sessions": [
+      "20261112_235654",
+      "20261113_000023",
+      "20261113_000453",
+      "20261113_000756",
+      "20261113_001058",
+      "20261113_001348",
+      "20261113_001657"
+    ],
+    "val_sessions": [
+      "20261113_001948"
+    ],
+    "train_samples": 9075,
+    "val_samples": 1074
+  },
+  "preprocessing": {
+    "resize_hw": [
+      120,
+      160
+    ],
+    "normalize_mean": [
+      0.485,
+      0.456,
+      0.406
+    ],
+    "normalize_std": [
+      0.229,
+      0.224,
+      0.225
+    ],
+    "color": "RGB"
+  },
+  "validation_metrics": {
+    "samples": 1074,
+    "steering_mae": 0.1328,
+    "steering_mae_deg": 4.65,
+    "steering_mae_by_direction": {
+      "left": 0.2818,
+      "straight": 0.0555,
+      "right": 0.3103
+    },
+    "samples_by_direction": {
+      "left": 243,
+      "straight": 721,
+      "right": 110
+    },
+    "steering_change": 0.0296,
+    "steering_mae_by_intent": {
+      "any": 0.0039,
+      "left": 0.2498,
+      "right": 0.2751
+    },
+    "samples_by_intent": {
+      "any": 529,
+      "left": 370,
+      "right": 175
+    }
+  },
+  "inference_ms_pc": 1.895,
+  "data": {
+    "fingerprint": "f1eaaabf350f1a4d49248bcfa007e08130ffd31b84b098de2121498ade6e5cdb",
+    "sessions": [
+      {
+        "session_id": "20261112_235654",
+        "manifest_hash": "6261eacdd2f6c98293f7bb50ff43aa037b0e2ed23a31c89985d3812dfaa5ce8d",
+        "manifest_ok": true
+      },
+      {
+        "session_id": "20261113_000023",
+        "manifest_hash": "4edfce65328be23d54b518ba69e0608ab64115281846b641243219e29bda0556",
+        "manifest_ok": true
+      },
+      {
+        "session_id": "20261113_000453",
+        "manifest_hash": "681ff47e15f36700e44bc08b08099b394ce0d9df5f372aecdb55789f7f55bcd8",
+        "manifest_ok": true
+      },
+      {
+        "session_id": "20261113_000756",
+        "manifest_hash": "06bfcb406e8365c6521bbe4559707375ca08926a28db78e5534e06a291790ef7",
+        "manifest_ok": true
+      },
+      {
+        "session_id": "20261113_001058",
+        "manifest_hash": "80c78ec686886b10a1158d176591a019341b94f517cf6b4cbacd8f2ebc649828",
+        "manifest_ok": true
+      },
+      {
+        "session_id": "20261113_001348",
+        "manifest_hash": "7eeb515ccb4e2d01c6f30edf8d9fd45927e53ff3cd9f5c8dd34a6800ac3e0bdf",
+        "manifest_ok": true
+      },
+      {
+        "session_id": "20261113_001657",
+        "manifest_hash": "cdac2d286bc6b3fed298ca73fcd6366a066d69ef89028d0b315c2baf44a94e87",
+        "manifest_ok": true
+      },
+      {
+        "session_id": "20261113_001948",
+        "manifest_hash": "d858bd735aec900c1dd3afd5776c86a6b6e55d614ca9adab165157b649d09367",
+        "manifest_ok": true
+      }
+    ],
+    "skipped_motion_mismatch": 1427,
+    "skipped_stopped": 4505,
+    "kept_for_blocked_only": 0,
+    "relabeled_turn_intent": 2872,
+    "samples_by_intent": {
+      "any": 4751,
+      "left": 3352,
+      "right": 2046
+    },
+    "blocked_labels": {
+      "blocked": 785,
+      "clear": 8668,
+      "unknown": 696
+    }
+  },
+  "code": {
+    "commit": "b8b2f5d0d345027d5ba43f0fb193169af01abad0",
+    "dirty": true
+  },
+  "environment": {
+    "python": "3.13.14",
+    "torch": "2.14.1+cpu",
+    "platform": "Windows-11",
+    "torchvision": "0.29.1+cpu",
+    "onnx": "1.23.2",
+    "onnxruntime": "1.31.0",
+    "numpy": "2.4.4",
+    "uv_lock_sha256": "f5b262bf9e396231e2bd566262bf9dfdbb27348eb4d6f33e494a7cd8cb5c64d5"
+  },
+  "history": [
+    {
+      "epoch": 1,
+      "train_loss": 0.06775302109311107,
+      "val_loss": 0.06972707770900863
+    },
+    {
+      "epoch": 2,
+      "train_loss": 0.053350623314456176,
+      "val_loss": 0.0768911298108794
+    },
+    {
+      "epoch": 3,
+      "train_loss": 0.04378750545878384,
+      "val_loss": 0.061799525702091726
+    },
+    {
+      "epoch": 4,
+      "train_loss": 0.03752628899515496,
+      "val_loss": 0.08363457719256254
+    },
+    {
+      "epoch": 5,
+      "train_loss": 0.034631808560249236,
+      "val_loss": 0.07682536916430326
+    },
+    {
+      "epoch": 6,
+      "train_loss": 0.02979825603403664,
+      "val_loss": 0.057477482201952805
+    },
+    {
+      "epoch": 7,
+      "train_loss": 0.02579846601019878,
+      "val_loss": 0.06366040225718654
+    },
+    {
+      "epoch": 8,
+      "train_loss": 0.025239431954530316,
+      "val_loss": 0.06557616045833962
+    },
+    {
+      "epoch": 9,
+      "train_loss": 0.0220061374454151,
+      "val_loss": 0.06531201591662747
+    },
+    {
+      "epoch": 10,
+      "train_loss": 0.020470374404316764,
+      "val_loss": 0.06436103557747598
+    },
+    {
+      "epoch": 11,
+      "train_loss": 0.018893671525082967,
+      "val_loss": 0.06112783398984953
+    },
+    {
+      "epoch": 12,
+      "train_loss": 0.01823928736437615,
+      "val_loss": 0.06336652770360449
+    },
+    {
+      "epoch": 13,
+      "train_loss": 0.01720729594531959,
+      "val_loss": 0.06477506098782151
+    },
+    {
+      "epoch": 14,
+      "train_loss": 0.016326732481509117,
+      "val_loss": 0.05849316510045069
+    },
+    {
+      "epoch": 15,
+      "train_loss": 0.014415944098358969,
+      "val_loss": 0.06113790025452643
+    }
+  ]
+}

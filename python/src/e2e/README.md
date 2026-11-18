@@ -33,7 +33,7 @@ make deploy RPI_HOST=pi@<ラズパイIP> RPI_DIR=/home/pi/
 
 ```text
 [ 1. データ収集 (PC GUI) ]
-    カメラ映像を確認しながらキーボード操作 (W/A/S/D) で走行
+    カメラ映像を確認しながらキーボード (W/A/S/D) かプロコンで走行
     録画(R)中にカメラ画像と操作量を PC (python/data/raw/) に自動保存
            ↓
 [ 2. モデル学習 (PC: PyTorch) ]
@@ -61,12 +61,42 @@ uv run python -m src.e2e.gui_collector
 ### 操作方法
 | キー | 動作 | 説明 |
 | :---: | :--- | :--- |
-| **`W`** | 前進 | 設定速度で前進します |
-| **`S`** | 停止 | モーターを停止します |
-| **`A`** | 左旋回 | ステアリングを10度左に切ります |
-| **`D`** | 右旋回 | ステアリングを10度右に切ります |
+| **`W`** | 前進 | 押している間、設定速度で前進します |
+| **`S`** | 停止 | モーターを停止します（押している操作をすべて離すまで走り出しません） |
+| **`A`** | 左旋回 | 押している間、ステアリングを一定の速さで左へ切ります（離すと中央へ戻ります） |
+| **`D`** | 右旋回 | 押している間、ステアリングを一定の速さで右へ切ります（離すと中央へ戻ります） |
 | **`X`** | 直進 | ステアリング角度を0度に戻します |
+| **`Q` / `E`** | 意図 左 / 右 | 押している間、行きたい向きを左 / 右として記録します |
 | **`R`** | 録画切替 | **● 録画開始 / ⏸ 一時停止** をトグルします |
+
+### プロコン（Nintendo Switch Pro Controller）
+PC に Bluetooth か USB-C でつないでおけば、起動時に自動で使えます（画面の「Gamepad」に名前が出ます）。
+キーボードと同時に使えます。Nintendo のレースゲームと同じく、右手の親指で進む・下がる、左手の親指で舵を切ります。
+
+| ボタン | 動作 |
+| :---: | :--- |
+| **A / ZR** | 前進（押している間） |
+| **B / ZL** | 後退（押している間、速度 `DRIVE_SPEED`）。後退中のフレームは学習に使いません |
+| **X** | 停止（S キーと同じ。走行のボタンをすべて離すまで走り出しません） |
+| **左スティック左右** | 倒した量に応じた舵角（キーボードと同じ速さで近づけます） |
+| **十字キー左右** | 舵をいっぱいまで切る |
+| **L / R** | 意図を左 / 右にする（押している間。車の動きは変えません） |
+| **＋** | 録画切替 |
+| **－** | 舵を中央へ |
+| **HOME** | 緊急停止（画面の Reset Emergency Stop で戻す） |
+
+Y は B の隣で押し間違えやすいので使いません。
+
+**意図（L / R）**: 走り方は「基本はまっすぐ、前が塞がったら空いている側へ曲がる」です。どちらへも曲がれる場所で、
+行きたい側があれば、曲がり始める少し前から曲がり終わるまで L か R を押したままにします。押していない間は
+おまかせ（`any`）として記録します。画面の「Intent」に今の意図が出ます。
+Bluetooth の一覧に出ていても、ペアリングだけ残って切れていることがあります。反応しない時は USB-C でつなぐか、
+削除してシンクロボタン（上部の小さいボタン）でペアリングし直します。
+
+パッドが読めるかは次で確かめられます（押したボタンの刻印と操作が表示されます）。
+```powershell
+uv run python -m src.e2e.gamepad
+```
 
 ### 収集のコツ
 1. 車体を走行させたい部屋の開けたスペースに置きます。
@@ -77,43 +107,69 @@ uv run python -m src.e2e.gui_collector
 ### 保存されるデータ
 - 保存先: `python/data/raw/<session_timestamp>/`
   - `images/`: カメラ画像 (`frame_000000.jpg` ... 160x120ピクセル)
-  - `labels.jsonl`: 各フレームのタイムスタンプ、ステアリング正規化値（-1.0〜+1.0）、速度
+  - `labels.jsonl`: 各フレームのタイムスタンプ、ステアリング正規化値（-1.0〜+1.0）、速度、超音波の距離、その時点の指令、推定した実際の動き、指令との食い違い
+
+### 指令と実際の動きの確認 (Motion Check)
+画面右の **Motion Check** に、カメラの画像の動きと超音波から推定した実際の動きと、指令との食い違いを表示します。
+- 進む指令なのに動いていない（空転、引っかかり）、曲がり方が舵角と合わない、指令していないのに動いている、の3種類を検出します
+- 食い違いが1秒続くと車を止め、記憶に残します（会話の Agent に「さっき何で止まったの？」と聞くと答えます）
+- 食い違いのあるフレームは学習に使いません
+- しきい値は実機で校正する前の提案値です（ROADMAP の M3）
+
+### 収集の後に行うこと
+走行データはセッション単位で追記のみとし、書き換えません。収集が終わったら、マニフェスト（ファイルのハッシュの一覧）を作り、バックアップします。
+```powershell
+uv run python -m src.e2e.dataset.manifest --data_dir data/raw            # 新しいセッションに manifest.json を作る
+uv run python -m src.e2e.dataset.manifest --data_dir data/raw --verify   # 変わっていないか確かめる
+cd ..; powershell -ExecutionPolicy Bypass -File scripts\backup.ps1       # D:\PiCarX-backup へ複製（GUI を閉じてから）
+```
+
+### データの確認とラベル付け（データビューア）
+怪しいフレーム（黄色の行、「注意」の列）を確かめ、範囲を選んでタグや学習からの除外を付けます。統計の画面で、向き、意図、学習に使うかなどの分布を見られます。付けたラベルは `data/annotations/` に保存され、走行データは書き換えません。
+```powershell
+uv run python -m src.e2e.data_viewer
+```
+- 表の下の帯をドラッグ（または Shift+クリック、`I` と `O`）で範囲を選び、「付ける」「除外する (X)」でまとめて付けます。`Ctrl+Z` で戻せます
+- 見出しの右クリックで表示する列を選び、見出しのクリックで並べ替えます
 
 ---
 
 ## ステップ 2: モデル学習 & ONNXエクスポート (PC)
 
 収集した走行ログをもとに、画像からステアリング角度を予測する軽量CNNを学習します。
-**過去の全走行データ（`data/raw`）の一括統合学習**、または特定セッションの個別学習が可能です。
+学習は CPU で決定的に行い、同じデータと設定なら同じ結果になります。検証はセッション単位で行うので、**2セッション以上が必要**です。
 
 ### 実行コマンド (PowerShell)
 
 #### 過去の全走行データをまとめて学習する場合 (推奨)
 ```powershell
-uv run python -m src.e2e.training.train --data_dir data/raw --output_dir models/v004 --epochs 15
+uv run python -m src.e2e.training.train --config configs/train.toml --data_dir data/raw --output_dir models/v006
 ```
+- 設定は `configs/train.toml`（エポック数、バッチサイズ、学習率、シード、検証セッション）。`--epochs` などの引数で上書きできます
+- 検証セッションの指定がなければ、名前順で最後のセッションを検証に使います。`--val_sessions <session_id>` で指定できます
+- 複数フォルダを指定したい場合は `--data_dir data/raw/session1 data/raw/session2` のようにスペース区切りで複数指定できます
 
-#### 特定のセッションのみを学習する場合
+#### モデルや設定を比べる場合（交差検証）
+セッションを1つずつ抜いて学習し、抜いたセッションで評価します。学習に使っていない場面での誤差なので、比較にはこちらを使います。
 ```powershell
-uv run python -m src.e2e.training.train --data_dir data/raw/<session_id> --output_dir models/<version> --epochs 15
+uv run python -m src.e2e.training.cross_validate --config configs/train.toml --data_dir data/raw --output data/cv/baseline.json
 ```
-※ 複数フォルダを指定したい場合は `--data_dir data/raw/session1 data/raw/session2` のようにスペース区切りで複数指定できます。
 
 ### 生成物
-- `models/v004/best_model.pth` : PyTorchモデル重み
-- `models/v004/model.onnx` : 実機配信用ONNXモデル
-- `models/v004/metadata.json` : 最良検証損失、ハイパーパラメータ、読み込んだセッション一覧の記録
+- `models/v006/best_model.pth` : PyTorchモデル重み
+- `models/v006/model.onnx` : 実機配信用ONNXモデル
+- `models/v006/metadata.json` : 設定、分割、前処理、検証の指標に加え、使ったデータのハッシュ、git のコミット、環境（ライブラリの版、`uv.lock` のハッシュ）の記録
 
 ---
 
 ## ステップ 2.5: データクリーニング (悪いデータの自動除外)
 
-学習済みモデル（例: `v003` など）を使って全走行フレームの予測誤差（残差）を算出し、**「人間の操作遅れ」「衝突時の混乱操舵」「外れ値」を自動ではじいた高品質データセット** を作成します。
+学習済みモデルを使って全走行フレームの予測誤差（残差）を算出し、**「人間の操作遅れ」「衝突時の混乱操舵」「外れ値」を自動ではじいた高品質データセット** を作成します。
 
 ### 実行コマンド (PowerShell)
 ```powershell
 # 閾値 0.4 (約±14度) 以上の乖離があるフレームを自動除外
-uv run python -m src.e2e.dataset.cleaner --data_dir data/raw --model models/v003/model.onnx --threshold 0.4 --output_dir data/processed/clean_v1
+uv run python -m src.e2e.dataset.cleaner --data_dir data/raw --model models/<version>/model.onnx --threshold 0.4 --output_dir data/processed/clean_v1
 ```
 
 #### オプション説明:
@@ -123,10 +179,12 @@ uv run python -m src.e2e.dataset.cleaner --data_dir data/raw --model models/v003
 - `--top_k_percent` : 誤差が大きい上位K%を除外する場合に指定（例: `--top_k_percent 5.0`）
 - `--output_dir` : クリーン化されたデータセットの出力先
 
+出力先には画像を複製せず、元のセッションを参照する `labels.jsonl` だけを書きます。元のデータ（`data/raw`）を移動したり消したりすると読めなくなります。
+モデルと合わないフレームを除くので、クリーニング後の MAE は良く見えます。改善の判断には交差検証と実走の介入回数を使います。
+
 ### クリーニング後の再学習
-厳選された良質データセットを用いて、より高精度な新モデルを学習します：
 ```powershell
-uv run python -m src.e2e.training.train --data_dir data/processed/clean_v1 --output_dir models/v004 --epochs 15
+uv run python -m src.e2e.training.train --config configs/train.toml --data_dir data/processed/clean_v1 --output_dir models/v006
 ```
 
 ---
@@ -196,25 +254,28 @@ v001           | 15     | 32    | 0.0946    | 0.2586     | ±9.1°      | PTH+ON
 ### 2. 実行コマンド (PCのPowerShell)
 ```powershell
 # 通常起動 (2D動的オキュパンシーグリッド地図 ＋ リアルタイムGUIダッシュボード起動)
-uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --speed 35 --min_speed 20
+uv run python -m src.e2e.autonomous_driver --model models/<version>/model.onnx --speed 50 --min_speed 40
 
 # GUIウィンドウを表示せずヘッドレスで走行する場合
-uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --no_gui
+uv run python -m src.e2e.autonomous_driver --model models/<version>/model.onnx --no_gui
 
-# カーブ旋回時・障害物接近時の減速チューニング (最低速度を25、減速開始距離を50cmに変更)
-uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --speed 40 --min_speed 25 --slowdown_dist 50.0
+# どちらへも曲がれる場所で左を選ぶ (既定は any。意図を入力に持たないモデルでは any だけ)
+uv run python -m src.e2e.autonomous_driver --model models/<version>/model.onnx --intent left
+
+# カーブ旋回時・障害物接近時の減速チューニング (巡航を60、減速開始距離を50cmに変更。最低速度は40未満にしない)
+uv run python -m src.e2e.autonomous_driver --model models/<version>/model.onnx --speed 60 --min_speed 40 --slowdown_dist 50.0
 
 # 通信ウォッチドッグのタイムアウト時間を調整 (デフォルト: 0.6秒)
-uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --watchdog_timeout 1.0
+uv run python -m src.e2e.autonomous_driver --model models/<version>/model.onnx --watchdog_timeout 1.0
 
 # スタック検知感度を調整 (閾値を3.0、検知継続フレームを20フレームに変更)
-uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --stuck_threshold 3.0 --stuck_frames 20
+uv run python -m src.e2e.autonomous_driver --model models/<version>/model.onnx --stuck_threshold 3.0 --stuck_frames 20
 ```
 
 #### オプション説明:
 - `--model` : 推論に使用するONNXモデルのパス（必須）
-- `--speed` : 基本巡航スピード（`0` 〜 `100`、デフォルト: `35`）
-- `--min_speed` : カーブ旋回時・障害物接近時の最低減速スピード（デフォルト: `20`）
+- `--speed` : 基本巡航スピード（`40` 〜 `100`、デフォルト: `50`）
+- `--min_speed` : カーブ旋回時・障害物接近時の最低減速スピード（デフォルト: `40`、40未満はエラー）。35では這うように遅く、30では車輪が回らない
 - `--curve_factor` : 旋回減速感度係数（デフォルト: `1.0`）
 - `--safe_dist` : 減速の計算に使う距離（cm、デフォルト: `15.0`）。停止は Pi が 15cm で行う
 - `--slowdown_dist` : 障害物接近に伴い動的減速を開始する距離（cm、デフォルト: `40.0`）
@@ -232,26 +293,28 @@ uv run python -m src.e2e.autonomous_driver --model models/v004/model.onnx --stuc
 ### 3. 多重セーフティレイヤー (Phase 3 ハイブリッド安全機構)
 
 > [!WARNING]
-> 以下の機能の多くは PC 側で約1Hz（2026-11-03 のログ解析）で動作し、走行中の監視は行いません。段差からの落下や衝突を保証するものではないので、階段や段差の近くでは走行させず、すぐ停止できる状態で使用してください。詳細は [E2E_SPECIFICATION.md §4.5](../../../E2E_SPECIFICATION.md) を参照してください。
+> 停止に関わる機能（障害物、段差、通信断）は Pi の反射ループ（約40Hz）が行い、走行ループは約15Hz（2026-11-04 実機）で動きます。超音波は細い家具の脚や音を吸う物を見落とし、実走で脚に衝突しました（ROADMAP の M1）。段差からの落下や衝突を保証するものではないので、階段や段差の近くでは走行させず、すぐ停止できる状態で使用してください。詳細は [E2E_SPECIFICATION.md §4.5](../../../E2E_SPECIFICATION.md) を参照してください。
 
 - **Phase 3.1 & 3.4 段差・階段落下防止 & 直前軌跡安全後退 (Breadcrumb Safety)**:
   - 底面赤外線センサーが床の途切れを検知した際、直前に通ってきた安全な走行軌跡（パンくずリスト）を逆順に再生しながら十分な距離（約1.2秒間）後退し、さらに安全な方向へ車首を振って完全脱出。
 - **Phase 3.2 ダイナミック・スピードリミッター (Dynamic Speed Limiter)**:
   - 急旋回時や家具・壁への接近時に、AIの要求に関わらず安全な車速（`min_speed`）まで自動減速。スリップや旋回半径膨らみ、衝突衝撃を防止。
 - **Phase 3.3 通信ウォッチドッグ (Communication Watchdog)**:
-  - ループの先頭で、前回の正常通信からの経過時間（0.6秒）と連続エラー数を確認し、超えていれば停止を指令して通信復帰時に再開します。HTTP 要求の処理中は確認しません。
+  - 通信の失敗を記録します。停止は Pi が行います（走行指令の TTL が切れると止まる）。
 - **Phase 3.4 前方行き止まり自動脱出 (Dead-End Escape)**:
   - 壁や家具の前で2回連続で安全停止した場合、同様に通ってきたルートを逆走して後退・旋回し、自力で脱出。
 - **Phase 3.5 動的オキュパンシーグリッド & リアルタイムUI (Dynamic Mapping & HUD)**:
   - 走行軌跡と前方超音波距離から 2D 確率格子地図（Occupancy Grid）を構築。自車位置、走ったルート、壁・家具の位置をリアルタイムにPC画面へ描画。
   - 時間経過による「忘却機能（Decay）」を備え、家具の配置変更やドアの開閉にも自動適応。
   - キー操作: `[C]` で地図クリア、`[S]` で現在の地図画像（`data/maps/map_xxx.png`）を保存、`[Q]` で安全停止して終了。
-- **Phase 3.6 スタック検知 & 自動脱出ビヘイビア (Stuck & Wiggle Recovery)**:
-  - 車輪が空転したりラグや家具の脚に引っかかって「前進しているはずなのに景色が動いていない」状態をカメラ画像の変化量から総合検知。
-  - バック（直前軌跡巻き戻し） ＋ 左右の車体振り（Wiggle） ＋ 迂回前進の複合動作を自動実行し、引っかかりを振りほどいて自力脱出。
+- **指令と実際の動きの食い違いの検出 (Motion Check、既定)**:
+  - 空転や引っかかり（進む指令なのに景色も距離も変わらない）、滑りや舵のズレ（曲がり方が舵角と合わない）、押された（指令なしで景色全体が動いた）を、カメラの画像の動きと超音波から検出します。
+  - 同じ食い違いが1秒続くと止まり、`data/disengagements/` に `motion_mismatch` として記録し、記憶にも残して走行を終えます。危険を押して動き続けないためです。
+- **Phase 3.6 スタック検知 & 自動脱出ビヘイビア (Stuck & Wiggle Recovery、`--disable_motion_check` の時だけ)**:
+  - 「前進しているはずなのに景色が動いていない」状態をカメラ画像の変化量から検知し、バック ＋ 左右の車体振り ＋ 迂回前進で脱出を試みます。
 - **前方障害物ガード (超音波)**:
-  - 前方指定距離（デフォルト15cm）以内に家具・壁を検知すると、AIの推論に関わらずモーターを完全強制停止。
+  - 前方15cm以内に家具・壁を検知すると、AIの推論に関わらず Pi の反射ループがモーターを止めます。`--safe_dist` は PC 側の減速にだけ使います。
 - **Disengagement ロギング (直前30フレームの自動記録)**:
-  - 急ブレーキ・段差回避・通信断・手動介入 (`Ctrl+C`) の直前30フレームを `data/disengagements/` へ自動保存します。現行の周期では約30秒以上に相当します。
+  - 急ブレーキ・段差回避・通信断・手動介入 (`Ctrl+C`) の直前30フレームを `data/disengagements/` へ自動保存します。約15Hz の走行ループでは約2秒に相当します。
 - **手動緊急停止**:
   - ターミナルで **`Ctrl + C`** を押すと、即座にステアリングが0度（中立）に戻りモーターが完全停止。

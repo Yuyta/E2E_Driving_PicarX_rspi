@@ -6,14 +6,16 @@ Phase 3.2: Dynamic Speed Limiter
 
 from typing import Optional
 
+from src.models import DRIVE_SPEED, MIN_MOVING_SPEED
+
 
 class SpeedLimiter:
     """舵角および前方障害物距離に基づくダイナミック速度制御器"""
 
     def __init__(
         self,
-        base_speed: int = 35,
-        min_speed: int = 20,
+        base_speed: int = DRIVE_SPEED,
+        min_speed: int = MIN_MOVING_SPEED,
         curve_factor: float = 1.0,
         safe_distance: float = 15.0,
         slowdown_distance: float = 40.0,
@@ -21,7 +23,8 @@ class SpeedLimiter:
         """
         Args:
             base_speed: 直進時の基本巡航速度 (0〜100)
-            min_speed: 最大減速時の最低速度 (0〜100, base_speed以下)
+            min_speed: 最大減速時の最低速度 (0〜100, base_speed以下)。
+                `MIN_MOVING_SPEED` 未満では車輪が回らず、減速ではなく停止になる
             curve_factor: 旋回時の減速感度 (1.0 = 線形、>1.0 = 急旋回時により急減速)
             safe_distance: 完全停止する限界距離 (cm)
             slowdown_distance: 障害物接近に伴う減速を開始する距離 (cm)
@@ -47,7 +50,7 @@ class SpeedLimiter:
         """
         abs_steer = min(1.0, abs(steering_norm))
         # 舵角寄与度を計算 (curve_factor適用)
-        steer_penalty = min(1.0, (abs_steer ** self.curve_factor))
+        steer_penalty = min(1.0, (abs_steer**self.curve_factor))
         speed_drop = (self.base_speed - self.min_speed) * steer_penalty
         calc_speed = self.base_speed - speed_drop
         return int(round(calc_speed))
@@ -71,9 +74,7 @@ class SpeedLimiter:
         calc_speed = self.min_speed + (self.base_speed - self.min_speed) * ratio
         return int(round(calc_speed))
 
-    def calculate(
-        self, steering_norm: float, obstacle_distance_cm: Optional[float] = None
-    ) -> int:
+    def calculate(self, steering_norm: float, obstacle_distance_cm: Optional[float] = None) -> int:
         """
         カーブ減速と障害物接近減速の複合適用（最も安全側＝遅い速度を採用）。
 
