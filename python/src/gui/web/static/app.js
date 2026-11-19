@@ -1,0 +1,1210 @@
+/* PiCar-X Control Center — 外部のライブラリを使わない画面（サーバーは src/gui/web/server.py） */
+"use strict";
+
+const TOKEN = document.querySelector('meta[name="picarx-token"]').content;
+const STAGES = {
+  candidate: "候補",
+  approved: "有効",
+  rejected: "却下",
+  archived: "廃止",
+};
+const STAGE_HELP = {
+  candidate: "まだ判断していない",
+  approved: "走行に使ってよい",
+  rejected: "使わない（性能や来歴に問題）",
+  archived: "以前は使っていたが今は使わない",
+};
+const SERIES = ["var(--series-1)", "var(--series-2)", "var(--series-3)"];
+const state = { catalog: null, workflows: null, jobs: [], timers: [], robot: null };
+
+/* ------------------------------------------------------------------ DOM helpers */
+
+function h(tag, props, ...kids) {
+  const el = document.createElement(tag);
+  applyProps(el, props);
+  appendKids(el, kids);
+  return el;
+}
+const SVGNS = "http://www.w3.org/2000/svg";
+function s(tag, props, ...kids) {
+  const el = document.createElementNS(SVGNS, tag);
+  applyProps(el, props, true);
+  appendKids(el, kids);
+  return el;
+}
+function applyProps(el, props, svg) {
+  if (!props) return;
+  for (const [k, v] of Object.entries(props)) {
+    if (v === undefined || v === null || v === false) continue;
+    if (k === "class") el.setAttribute("class", v);
+    else if (k === "style" && typeof v === "object") Object.assign(el.style, v);
+    else if (k.startsWith("on") && typeof v === "function") el.addEventListener(k.slice(2), v);
+    else if (k === "text") el.textContent = v;
+    else if (!svg && k in el && typeof v !== "string") el[k] = v;
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+}
+function appendKids(el, kids) {
+  for (const kid of kids.flat(Infinity)) {
+    if (kid === null || kid === undefined || kid === false) continue;
+    el.append(kid instanceof Node ? kid : document.createTextNode(String(kid)));
+  }
+}
+
+const ICONS = {
+  grid: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
+  cube: '<path d="M12 2l9 5v10l-9 5-9-5V7z"/><path d="M3 7l9 5 9-5M12 12v10"/>',
+  compare: '<path d="M4 20V10M10 20V4M16 20v-7M22 20H2"/>',
+  db: '<ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/>',
+  flow: '<circle cx="5" cy="6" r="2.5"/><circle cx="5" cy="18" r="2.5"/><circle cx="19" cy="12" r="2.5"/><path d="M7.5 6c6 0 4 6 9 6M7.5 18c6 0 4-6 9-6"/>',
+  road: '<path d="M6 21L10 3M18 21L14 3M12 7v2M12 13v2M12 19v1"/>',
+  play: '<path d="M7 4l13 8-13 8z"/>',
+  list: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
+  book: '<path d="M4 4.5A2.5 2.5 0 0 1 6.5 2H20v17H6.5A2.5 2.5 0 0 0 4 21.5z"/><path d="M4 21.5A2.5 2.5 0 0 1 6.5 19H20v3H6.5"/>',
+};
+document.querySelectorAll("i[data-icon]").forEach((i) => {
+  i.innerHTML = `<svg viewBox="0 0 24 24">${ICONS[i.dataset.icon] || ""}</svg>`;
+});
+
+/* ------------------------------------------------------------------ format */
+
+const fmt = (v, d = 2) => (v === null || v === undefined || Number.isNaN(v) ? "—" : Number(v).toFixed(d));
+const fmtInt = (v) => (v === null || v === undefined ? "—" : Number(v).toLocaleString("ja-JP"));
+const pct = (v) => (v === null || v === undefined ? "—" : `${Math.round(v * 100)}%`);
+const short = (hash, n = 8) => (hash ? String(hash).slice(0, n) : "—");
+function fmtDate(iso, withYear) {
+  if (!iso) return "—";
+  const d = new Date(String(iso).replace(/([+-]\d{2})(\d{2})$/, "$1:$2"));
+  if (Number.isNaN(d.getTime())) return iso;
+  const p = (n) => String(n).padStart(2, "0");
+  const date = `${withYear ? d.getFullYear() + "/" : ""}${d.getMonth() + 1}/${d.getDate()}`;
+  return `${date} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+function duration(a, b) {
+  if (!a) return "—";
+  const t0 = new Date(String(a).replace(/([+-]\d{2})(\d{2})$/, "$1:$2"));
+  const t1 = b ? new Date(String(b).replace(/([+-]\d{2})(\d{2})$/, "$1:$2")) : new Date();
+  const sec = Math.max(0, Math.round((t1 - t0) / 1000));
+  if (sec < 60) return `${sec}秒`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}分${sec % 60}秒`;
+  return `${Math.floor(sec / 3600)}時間${Math.floor((sec % 3600) / 60)}分`;
+}
+const stageBadge = (stage) => h("span", { class: `badge stage-${stage}`, title: STAGE_HELP[stage] }, STAGES[stage] || stage);
+const HEALTH_TEXT = { ok: "問題なし", warn: "注意", error: "要対応", unknown: "不明" };
+const healthBadge = (level, text) => h("span", { class: `health ${level}` }, text || HEALTH_TEXT[level]);
+const STATUS_TEXT = { running: "実行中", succeeded: "成功", failed: "失敗", stopped: "停止", unknown: "不明" };
+const statusDot = (st) => h("span", { class: `status-dot ${st}` }, STATUS_TEXT[st] || st);
+
+/* ------------------------------------------------------------------ api */
+
+async function api(path, { method = "GET", body } = {}) {
+  const headers = { "X-PicarX-Token": TOKEN };
+  if (body !== undefined) headers["Content-Type"] = "application/json";
+  let res;
+  try {
+    res = await fetch(`/api${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  } catch {
+    // ブラウザの「Failed to fetch」はサーバーに届かなかった時に出る
+    throw new Error("Control Center のサーバーに接続できません。サーバーが止まっています（ランチャーを閉じた、ターミナルで Ctrl+C を押したなど）。`uv run python -m src.gui.web` で起動し直してから、このページを開き直してください");
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `${res.status} ${res.statusText}`);
+  return data;
+}
+async function loadCatalog(fresh) {
+  state.catalog = await api(`/catalog${fresh ? "?fresh=1" : ""}`);
+  return state.catalog;
+}
+async function loadWorkflows() {
+  if (!state.workflows) state.workflows = await api("/workflows");
+  return state.workflows;
+}
+const frameUrl = (sid, i) => `/api/sessions/${encodeURIComponent(sid)}/frames/${i}.jpg?token=${encodeURIComponent(TOKEN)}`;
+
+function toast(message, kind) {
+  const el = h("div", { class: `toast ${kind || ""}` }, message);
+  document.getElementById("toasts").append(el);
+  setTimeout(() => el.remove(), kind === "error" ? 7000 : 4000);
+}
+
+/* ------------------------------------------------------------------ tooltip */
+
+const tip = document.getElementById("tooltip");
+function showTip(evt, title, rows) {
+  tip.replaceChildren(
+    h("div", { class: "tt-title" }, title),
+    ...(rows || []).map(([color, label, value]) =>
+      h("div", { class: "tt-row" }, h("span", {}, color ? h("i", { style: { background: color } }) : null, label), h("b", {}, value)),
+    ),
+  );
+  tip.hidden = false;
+  const pad = 14;
+  const r = tip.getBoundingClientRect();
+  let x = evt.clientX + pad;
+  let y = evt.clientY + pad;
+  if (x + r.width > innerWidth - 8) x = evt.clientX - r.width - pad;
+  if (y + r.height > innerHeight - 8) y = evt.clientY - r.height - pad;
+  tip.style.left = `${x}px`;
+  tip.style.top = `${y}px`;
+}
+const hideTip = () => (tip.hidden = true);
+
+/* ------------------------------------------------------------------ charts */
+
+/** 折れ線。series = [{name, color, points: [[x, y], ...]}]。凡例と線の端の名前を付け、なぞると値を出す。
+ *  文字の大きさが変わらないよう、置いた場所の実際の幅で描き直す */
+function lineChart(opts) {
+  if (!opts.series.some((sr) => sr.points.length)) return h("div", { class: "empty" }, "データがありません");
+  const legend = opts.series.length > 1
+    ? h("div", { class: "legend" }, opts.series.map((sr) => h("span", {}, h("i", { style: { background: sr.color } }), sr.name)))
+    : null;
+  const plot = h("div");
+  let lastWidth = 0;
+  const ro = new ResizeObserver(() => {
+    const w = Math.round(plot.clientWidth);
+    if (w && Math.abs(w - lastWidth) > 4) { lastWidth = w; plot.replaceChildren(lineSvg(opts, w)); }
+  });
+  ro.observe(plot);
+  return h("div", { class: "chart" }, legend, h("div", { class: "muted small" }, opts.yLabel), plot);
+}
+function lineSvg({ series, xLabel, yLabel, height = 250, marker, yFormat = (v) => fmt(v, 3) }, width) {
+  const W = Math.max(320, width), H = height, m = { l: 52, r: 76, t: 12, b: 40 };
+  const all = series.flatMap((sr) => sr.points);
+  const xs = all.map((p) => p[0]), ys = all.map((p) => p[1]);
+  const x0 = Math.min(...xs), x1 = Math.max(...xs);
+  let y0 = Math.min(0, ...ys), y1 = Math.max(...ys);
+  if (y1 === y0) y1 = y0 + 1;
+  const step = niceStep((y1 - y0) / 4);
+  y1 = Math.ceil(y1 / step) * step;
+  const X = (v) => m.l + ((v - x0) / (x1 - x0 || 1)) * (W - m.l - m.r);
+  const Y = (v) => H - m.b - ((v - y0) / (y1 - y0)) * (H - m.t - m.b);
+  const svg = s("svg", { width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": `${yLabel} の推移` });
+  for (let v = y0; v <= y1 + 1e-9; v += step) {
+    svg.append(s("line", { class: v === y0 ? "base-line" : "grid-line", x1: m.l, x2: W - m.r, y1: Y(v), y2: Y(v) }));
+    svg.append(s("text", { class: "tick", x: m.l - 8, y: Y(v) + 4, "text-anchor": "end" }, yFormat(v)));
+  }
+  const xticks = niceTicks(x0, x1, Math.max(3, Math.floor(W / 110)));
+  for (const v of xticks) svg.append(s("text", { class: "tick", x: X(v), y: H - m.b + 16, "text-anchor": "middle" }, v));
+  svg.append(s("text", { class: "axis-title", x: (m.l + W - m.r) / 2, y: H - 4, "text-anchor": "middle" }, xLabel));
+  if (marker) {
+    svg.append(s("line", { x1: X(marker.x), x2: X(marker.x), y1: m.t, y2: H - m.b, stroke: "var(--axis)", "stroke-dasharray": "3 3" }));
+    svg.append(s("text", { class: "tick", x: X(marker.x) + 4, y: m.t + 10 }, marker.label));
+  }
+  const labels = [];
+  series.forEach((sr) => {
+    const d = sr.points.map((p, i) => `${i ? "L" : "M"}${X(p[0]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join("");
+    svg.append(s("path", { d, fill: "none", stroke: sr.color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-dasharray": sr.dash || null }));
+    const last = sr.points[sr.points.length - 1];
+    if (series.length <= 4 && last) labels.push({ y: Y(last[1]), x: X(last[0]), name: sr.name });
+  });
+  labels.sort((a, b) => a.y - b.y);
+  for (let i = 1; i < labels.length; i++) if (labels[i].y - labels[i - 1].y < 14) labels[i].y = labels[i - 1].y + 14;
+  labels.forEach((l) => svg.append(s("text", { class: "direct", x: l.x + 8, y: l.y + 4 }, l.name)));
+  // なぞった位置の縦線と点
+  const cross = s("line", { class: "cross", y1: m.t, y2: H - m.b, visibility: "hidden" });
+  const dots = series.map((sr) => s("circle", { r: 4.5, fill: sr.color, stroke: "var(--surface)", "stroke-width": 2, visibility: "hidden" }));
+  svg.append(cross, ...dots);
+  const hit = s("rect", { x: m.l, y: m.t, width: W - m.l - m.r, height: H - m.t - m.b, fill: "transparent" });
+  const xsSorted = [...new Set(xs)].sort((a, b) => a - b);
+  hit.addEventListener("mousemove", (evt) => {
+    const box = svg.getBoundingClientRect();
+    const vx = ((evt.clientX - box.left) / box.width) * W;
+    const xv = x0 + ((vx - m.l) / (W - m.l - m.r)) * (x1 - x0);
+    const near = xsSorted.reduce((a, b) => (Math.abs(b - xv) < Math.abs(a - xv) ? b : a), xsSorted[0]);
+    cross.setAttribute("x1", X(near)); cross.setAttribute("x2", X(near)); cross.setAttribute("visibility", "visible");
+    const rows = [];
+    series.forEach((sr, i) => {
+      const p = sr.points.find((q) => q[0] === near);
+      if (p) {
+        dots[i].setAttribute("cx", X(p[0])); dots[i].setAttribute("cy", Y(p[1])); dots[i].setAttribute("visibility", "visible");
+        rows.push([sr.color, sr.name, yFormat(p[1])]);
+      } else dots[i].setAttribute("visibility", "hidden");
+    });
+    showTip(evt, `${xLabel} ${near}`, rows);
+  });
+  hit.addEventListener("mouseleave", () => { cross.setAttribute("visibility", "hidden"); dots.forEach((d) => d.setAttribute("visibility", "hidden")); hideTip(); });
+  svg.append(hit);
+  return svg;
+}
+function niceStep(raw) {
+  const p = Math.pow(10, Math.floor(Math.log10(raw || 1)));
+  const n = raw / p;
+  return (n <= 1 ? 1 : n <= 2 ? 2 : n <= 5 ? 5 : 10) * p;
+}
+function niceTicks(a, b, count) {
+  if (a === b) return [a];
+  const step = Math.max(1, Math.round(niceStep((b - a) / count)));
+  const out = [];
+  for (let v = Math.ceil(a / step) * step; v <= b; v += step) out.push(v);
+  if (out[0] - a >= step / 2) out.unshift(a);
+  return out;
+}
+
+/** 横棒（値の大きさ）。rows = [{name, value, text, color}] */
+function hbars(rows, { max, title } = {}) {
+  const top = max || Math.max(...rows.map((r) => r.value || 0), 1e-9);
+  const nameW = Math.min(280, Math.max(64, ...rows.map((r) => String(r.name).length * 13 + 8)));
+  return h("div", { class: "hbars", style: { "--name-w": `${nameW}px` } }, rows.map((r) => {
+    const fill = h("div", { class: "fill", style: { width: `${Math.max(0, (r.value || 0) / top) * 100}%`, background: r.color || "var(--series-1)" } });
+    const row = h("div", { class: "hbar" }, h("span", { class: "name" }, r.name), h("div", { class: "track" }, fill), h("span", { class: "val" }, r.text ?? fmt(r.value, 3)));
+    row.addEventListener("mousemove", (e) => showTip(e, title || r.name, [[r.color || "var(--series-1)", r.name, r.text ?? fmt(r.value, 3)], ...(r.extra || [])]));
+    row.addEventListener("mouseleave", hideTip);
+    return row;
+  }));
+}
+
+/** 左・直進・右の割合（色は 左=青、直進=灰、右=赤 の対になる配色） */
+function distBar(dist) {
+  const l = dist.left_ratio || 0, st = dist.straight_ratio || 0, r = dist.right_ratio || 0;
+  const el = h("div", { class: "dist", role: "img", "aria-label": `左 ${pct(l)} 直進 ${pct(st)} 右 ${pct(r)}` },
+    h("span", { class: "l", style: { width: `${l * 100}%` } }),
+    h("span", { class: "s", style: { width: `${st * 100}%` } }),
+    h("span", { class: "r", style: { width: `${r * 100}%` } }));
+  el.addEventListener("mousemove", (e) => showTip(e, "舵角の分布", [["var(--div-neg)", "左", pct(l)], ["var(--div-mid)", "直進", pct(st)], ["var(--div-pos)", "右", pct(r)]]));
+  el.addEventListener("mouseleave", hideTip);
+  return el;
+}
+const distLegend = () => h("div", { class: "legend" },
+  h("span", {}, h("i", { class: "box", style: { background: "var(--div-neg)" } }), "左"),
+  h("span", {}, h("i", { class: "box", style: { background: "var(--div-mid)" } }), "直進"),
+  h("span", {}, h("i", { class: "box", style: { background: "var(--div-pos)" } }), "右"));
+
+/* ------------------------------------------------------------------ table */
+
+/** 並べ替えのできる表。cols = [{key, label, num, render(row), sort(row)}] */
+function table(cols, rows, { onRow, empty = "データがありません", sortKey, desc = false, rowClass } = {}) {
+  if (!rows.length) return h("div", { class: "empty" }, empty);
+  let key = sortKey, down = desc;
+  const tbody = h("tbody");
+  const head = h("tr");
+  const draw = () => {
+    const col = cols.find((c) => c.key === key);
+    const sorted = col ? [...rows].sort((a, b) => {
+      const va = (col.sort || ((r) => r[col.key]))(a), vb = (col.sort || ((r) => r[col.key]))(b);
+      const cmp = va === vb ? 0 : va === null || va === undefined ? 1 : vb === null || vb === undefined ? -1 : va < vb ? -1 : 1;
+      return down ? -cmp : cmp;
+    }) : rows;
+    tbody.replaceChildren(...sorted.map((r) => h("tr", { class: [onRow ? "click" : "", rowClass ? rowClass(r) : ""].join(" "), onclick: onRow ? () => onRow(r) : null },
+      cols.map((c) => h("td", { class: c.num ? "num" : "" }, c.render ? c.render(r) : r[c.key] ?? "—")))));
+    head.replaceChildren(...cols.map((c) => h("th", {
+      class: `${c.num ? "num" : ""} ${c.nosort ? "" : "sortable"}`,
+      title: c.title,
+      onclick: c.nosort ? null : () => { down = key === c.key ? !down : false; key = c.key; draw(); },
+    }, c.label, key === c.key ? h("span", { class: "arrow" }, down ? "▼" : "▲") : null)));
+  };
+  draw();
+  return h("div", { class: "table-wrap" }, h("table", {}, h("thead", {}, head), tbody));
+}
+
+/* ------------------------------------------------------------------ modal */
+
+function modal({ title, body, actions }) {
+  const root = document.getElementById("modal-root");
+  const close = () => { root.replaceChildren(); document.removeEventListener("keydown", onKey); };
+  const onKey = (e) => { if (e.key === "Escape") close(); };
+  document.addEventListener("keydown", onKey);
+  const back = h("div", { class: "modal-back", onclick: (e) => { if (e.target === back) close(); } },
+    h("div", { class: "modal", role: "dialog", "aria-modal": "true", "aria-label": title },
+      h("header", {}, h("h2", {}, title)),
+      h("div", { class: "body" }, body),
+      h("footer", {}, actions(close))));
+  root.replaceChildren(back);
+  const first = back.querySelector("input, textarea, select, button");
+  if (first) first.focus();
+  return close;
+}
+
+/* ------------------------------------------------------------------ launching tools */
+
+function nextVersion() {
+  const nums = (state.catalog?.models || []).map((m) => parseInt(String(m.version).replace(/\D/g, ""), 10)).filter((n) => !Number.isNaN(n));
+  return `v${String((nums.length ? Math.max(...nums) : 0) + 1).padStart(3, "0")}`;
+}
+
+async function launch(workflowId, presetArgs) {
+  const workflows = await loadWorkflows();
+  const wf = workflows.find((w) => w.id === workflowId);
+  if (!wf) return toast("ツールが見つかりません", "error");
+  let initial = presetArgs ?? wf.arguments;
+  if (wf.id === "train" && presetArgs === undefined) initial = initial.replace(/models\/v\d+/, `models/${nextVersion()}`);
+  const args = h("input", { type: "text", class: "mono", value: initial, spellcheck: false, style: { width: "100%" } });
+  const preset = wf.examples.length
+    ? h("select", { onchange: (e) => { if (e.target.value) args.value = e.target.value; } },
+      h("option", { value: "" }, "例から選ぶ…"), wf.examples.map(([label, value]) => h("option", { value }, label)))
+    : null;
+  const models = state.catalog?.models || [];
+  const modelPick = /models\/v\d+/.test(initial) && wf.id !== "train" && models.length
+    ? h("select", { onchange: (e) => { args.value = args.value.replace(/models\/[A-Za-z0-9_.-]+/, `models/${e.target.value}`); } },
+      models.map((m) => h("option", { value: m.version, selected: initial.includes(`models/${m.version}`) }, `${m.version}（${STAGES[m.stage]}）`)))
+    : null;
+  const carCheck = wf.moves_car ? h("input", { type: "checkbox" }) : null;
+  const confirmCheck = wf.confirm ? h("input", { type: "checkbox" }) : null;
+  const approved = models.filter((m) => m.usable).map((m) => m.version);
+  const deployWarn = () => {
+    const m = /models\/([A-Za-z0-9_.-]+)/.exec(args.value);
+    return wf.id === "deploy_push" && m && !approved.includes(m[1]);
+  };
+  const warnBox = h("div", { class: "warn-box small", hidden: !deployWarn() }, "このモデルは「有効」になっていません。モデルの画面で採否を判断してから配置することを勧めます。");
+  args.addEventListener("input", () => (warnBox.hidden = !deployWarn()));
+  if (modelPick) modelPick.addEventListener("change", () => (warnBox.hidden = !deployWarn()));
+  modal({
+    title: `${wf.title} を起動`,
+    body: [
+      h("div", { class: "ink-2" }, wf.description),
+      h("div", { class: "row", style: { justifyContent: "space-between" } },
+        h("span", { class: "mono muted" }, `python -m ${wf.module}`),
+        h("a", { href: manualHref(wf.id), onclick: () => document.getElementById("modal-root").replaceChildren() }, "使い方と引数の説明 →")),
+      modelPick ? h("label", { class: "field" }, h("span", {}, "モデル"), modelPick) : null,
+      preset ? h("label", { class: "field" }, h("span", {}, "操作の例"), preset) : null,
+      h("label", { class: "field" }, h("span", {}, "実行引数"), args),
+      warnBox,
+      wf.kind === "window" ? h("div", { class: "muted small" }, "別の画面（ウィンドウ）が開きます。") : null,
+      confirmCheck ? h("label", { class: "check warn-box" }, confirmCheck, h("span", {}, wf.confirm)) : null,
+      carCheck ? h("label", { class: "check danger-box" }, carCheck, h("span", {}, h("b", {}, "車体が動きます。"), " 周囲に人・物・段差がなく、すぐ緊急停止できることを確認しました。")) : null,
+    ],
+    actions: (close) => [
+      h("button", { class: "ghost", type: "button", onclick: close }, "キャンセル"),
+      h("button", {
+        type: "button",
+        class: wf.moves_car ? "danger" : "",
+        onclick: async (e) => {
+          if (carCheck && !carCheck.checked) return toast("安全の確認にチェックを入れてください", "error");
+          if (confirmCheck && !confirmCheck.checked) return toast("確認にチェックを入れてください", "error");
+          e.target.disabled = true;
+          try {
+            const job = await api("/jobs", { method: "POST", body: { workflow: wf.id, args: args.value, confirm_moves_car: !!carCheck?.checked, confirmed: !!confirmCheck?.checked } });
+            close();
+            toast(`${wf.title} を起動しました`);
+            location.hash = `#/jobs/${job.id}`;
+          } catch (err) {
+            e.target.disabled = false;
+            toast(err.message, "error");
+          }
+        },
+      }, wf.moves_car ? "安全を確認して起動" : "起動"),
+    ],
+  });
+}
+
+/* ------------------------------------------------------------------ views: overview */
+
+function card(title, sub, ...body) {
+  return h("section", { class: "card" }, title ? h("div", { class: "card-head" }, h("h2", {}, title), sub ? h("span", { class: "sub" }, sub) : null) : null, body);
+}
+function stat(label, value, unit, foot) {
+  return h("div", { class: "card stat" }, h("span", { class: "label" }, label), h("span", { class: "value" }, value, unit ? h("small", {}, unit) : null), foot ? h("span", { class: "foot" }, foot) : null);
+}
+
+function collectAlerts(c) {
+  const alerts = [];
+  for (const m of c.models) {
+    for (const ch of m.checks) if (ch.level !== "ok") alerts.push({ level: ch.level, text: `${m.version}: ${ch.message}`, href: `#/models/${m.version}` });
+    if (m.stage === "candidate") alerts.push({ level: "info", text: `${m.version} は採否が未判断です（候補）`, href: `#/models/${m.version}` });
+    if (m.field.fingerprint_mismatch) alerts.push({ level: "error", text: `${m.version}: 走行の記録と学習データのハッシュが違う走行が ${m.field.fingerprint_mismatch} 件`, href: `#/models/${m.version}` });
+  }
+  const inc = c.summary.incomplete_sessions || [];
+  if (inc.length) alerts.push({ level: "warn", text: `ラベルのないセッション（記録が途中で止まった）が ${inc.length} 件: ${inc.map((x) => x.session_id).join(", ")}`, href: "#/data" });
+  if (c.summary.unused_sessions.length) alerts.push({ level: "info", text: `どのモデルの学習にも使っていないセッションが ${c.summary.unused_sessions.length} 件`, href: "#/data" });
+  const dep = c.summary.deployed, run = c.summary.last_pi_run;
+  if (dep.version && run && run.model_version !== dep.version) alerts.push({ level: "warn", text: `配置の記録（${dep.version}）と Pi の最後の走行の版（${run.model_version}）が違います。Pi のモデル一覧で確かめてください`, href: "#/tools" });
+  if (dep.version && !c.models.find((m) => m.version === dep.version)?.usable) alerts.push({ level: "warn", text: `Pi で使用中の ${dep.version} は「有効」ではありません`, href: `#/models/${dep.version}` });
+  return alerts;
+}
+
+function pipeline(c) {
+  const steps = [
+    ["収集", `${c.summary.sessions} セッション`, "#/tools"],
+    ["確認・ラベル", `${c.sessions.filter((x) => x.annotation_hash).length} 件のラベル`, "#/data"],
+    ["学習", `${c.models.length} モデル`, "#/models"],
+    ["評価", `${c.cv.filter((x) => x.kind === "cross_validation").length} 件の交差検証`, "#/compare"],
+    ["採否の判断", `有効 ${c.summary.usable_models}`, "#/models"],
+    ["配置", c.summary.deployed.version || "記録なし", "#/tools"],
+    ["走行", `${c.summary.runs} 回`, "#/runs"],
+  ];
+  return h("div", { class: "card" },
+    h("div", { class: "card-head" }, h("h2", {}, "開発の流れ"), h("span", { class: "sub" }, "データ → モデル → 評価 → 配置 → 走行の記録 → 次のデータ")),
+    h("div", { class: "pipeline" },
+      steps.map(([name, value, href], i) => h("a", { href }, h("span", { class: "muted small" }, `${i + 1}. ${name}`), h("b", {}, value)))));
+}
+
+async function viewOverview(root) {
+  const c = await loadCatalog();
+  const sm = c.summary;
+  const latest = c.models.find((m) => m.version === sm.latest);
+  const facts = h("section", { class: "card" },
+    h("div", { class: "card-head" }, h("h2", {}, "モデルの状態"), h("span", { class: "sub" }, "どれが最新か・有効か・Pi で使われているか")),
+    h("div", { class: "facts" },
+      fact("Pi で使用中（配置の記録）", sm.deployed.version, sm.deployed.at ? `${fmtDate(sm.deployed.at)} に配置` : "Control Center からの配置の記録なし"),
+      fact("Pi の最後の走行で使った版", sm.last_pi_run?.model_version, sm.last_pi_run ? `${fmtDate(sm.last_pi_run.started_at)} の走行` : "走行の記録なし"),
+      fact("最新のモデル", sm.latest, latest ? `${fmtDate(latest.created_at)} 作成・${STAGES[latest.stage]}` : ""),
+      fact("最新の有効なモデル", sm.latest_approved, sm.latest_approved ? "採用済みで来歴に誤りなし" : "「有効」にしたモデルがまだない")));
+  const alerts = collectAlerts(c);
+  const jobs = await api("/jobs");
+  root.append(
+    h("p", { class: "lead" }, "走行データからモデルを作り、評価し、Pi へ配置して走らせるまでを一つの画面で管理します。各モデルがどのデータとコードから作られたかを記録からたどれます。"),
+    h("div", { class: "stack" },
+      facts,
+      h("div", { class: "grid cols-4" },
+        stat("モデル", sm.models, "版", `有効 ${sm.usable_models} 版`),
+        stat("走行データ", fmtInt(sm.frames), "フレーム", `${sm.sessions} セッション・${fmt(sm.hours * 60, 1)} 分`),
+        stat("交差検証", c.cv.filter((x) => x.kind === "cross_validation").length, "件", `比較 ${c.cv.filter((x) => x.kind === "comparison").length} 件`),
+        stat("走行の記録", sm.runs, "回", `自律 ${fmt(c.runs.reduce((a, r) => a + r.autonomous_s, 0) / 60, 1)} 分`)),
+      pipeline(c),
+      h("div", { class: "grid cols-2" },
+        card("確認すること", `${alerts.length} 件`, alerts.length
+          ? h("div", { class: "stack", style: { gap: "8px" } }, alerts.slice(0, 12).map((a) => h("a", { class: `alert ${a.level === "info" ? "info" : a.level}`, href: a.href, style: { color: "var(--ink)", textDecoration: "none" } }, healthBadge(a.level === "info" ? "unknown" : a.level, a.level === "info" ? "情報" : null), h("span", {}, a.text))))
+          : h("div", { class: "empty" }, "確認することはありません")),
+        card("最近のジョブ", "", table([
+          { key: "status", label: "状態", render: (j) => statusDot(j.status) },
+          { key: "title", label: "ツール" },
+          { key: "started_at", label: "開始", render: (j) => fmtDate(j.started_at) },
+          { key: "dur", label: "時間", render: (j) => duration(j.started_at, j.ended_at), nosort: true },
+        ], jobs.slice(0, 6), { onRow: (j) => (location.hash = `#/jobs/${j.id}`), empty: "まだジョブはありません。「ツール」から起動できます" }))),
+      card("最近の走行", "Pi の自律走行の記録（data/runs）", runsTable(c.runs.slice(-6).reverse()))));
+}
+function fact(label, value, foot) {
+  return h("div", { class: "fact" }, h("div", { class: "label" }, label),
+    h("div", { class: "value" }, value ? h("a", { href: `#/models/${value}` }, value) : h("span", { class: "muted" }, "—")),
+    h("div", { class: "foot" }, foot));
+}
+
+/* ------------------------------------------------------------------ views: models */
+
+async function viewModels(root, _params, query) {
+  const c = await loadCatalog();
+  let filter = query.get("stage") || "all";
+  const holder = h("div");
+  const draw = () => {
+    const rows = c.models.filter((m) => filter === "all" || m.stage === filter);
+    holder.replaceChildren(table([
+      { key: "version", label: "版", render: (m) => h("span", { class: "row", style: { gap: "6px" } }, h("b", { class: "mono" }, m.version), m.version === c.summary.latest ? h("span", { class: "badge tag" }, "最新") : null, m.deployed ? h("span", { class: "badge outline" }, "Pi で使用中") : null), sort: (m) => m.version },
+      { key: "stage", label: "採否", render: (m) => stageBadge(m.stage) },
+      { key: "health", label: "来歴の確認", render: (m) => healthBadge(m.health), sort: (m) => ({ error: 0, warn: 1, ok: 2 })[m.health] },
+      { key: "created_at", label: "作成", render: (m) => fmtDate(m.created_at, true) },
+      { key: "sessions", label: "学習データ", render: (m) => `${m.train_sessions.length + m.val_sessions.length} セッション / ${fmtInt(m.total_samples)}`, sort: (m) => m.total_samples },
+      { key: "mae", label: "検証 MAE", num: true, title: "学習時の検証セッションでの舵角の誤差（度）", render: (m) => m.validation.steering_mae_deg !== undefined ? `±${fmt(m.validation.steering_mae_deg, 2)}°` : "—", sort: (m) => m.validation.steering_mae_deg },
+      { key: "cv", label: "交差検証", num: true, render: (m) => m.cv.length || "—", sort: (m) => m.cv.length },
+      { key: "field", label: "人の介入/10分", num: true, title: "Pi の自律走行での人の介入の回数（10分あたり）", render: (m) => fmt(m.field.human_per_10min, 1), sort: (m) => m.field.human_per_10min },
+      { key: "commit", label: "コード", render: (m) => h("span", { class: "hash" }, short(m.code.commit, 7) + (m.code.dirty ? "*" : "")), sort: (m) => m.code.commit },
+    ], rows, { onRow: (m) => (location.hash = `#/models/${m.version}`), sortKey: "version", desc: true, empty: "このステージのモデルはありません" }));
+  };
+  const seg = h("div", { class: "seg" }, [["all", "すべて"], ...Object.entries(STAGES)].map(([k, label]) => {
+    const count = k === "all" ? c.models.length : c.models.filter((m) => m.stage === k).length;
+    return h("button", { type: "button", class: filter === k ? "on" : "", onclick: (e) => { filter = k; seg.querySelectorAll("button").forEach((b) => b.classList.remove("on")); e.currentTarget.classList.add("on"); draw(); } }, `${label} ${count}`);
+  }));
+  draw();
+  root.append(
+    h("p", { class: "lead" }, "学習したモデルの一覧です。採否（候補・有効・却下・廃止）は models/registry.json に履歴付きで残ります。「有効」は、採用と判断していて来歴に誤りがないモデルです。"),
+    h("section", { class: "card" },
+      h("div", { class: "card-head" }, seg, h("span", { class: "spacer" }),
+        h("button", { type: "button", class: "ghost small", onclick: () => (location.hash = "#/compare") }, "比較する"),
+        h("button", { type: "button", onclick: () => launch("train") }, "＋ 新しく学習")),
+      holder));
+}
+
+async function viewModel(root, [version]) {
+  const c = await loadCatalog();
+  const m = c.models.find((x) => x.version === version);
+  if (!m) { root.append(h("div", { class: "empty" }, `モデル ${version} が見つかりません`)); return; }
+  setTitle(`モデル ${m.version}`);
+  const head = h("section", { class: "card" },
+    h("div", { class: "row", style: { gap: "12px", alignItems: "flex-start" } },
+      h("div", { style: { flex: 1, minWidth: "240px" } },
+        h("div", { class: "row", style: { gap: "8px" } }, h("h2", { class: "mono", style: { fontSize: "22px" } }, m.version), stageBadge(m.stage), healthBadge(m.health),
+          m.version === c.summary.latest ? h("span", { class: "badge tag" }, "最新") : null,
+          m.deployed ? h("span", { class: "badge outline" }, "Pi で使用中") : null),
+        h("div", { class: "muted small", style: { marginTop: "4px" } }, `${fmtDate(m.created_at, true)} 作成${m.created_at_source === "file_time" ? "（ファイルの時刻から推定）" : ""}・${m.note ? `メモ: ${m.note}` : "採否のメモなし"}`)),
+      h("div", { class: "row" },
+        h("button", { type: "button", class: "ghost", onclick: () => stageDialog(m) }, "採否を変える"),
+        h("button", { type: "button", class: "ghost", onclick: () => verifyDialog(m) }, "データを検証"),
+        h("button", { type: "button", class: "ghost", onclick: () => launch("bundle", `--model_dir models/${m.version} --output dist/models`) }, "バンドル作成"),
+        h("button", { type: "button", onclick: () => launch("deploy_push", `push --model_dir models/${m.version}`) }, "Pi へ配置…"))));
+  const tabs = [
+    ["概要", () => modelSummary(m, c)],
+    ["来歴", () => modelLineage(m, c)],
+    ["学習", () => modelTraining(m)],
+    ["評価", () => modelEval(m, c)],
+    ["走行・配置", () => modelField(m, c)],
+    ["環境", () => modelEnv(m)],
+  ];
+  root.append(h("div", { class: "stack" }, head, tabbed(tabs, new URLSearchParams(location.hash.split("?")[1] || "").get("tab"))));
+}
+
+function tabbed(tabs, initial) {
+  const body = h("div");
+  const bar = h("div", { class: "tabs", role: "tablist" });
+  const show = (i) => {
+    bar.querySelectorAll("button").forEach((b, j) => { b.classList.toggle("on", i === j); b.setAttribute("aria-selected", String(i === j)); });
+    body.replaceChildren(tabs[i][1]());
+  };
+  tabs.forEach(([name], i) => bar.append(h("button", { type: "button", role: "tab", onclick: () => show(i) }, name)));
+  const start = Math.max(0, tabs.findIndex(([n]) => n === initial));
+  show(start);
+  return h("div", {}, bar, body);
+}
+
+function checksList(checks) {
+  return h("ul", { class: "checks" }, checks.map((ch) => h("li", {}, healthBadge(ch.level, " "), h("span", {}, ch.message))));
+}
+
+function modelSummary(m, c) {
+  const v = m.validation;
+  const hist = m.history || [];
+  return h("div", { class: "grid cols-2" },
+    card("来歴と成果物の確認", "", checksList(m.checks)),
+    card("要点", "", h("dl", { class: "kv" },
+      h("dt", {}, "検証の誤差"), h("dd", {}, v.steering_mae !== undefined ? `MAE ${fmt(v.steering_mae, 4)}（±${fmt(v.steering_mae_deg, 2)}°）` : "—"),
+      h("dt", {}, "最良の検証損失"), h("dd", {}, fmt(m.best_val_loss, 4)),
+      h("dt", {}, "学習データ"), h("dd", {}, `学習 ${m.train_sessions.length} / 検証 ${m.val_sessions.length} セッション、${fmtInt(m.train_samples)} / ${fmtInt(m.val_samples)} サンプル`),
+      h("dt", {}, "エポック"), h("dd", {}, `${hist.length || m.params.epochs || "—"}`),
+      h("dt", {}, "推論時間（PC）"), h("dd", {}, m.inference_ms_pc ? `${fmt(m.inference_ms_pc, 2)} ms` : "—"),
+      h("dt", {}, "前方が塞がっているかの出力"), h("dd", {}, m.blocked_trained ? "学習済み" : "学習していない（使わない）"),
+      h("dt", {}, "交差検証"), h("dd", {}, m.cv.length ? m.cv.join(", ") : "同じデータの交差検証なし"),
+      h("dt", {}, "Pi での走行"), h("dd", {}, m.field.runs ? `${m.field.runs} 回・自律 ${fmt(m.field.autonomous_min, 1)} 分・人の介入 ${fmt(m.field.human_per_10min, 1)} 回/10分` : "まだ走っていない"))),
+    card("採否の履歴", "models/registry.json", stageTimeline(m)));
+}
+function stageTimeline(m) {
+  const hist = m.stage_history || [];
+  return hist.length
+    ? h("ul", { class: "timeline" }, [...hist].reverse().map((e) => h("li", {}, h("div", {}, `${STAGES[e.from] || e.from} → `, stageBadge(e.to)), e.note ? h("div", { class: "ink-2" }, e.note) : null, h("div", { class: "when" }, fmtDate(e.at, true)))))
+    : h("div", { class: "empty" }, "まだ採否を判断していません");
+}
+
+function modelLineage(m, c) {
+  const byId = Object.fromEntries(c.sessions.map((x) => [x.session_id, x]));
+  const recorded = Object.fromEntries(m.data_sessions.map((x) => [x.session_id, x]));
+  const rows = [...m.train_sessions.map((id) => ({ id, role: "学習" })), ...m.val_sessions.map((id) => ({ id, role: "検証" }))].map((r) => {
+    const cur = byId[r.id];
+    const rec = recorded[r.id] || {};
+    let level = "unknown", text = "記録なし";
+    if (!cur) { level = "warn"; text = "この PC にない"; }
+    else if (rec.manifest_hash && cur.manifest_hash === rec.manifest_hash && rec.manifest_ok !== false) { level = "ok"; text = "学習時のまま"; }
+    else if (rec.manifest_hash) { level = "error"; text = "学習後に変わった"; }
+    return { ...r, cur, rec, level, text };
+  });
+  const job = m.created_by;
+  const filters = Object.entries(m.data_filters || {}).filter(([, v]) => typeof v === "number");
+  const FILTER_LABEL = {
+    skipped_motion_mismatch: "指令と動きが食い違い、外した", skipped_stopped: "止まっていたので外した", kept_for_blocked_only: "塞がりの学習だけに使った",
+    relabeled_turn_intent: "曲がりの意図を付け直した", stuck_blocked: "引っかかりを塞がりとした", stuck_unknown: "引っかかりの近くで不明にした",
+  };
+  return h("div", { class: "stack" },
+    h("div", { class: "grid cols-2" },
+      card("どのように作られたか", "", h("dl", { class: "kv" },
+        h("dt", {}, "コマンド"), h("dd", {}, job ? h("code", {}, job.command) : h("span", { class: "muted" }, "Control Center の外で学習（コマンドの記録なし）。パラメーターは下の通り")),
+        job ? [h("dt", {}, "ジョブ"), h("dd", {}, h("a", { href: `#/jobs/${job.id}` }, job.id), " ", statusDot(job.status))] : null,
+        h("dt", {}, "コード"), h("dd", {}, m.code.commit ? h("span", { class: "hash" }, m.code.commit) : "—", m.code.dirty ? h("span", { class: "badge confirm-badge", style: { marginLeft: "6px" } }, "未コミットの変更あり") : null),
+        h("dt", {}, "学習データのハッシュ"), h("dd", {}, h("span", { class: "hash", title: "学習に使ったサンプル（画像の中身・舵角・セッション）のハッシュ" }, m.data_fingerprint || "—")),
+        h("dt", {}, "ONNX の SHA256"), h("dd", {}, h("span", { class: "hash" }, m.onnx_sha256 || "—")),
+        h("dt", {}, "成果物"), h("dd", {}, Object.entries(m.artifacts).map(([k, v]) => h("span", { class: `badge ${v ? "outline" : "stage-rejected"}`, style: { marginRight: "4px" } }, `${v ? "✓" : "×"} ${k}`))))),
+      card("パラメーター", "metadata.json の params", h("dl", { class: "kv" }, Object.entries(m.params).flatMap(([k, v]) => [h("dt", { class: "mono" }, k), h("dd", { class: "mono" }, JSON.stringify(v))])))),
+    card("どのデータから作られたか", `${rows.length} セッション・マニフェストのハッシュで照合`, table([
+      { key: "id", label: "セッション", render: (r) => h("a", { class: "mono", href: `#/data/${r.id}` }, r.id) },
+      { key: "role", label: "用途" },
+      { key: "frames", label: "フレーム", num: true, render: (r) => fmtInt(r.cur?.frames), sort: (r) => r.cur?.frames },
+      { key: "collector", label: "収集", render: (r) => r.cur?.collector || "—" },
+      { key: "hash", label: "マニフェスト（学習時）", render: (r) => h("span", { class: "hash" }, short(r.rec.manifest_hash, 12)) },
+      { key: "level", label: "今のデータ", render: (r) => healthBadge(r.level, r.text) },
+      { key: "ann", label: "ラベル", render: (r) => (m.annotations[r.id] ? h("span", { class: "badge tag" }, short(m.annotations[r.id])) : "—"), nosort: true },
+    ], rows)),
+    filters.length ? card("学習データの絞り込み", "学習の時に外した・付け直したフレームの数", hbars(filters.map(([k, v]) => ({ name: FILTER_LABEL[k] || k, value: v, text: fmtInt(v) })), { title: "フレーム数" })) : null,
+    h("div", {}, h("a", { href: `#/lineage?focus=${encodeURIComponent(`model:${m.version}`)}` }, "来歴の図でこのモデルを見る →")));
+}
+
+function modelTraining(m) {
+  const hist = m.history || [];
+  if (!hist.length) return h("div", { class: "empty" }, "学習の履歴がありません");
+  const best = hist.reduce((a, b) => (b.val_loss < a.val_loss ? b : a), hist[0]);
+  return h("div", { class: "stack" },
+    card("損失の推移", `最良の検証損失 ${fmt(best.val_loss, 4)}（エポック ${best.epoch}、この時点の重みを保存）`, lineChart({
+      series: [
+        { name: "学習", color: SERIES[0], points: hist.map((e) => [e.epoch, e.train_loss]) },
+        { name: "検証", color: SERIES[1], points: hist.map((e) => [e.epoch, e.val_loss]) },
+      ],
+      xLabel: "エポック", yLabel: "損失", marker: { x: best.epoch, label: "最良" }, yFormat: (v) => fmt(v, 3),
+    })),
+    card("エポックごとの値", "", table([
+      { key: "epoch", label: "エポック", num: true },
+      { key: "train_loss", label: "学習の損失", num: true, render: (e) => fmt(e.train_loss, 4) },
+      { key: "val_loss", label: "検証の損失", num: true, render: (e) => fmt(e.val_loss, 4) },
+    ], hist, { rowClass: (e) => (e.epoch === best.epoch ? "selected" : "") })));
+}
+
+function modelEval(m, c) {
+  const v = m.validation;
+  const dirs = [["left", "左"], ["straight", "直進"], ["right", "右"]];
+  const intents = [["any", "おまかせ"], ["left", "左へ"], ["right", "右へ"]];
+  const cvs = c.cv.filter((x) => m.cv.includes(x.name));
+  return h("div", { class: "stack" },
+    h("div", { class: "grid cols-2" },
+      card("向き別の誤差（検証）", "舵角の MAE（-1〜1）。小さいほどよい", v.steering_mae_by_direction
+        ? hbars(dirs.map(([k, label]) => ({ name: label, value: v.steering_mae_by_direction[k], extra: [[null, "サンプル", fmtInt(v.samples_by_direction?.[k])]] })), { title: "向き別の MAE" })
+        : h("div", { class: "empty" }, "記録なし")),
+      card("行きたい向き（意図）別の誤差", "", v.steering_mae_by_intent
+        ? hbars(intents.map(([k, label]) => ({ name: label, value: v.steering_mae_by_intent[k], extra: [[null, "サンプル", fmtInt(v.samples_by_intent?.[k])]] })), { title: "意図別の MAE" })
+        : h("div", { class: "empty" }, "記録なし"))),
+    card("交差検証（同じ学習データ）", "セッションを1つずつ抜いて評価。偏りのない比較に使う", cvs.length
+      ? h("div", { class: "stack" }, cvs.map((x) => h("div", {},
+        h("div", { class: "row", style: { marginBottom: "6px" } }, h("b", { class: "mono" }, x.name), h("span", { class: "muted small" }, `${x.method}・${fmtDate(x.modified_at, true)}`)),
+        hbars([
+          { name: "モデル", value: x.overall.steering_mae, color: SERIES[0] },
+          { name: "意図の平均", value: x.baselines.intent_mean?.steering_mae, color: "var(--div-mid)" },
+          { name: "常に直進", value: x.baselines.zero?.steering_mae, color: "var(--div-mid)" },
+        ].filter((r) => r.value !== undefined), { title: "交差検証の MAE（基準と比べる）" }))))
+      : h("div", { class: "empty" }, "このモデルと同じ学習データの交差検証はありません")),
+    m.evaluation ? card("オフライン評価（eval_metrics.json）", "", h("dl", { class: "kv" }, Object.entries(m.evaluation).flatMap(([k, val]) => [h("dt", { class: "mono" }, k), h("dd", {}, typeof val === "number" ? fmt(val, 4) : JSON.stringify(val))]))) : null);
+}
+
+function modelField(m, c) {
+  const runs = c.runs.filter((r) => r.model_version === m.version);
+  return h("div", { class: "stack" },
+    h("div", { class: "grid cols-4" },
+      stat("走行", m.field.runs, "回"),
+      stat("自律の時間", fmt(m.field.autonomous_min, 1), "分"),
+      stat("人の介入", m.field.human, "回", `${fmt(m.field.human_per_10min, 1)} 回/10分`),
+      stat("安全の介入", m.field.safety, "回", "障害物・段差・引っかかり")),
+    card("配置の履歴", "data/deployments.jsonl", m.deployments.length
+      ? h("ul", { class: "timeline" }, [...m.deployments].reverse().map((d) => h("li", {}, h("div", {}, `${{ push: "配置して使用中に", install: "配置のみ", rollback: "戻した" }[d.action] || d.action} `, healthBadge(d.ok ? "ok" : "error", d.ok ? "成功" : "失敗")), h("div", { class: "when" }, fmtDate(d.at, true)))))
+      : h("div", { class: "empty" }, "Control Center からの配置の記録はありません")),
+    card("このモデルの走行", "", runsTable(runs.reverse())));
+}
+
+function modelEnv(m) {
+  return h("div", { class: "grid cols-2" },
+    card("ソフトウェア", "", h("dl", { class: "kv" }, Object.entries(m.environment).flatMap(([k, v]) => [h("dt", { class: "mono" }, k), h("dd", { class: "mono" }, v ?? "—")]))),
+    card("前処理（Pi と同じにする値）", "", h("dl", { class: "kv" }, Object.entries(m.preprocessing).flatMap(([k, v]) => [h("dt", { class: "mono" }, k), h("dd", { class: "mono" }, JSON.stringify(v))]))));
+}
+
+function stageDialog(m) {
+  let chosen = m.stage === "approved" ? "archived" : "approved";
+  const options = h("div", { class: "stack", style: { gap: "6px" } }, Object.entries(STAGES).map(([k, label]) => {
+    const input = h("input", { type: "radio", name: "stage", value: k, checked: k === chosen, onchange: () => (chosen = k) });
+    return h("label", { class: "check" }, input, h("span", {}, stageBadge(k), " ", h("span", { class: "ink-2 small" }, STAGE_HELP[k])));
+  }));
+  const note = h("textarea", { rows: 3, placeholder: "判断の理由（例: 交差検証で v005 より MAE が 0.02 小さい、走行で介入が減った）" });
+  const errors = m.checks.filter((x) => x.level === "error");
+  modal({
+    title: `${m.version} の採否`,
+    body: [
+      h("div", {}, "今: ", stageBadge(m.stage)),
+      options,
+      h("label", { class: "field" }, h("span", {}, "理由（履歴に残ります）"), note),
+      errors.length ? h("div", { class: "warn-box small" }, "来歴の確認に誤りがあります。「有効」にしても、直すまでは有効なモデルとして扱いません: ", errors.map((e) => e.message).join(" / ")) : null,
+    ],
+    actions: (close) => [
+      h("button", { class: "ghost", type: "button", onclick: close }, "キャンセル"),
+      h("button", { type: "button", onclick: async () => {
+        if ((chosen === "approved" || chosen === "rejected") && !note.value.trim()) return toast("有効・却下にする時は理由を書いてください", "error");
+        try {
+          await api(`/models/${encodeURIComponent(m.version)}/stage`, { method: "POST", body: { stage: chosen, note: note.value.trim() } });
+          close();
+          toast(`${m.version} を「${STAGES[chosen]}」にしました`);
+          await loadCatalog(true);
+          render();
+        } catch (err) { toast(err.message, "error"); }
+      } }, "保存"),
+    ],
+  });
+}
+
+function verifyDialog(m) {
+  const body = h("div", { class: "loading" }, h("span", { class: "spinner" }), "学習データの全ファイルのハッシュを確かめています…");
+  modal({ title: `${m.version} の学習データを検証`, body, actions: (close) => [h("button", { type: "button", onclick: close }, "閉じる")] });
+  api(`/models/${encodeURIComponent(m.version)}/verify`, { method: "POST", body: {} }).then((res) => {
+    const bad = res.sessions.filter((x) => x.ok !== true);
+    body.replaceWith(h("div", { class: "stack", style: { gap: "10px" } },
+      bad.length ? h("div", { class: "alert error" }, healthBadge("error"), `${bad.length} セッションがマニフェストと合いません`) : h("div", { class: "alert info" }, healthBadge("ok"), "すべてのセッションがマニフェストと一致しました（学習時のデータのまま）"),
+      table([
+        { key: "session_id", label: "セッション", render: (x) => h("span", { class: "mono" }, x.session_id) },
+        { key: "ok", label: "結果", render: (x) => healthBadge(x.ok === true ? "ok" : x.ok === false ? "error" : "warn", x.ok === true ? "一致" : x.ok === false ? "不一致" : "なし") },
+        { key: "problems", label: "内容", render: (x) => x.problems.slice(0, 3).join(", ") || "—", nosort: true },
+      ], res.sessions)));
+  }).catch((err) => body.replaceWith(h("div", { class: "alert error" }, err.message)));
+}
+
+/* ------------------------------------------------------------------ views: compare */
+
+async function viewCompare(root, _p, query) {
+  const c = await loadCatalog();
+  const picked = new Set((query.get("m") || c.models.slice(-3).map((m) => m.version).join(",")).split(",").filter(Boolean));
+  const holder = h("div", { class: "stack" });
+  const chooser = h("div", { class: "row" }, c.models.map((m) => h("label", { class: "check pill", style: { cursor: "pointer" } },
+    h("input", { type: "checkbox", checked: picked.has(m.version), onchange: (e) => { e.target.checked ? picked.add(m.version) : picked.delete(m.version); draw(); } }),
+    h("span", { class: "mono" }, m.version), stageBadge(m.stage))));
+  const draw = () => {
+    const ms = c.models.filter((m) => picked.has(m.version));
+    if (!ms.length) { holder.replaceChildren(h("div", { class: "empty" }, "比べるモデルを選んでください")); return; }
+    const paramKeys = [...new Set(ms.flatMap((m) => Object.keys(m.params)))].sort();
+    const differs = (k) => new Set(ms.map((m) => JSON.stringify(m.params[k]))).size > 1;
+    const rowsDef = [
+      ["採否", (m) => stageBadge(m.stage)],
+      ["来歴の確認", (m) => healthBadge(m.health)],
+      ["作成", (m) => fmtDate(m.created_at, true)],
+      ["検証 MAE（度）", (m) => `±${fmt(m.validation.steering_mae_deg, 2)}°`, (m) => m.validation.steering_mae_deg],
+      ["最良の検証損失", (m) => fmt(m.best_val_loss, 4), (m) => m.best_val_loss],
+      ["学習サンプル", (m) => fmtInt(m.train_samples)],
+      ["検証セッション", (m) => m.val_sessions.join(", ") || "—"],
+      ["学習データのハッシュ", (m) => h("span", { class: "hash" }, short(m.data_fingerprint))],
+      ["コード", (m) => h("span", { class: "hash" }, short(m.code.commit, 7) + (m.code.dirty ? "*" : ""))],
+      ["人の介入/10分", (m) => fmt(m.field.human_per_10min, 1), (m) => m.field.human_per_10min],
+      ...paramKeys.map((k) => [`params.${k}`, (m) => h("span", { class: "mono", style: differs(k) ? { fontWeight: 700, color: "var(--accent-ink)" } : {} }, JSON.stringify(m.params[k] ?? null)), null, differs(k)]),
+    ];
+    const best = (fn) => { const vals = ms.map(fn).filter((x) => x !== null && x !== undefined); return vals.length > 1 ? Math.min(...vals) : null; };
+    const grid = h("div", { class: "table-wrap" }, h("table", {},
+      h("thead", {}, h("tr", {}, h("th", {}, "項目"), ms.map((m) => h("th", {}, h("a", { class: "mono", href: `#/models/${m.version}` }, m.version))))),
+      h("tbody", {}, rowsDef.map(([label, render, value, diff]) => {
+        const b = value ? best(value) : null;
+        return h("tr", {}, h("td", { class: diff ? "" : "ink-2", style: diff ? { fontWeight: 600 } : {} }, label, diff ? h("span", { class: "badge tag", style: { marginLeft: "6px" } }, "違い") : null),
+          ms.map((m) => h("td", { style: b !== null && value(m) === b ? { fontWeight: 700 } : {} }, render(m), b !== null && value(m) === b ? " ◀" : null)));
+      }))));
+    const curves = ms.length <= 3 && ms.some((m) => (m.history || []).length)
+      ? card("検証の損失の推移", "", lineChart({ series: ms.map((m, i) => ({ name: m.version, color: SERIES[i], points: (m.history || []).map((e) => [e.epoch, e.val_loss]) })), xLabel: "エポック", yLabel: "検証の損失" }))
+      : ms.length > 3 ? card("検証の損失の推移", "", h("div", { class: "empty" }, "色で見分けられるよう、損失の図は3つまでのモデルで表示します")) : null;
+    holder.replaceChildren(card("モデルの比較", "太字 ◀ は最も小さい（よい）値。違うパラメーターに印", grid), curves);
+  };
+  draw();
+  const cvRows = c.cv.filter((x) => x.kind === "cross_validation");
+  const cmpRows = c.cv.filter((x) => x.kind === "comparison");
+  // compare_cv の判定（ADOPT / KEEP / NOT_COMPARABLE と同じ値）
+  const VERDICT = { adopt: ["ok", "採用してよい"], keep_current: ["error", "今の設定のまま（採用しない）"], not_comparable: ["warn", "比べられない"] };
+  root.append(h("div", { class: "stack" },
+    h("p", { class: "lead" }, "モデルの値とパラメーターを並べて比べます。偏りのない比較には、同じデータの交差検証の結果を使ってください。"),
+    card("比べるモデル", "", chooser),
+    holder,
+    card("交差検証の結果", "data/cv（同じ学習データのハッシュのモデルにつながる）", table([
+      { key: "name", label: "名前", render: (x) => h("b", { class: "mono" }, x.name) },
+      { key: "modified_at", label: "日時", render: (x) => fmtDate(x.modified_at, true) },
+      { key: "mae", label: "MAE（度）", num: true, render: (x) => `±${fmt(x.overall.steering_mae_deg, 2)}°`, sort: (x) => x.overall.steering_mae_deg },
+      { key: "intent_mean", label: "基準: 意図の平均", num: true, render: (x) => `±${fmt(x.baselines.intent_mean?.steering_mae_deg, 2)}°`, sort: (x) => x.baselines.intent_mean?.steering_mae_deg },
+      { key: "folds", label: "抜いたセッション", num: true, render: (x) => x.folds.length },
+      { key: "params", label: "主な設定", nosort: true, render: (x) => ["turn_intent", "flip_augment", "blocked_loss_weight", "blocked_stuck"].filter((k) => k in x.params).map((k) => `${k}=${JSON.stringify(x.params[k])}`).join(" ") },
+      { key: "models", label: "モデル", nosort: true, render: (x) => c.models.filter((m) => m.data_fingerprint && m.data_fingerprint === x.data_fingerprint).map((m) => h("a", { class: "badge tag", href: `#/models/${m.version}`, style: { marginRight: "4px" } }, m.version)) },
+    ], cvRows, { sortKey: "modified_at", desc: true, empty: "交差検証の結果はありません（ツール → 交差検証）" })),
+    card("採用の判定（交差検証の比較）", "src.e2e.evaluation.compare_cv の結果", table([
+      { key: "name", label: "名前", render: (x) => h("b", { class: "mono" }, x.name) },
+      { key: "verdict", label: "判定", render: (x) => { const [lv, t] = VERDICT[x.verdict] || ["unknown", x.verdict || "—"]; return healthBadge(lv, t); } },
+      { key: "files", label: "比べたもの", nosort: true, render: (x) => Object.entries(x.files || {}).map(([k, v]) => `${k}: ${String(v).split(/[\\/]/).pop()}`).join(" / ") },
+      { key: "reasons", label: "理由", nosort: true, render: (x) => (x.reasons || []).join(" / ") || "—" },
+    ], cmpRows, { empty: "比較の結果はありません" }))));
+}
+
+/* ------------------------------------------------------------------ views: data */
+
+async function viewData(root) {
+  const c = await loadCatalog();
+  const inc = c.summary.incomplete_sessions || [];
+  const total = c.sessions.reduce((a, x) => a + x.frames, 0);
+  const avg = (k) => c.sessions.reduce((a, x) => a + (x.distribution[k] || 0) * x.frames, 0) / (total || 1);
+  root.append(h("div", { class: "stack" },
+    h("p", { class: "lead" }, "走行データのセッションです。マニフェスト（全ファイルの SHA256）で、学習の後にデータが変わっていないかを確かめられます。"),
+    h("div", { class: "grid cols-4" },
+      stat("セッション", c.sessions.length, "件", inc.length ? `ほかにラベルのないもの ${inc.length} 件` : ""),
+      stat("フレーム", fmtInt(total), "", `${fmt(c.summary.hours * 60, 1)} 分`),
+      stat("マニフェストあり", c.sessions.filter((x) => x.manifest_hash).length, `/ ${c.sessions.length}`, "ないものは ツール → マニフェスト で作る"),
+      h("div", { class: "card stat" }, h("span", { class: "label" }, "全体の舵角の分布"), h("div", { style: { margin: "10px 0 4px" } }, distBar({ left_ratio: avg("left_ratio"), straight_ratio: avg("straight_ratio"), right_ratio: avg("right_ratio") })), distLegend())),
+    inc.length ? h("div", { class: "alert warn" }, healthBadge("warn"), h("span", {}, `ラベル（labels.jsonl）のないセッションは学習に使われません: ${inc.map((x) => `${x.session_id}（画像 ${x.images}）`).join("、")}`)) : null,
+    card("セッション", "行を押すと画像と詳細", table([
+      { key: "session_id", label: "セッション", render: (x) => h("b", { class: "mono" }, x.session_id) },
+      { key: "collector", label: "収集", render: (x) => x.collector || "—" },
+      { key: "frames", label: "フレーム", num: true, render: (x) => fmtInt(x.frames) },
+      { key: "duration_sec", label: "時間", num: true, render: (x) => `${fmt(x.duration_sec, 0)} 秒` },
+      { key: "dist", label: "舵角の分布（左・直進・右）", nosort: true, render: (x) => distBar(x.distribution) },
+      { key: "manifest_hash", label: "マニフェスト", render: (x) => (x.manifest_hash ? h("span", { class: "hash" }, short(x.manifest_hash)) : healthBadge("warn", "なし")) },
+      { key: "annotation_hash", label: "ラベル", render: (x) => (x.annotation_hash ? h("span", { class: "badge tag" }, "あり") : "—") },
+      { key: "used_by", label: "使ったモデル", render: (x) => (x.used_by.length ? x.used_by.map((v) => h("span", { class: "badge outline", style: { marginRight: "4px" } }, v)) : h("span", { class: "muted" }, "未使用")), sort: (x) => x.used_by.length },
+    ], c.sessions, { onRow: (x) => (location.hash = `#/data/${x.session_id}`), sortKey: "session_id", desc: true }),
+    h("div", { style: { marginTop: "10px" } }, distLegend())),
+    h("div", { class: "row" },
+      h("button", { type: "button", class: "ghost", onclick: () => launch("data_viewer") }, "データ確認・ラベルを開く"),
+      h("button", { type: "button", class: "ghost", onclick: () => launch("manifest") }, "マニフェストを検証"),
+      h("button", { type: "button", class: "ghost", onclick: () => launch("session_report") }, "セッションの報告"))));
+}
+
+async function viewSession(root, [sid]) {
+  const c = await loadCatalog();
+  const x = c.sessions.find((y) => y.session_id === sid);
+  if (!x) { root.append(h("div", { class: "empty" }, `セッション ${sid} が見つかりません`)); return; }
+  setTitle(`セッション ${sid}`);
+  const n = Math.min(24, x.frames);
+  const idx = [...new Set(Array.from({ length: n }, (_, i) => Math.round((i * (x.frames - 1)) / Math.max(1, n - 1))))];
+  root.append(h("div", { class: "stack" },
+    h("div", { class: "grid cols-2" },
+      card("概要", "", h("dl", { class: "kv" },
+        h("dt", {}, "フォルダ"), h("dd", { class: "mono" }, x.path),
+        h("dt", {}, "収集の方法"), h("dd", {}, x.collector || "—"),
+        h("dt", {}, "フレーム"), h("dd", {}, `${fmtInt(x.frames)}（${fmt(x.duration_sec, 1)} 秒・${fmt(x.fps, 1)} fps）`),
+        h("dt", {}, "舵角の分布"), h("dd", {}, distBar(x.distribution), h("div", { class: "small muted", style: { marginTop: "4px" } }, `左 ${pct(x.distribution.left_ratio)}・直進 ${pct(x.distribution.straight_ratio)}・右 ${pct(x.distribution.right_ratio)}`)),
+        h("dt", {}, "マニフェスト"), h("dd", {}, x.manifest_hash ? h("span", { class: "hash" }, x.manifest_hash) : healthBadge("warn", "なし"), x.manifest_created_at ? h("div", { class: "small muted" }, `${fmtDate(x.manifest_created_at, true)} 作成`) : null),
+        h("dt", {}, "手作業のラベル"), h("dd", {}, x.annotation_hash ? h("span", { class: "hash" }, x.annotation_hash) : "なし"))),
+      card("このデータで学習したモデル", "", x.used_by.length
+        ? h("div", { class: "stack", style: { gap: "8px" } }, x.used_by.map((v) => { const m = c.models.find((mm) => mm.version === v); return h("a", { href: `#/models/${v}`, class: "row", style: { color: "var(--ink)" } }, h("b", { class: "mono" }, v), stageBadge(m.stage), h("span", { class: "muted small" }, m.val_sessions.includes(sid) ? "検証に使用" : "学習に使用")); }))
+        : h("div", { class: "empty" }, "まだどのモデルの学習にも使っていません"))),
+    card("画像（等間隔に抜き出し）", `${idx.length} 枚 / ${fmtInt(x.frames)}`, h("div", { class: "frames" }, idx.map((i) => h("figure", {},
+      h("img", { src: frameUrl(sid, i), loading: "lazy", alt: `frame ${i}`, onerror: (e) => e.target.closest("figure").remove() }),
+      h("figcaption", {}, `#${i}`)))))));
+}
+
+/* ------------------------------------------------------------------ views: lineage */
+
+const KIND_LABEL = { session: "走行データ", annotation: "手作業のラベル", model: "モデル", cv: "交差検証", field: "Pi での走行" };
+const COLUMN_TITLES = ["走行データ", "手作業のラベル", "モデル", "評価・走行"];
+async function viewLineage(root, _p, query) {
+  const c = await loadCatalog();
+  const { nodes, edges } = c.graph;
+  if (!nodes.length) { root.append(h("div", { class: "empty" }, "まだ来歴がありません")); return; }
+  const cols = [0, 1, 2, 3].filter((i) => nodes.some((n) => n.column === i));
+  const NW = 200, NH = 42, GAP = 10, CG = 110, TOP = 40;
+  const pos = {};
+  const counts = Object.fromEntries(cols.map((col) => [col, nodes.filter((n) => n.column === col).length]));
+  const most = Math.max(...Object.values(counts));
+  cols.forEach((col, ci) => {
+    const list = nodes.filter((n) => n.column === col);
+    const offset = ((most - list.length) * (NH + GAP)) / 2;
+    list.forEach((n, i) => {
+      // ラベルは元のセッションの横に置く（線が他の節の上を通らないように）
+      const src = col === 1 ? pos[`session:${n.id.split(/:(.+)/)[1]}`] : null;
+      pos[n.id] = { x: 20 + ci * (NW + CG), y: src ? src.y : TOP + offset + i * (NH + GAP) };
+    });
+  });
+  const W = 20 + cols.length * (NW + CG) - CG + 20;
+  const H = TOP + most * (NH + GAP) + 10;
+  const svg = s("svg", { width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "データとモデルの来歴の図" });
+  cols.forEach((col, ci) => svg.append(s("text", { class: "lin-col-title", x: 20 + ci * (NW + CG), y: 22 }, COLUMN_TITLES[col])));
+  const edgeEls = edges.map((e) => {
+    const a = pos[e.from], b = pos[e.to];
+    if (!a || !b) return null;
+    const x1 = a.x + NW, y1 = a.y + NH / 2, x2 = b.x, y2 = b.y + NH / 2, mx = (x1 + x2) / 2;
+    const el = s("path", { class: `lin-edge ${e.kind}`, d: `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}` });
+    el.dataset.from = e.from; el.dataset.to = e.to;
+    svg.append(el);
+    return el;
+  }).filter(Boolean);
+  const STAGE_COLOR = { approved: "var(--good)", rejected: "var(--bad)", candidate: "var(--muted)", archived: "var(--axis)" };
+  const nodeEls = {};
+  nodes.forEach((n) => {
+    const p = pos[n.id];
+    const sub = n.kind === "session" ? (n.missing ? "この PC にない" : `${fmtInt(n.frames)} フレーム`)
+      : n.kind === "model" ? `${STAGES[n.stage]}・${HEALTH_TEXT[n.health]}`
+      : n.kind === "field" ? `${n.runs} 回・${n.autonomous_min} 分・人の介入 ${n.human}` : KIND_LABEL[n.kind];
+    const g = s("g", { class: `lin-node ${n.kind} ${n.missing ? "missing" : ""}`, transform: `translate(${p.x},${p.y})`, tabindex: 0 },
+      s("rect", { width: NW, height: NH, rx: 7 }),
+      n.kind === "model" ? s("rect", { class: "stripe", width: 4, height: NH - 12, x: 6, y: 6, rx: 2, style: `fill:${STAGE_COLOR[n.stage]};stroke:none` }) : null,
+      s("text", { class: "t", x: n.kind === "model" ? 16 : 10, y: 17 }, n.kind === "annotation" ? n.label.replace("ラベル ", "") : n.kind === "field" ? "Pi での走行" : n.label),
+      s("text", { class: "k", x: n.kind === "model" ? 16 : 10, y: 32 }, sub));
+    g.addEventListener("click", () => focus(n.id));
+    g.addEventListener("keydown", (e) => { if (e.key === "Enter") focus(n.id); });
+    nodeEls[n.id] = g;
+    svg.append(g);
+  });
+  const panel = h("div");
+  const wrap = h("div", { class: "lineage-wrap" }, svg);
+  function connected(id) {
+    const up = new Set([id]), down = new Set([id]);
+    let changed = true;
+    while (changed) { changed = false; for (const e of edges) { if (down.has(e.from) && !down.has(e.to)) { down.add(e.to); changed = true; } if (up.has(e.to) && !up.has(e.from)) { up.add(e.from); changed = true; } } }
+    return new Set([...up, ...down]);
+  }
+  function focus(id) {
+    const set = connected(id);
+    svg.classList.add("dim");
+    Object.entries(nodeEls).forEach(([k, el]) => el.classList.toggle("hi", set.has(k)));
+    edgeEls.forEach((el) => el.classList.toggle("hi", set.has(el.dataset.from) && set.has(el.dataset.to)));
+    const n = nodes.find((x) => x.id === id);
+    const [kind, key] = id.split(/:(.+)/);
+    const link = kind === "model" ? `#/models/${key}` : kind === "session" || kind === "annotation" ? `#/data/${key}` : kind === "cv" ? "#/compare" : "#/runs";
+    const up = [...set].filter((k) => k !== id && nodes.find((x) => x.id === k)?.column < n.column);
+    const down = [...set].filter((k) => k !== id && nodes.find((x) => x.id === k)?.column > n.column);
+    panel.replaceChildren(card(`${KIND_LABEL[n.kind]}: ${n.label}`, "", h("dl", { class: "kv" },
+      h("dt", {}, "元になったもの"), h("dd", {}, up.length ? up.map((k) => h("span", { class: "badge outline", style: { margin: "0 4px 4px 0" } }, k.replace(":", " "))) : "—"),
+      h("dt", {}, "ここから作られたもの"), h("dd", {}, down.length ? down.map((k) => h("span", { class: "badge outline", style: { margin: "0 4px 4px 0" } }, k.replace(":", " "))) : "—")),
+      h("div", { class: "row", style: { marginTop: "10px" } }, h("a", { href: link }, "詳細を開く →"), h("button", { type: "button", class: "ghost small", onclick: clear }, "選択を外す"))));
+  }
+  function clear() {
+    svg.classList.remove("dim");
+    Object.values(nodeEls).forEach((el) => el.classList.remove("hi"));
+    edgeEls.forEach((el) => el.classList.remove("hi"));
+    panel.replaceChildren(h("div", { class: "muted small" }, "節を押すと、その元になったデータと、そこから作られたもの（モデル・評価・走行）を強調します。"));
+  }
+  clear();
+  root.append(h("div", { class: "stack" },
+    h("p", { class: "lead" }, "走行データ → 手作業のラベル → モデル → 交差検証・Pi での走行 のつながりです。記録（metadata.json のセッション、データのハッシュ、run.json の版）だけから作っています。"),
+    h("div", { class: "legend" },
+      h("span", {}, s("svg", { width: 28, height: 8 }, s("line", { x1: 0, x2: 28, y1: 4, y2: 4, stroke: "var(--axis)", "stroke-width": 2 })), "学習に使用"),
+      h("span", {}, s("svg", { width: 28, height: 8 }, s("line", { x1: 0, x2: 28, y1: 4, y2: 4, stroke: "var(--axis)", "stroke-width": 2, "stroke-dasharray": "5 4" })), "検証に使用"),
+      h("span", {}, s("svg", { width: 28, height: 8 }, s("line", { x1: 0, x2: 28, y1: 4, y2: 4, stroke: "var(--axis)", "stroke-width": 2, "stroke-dasharray": "2 4" })), "同じデータで評価"),
+      h("span", {}, h("i", { class: "box", style: { background: "var(--good)" } }), "有効"),
+      h("span", {}, h("i", { class: "box", style: { background: "var(--muted)" } }), "候補"),
+      h("span", {}, h("i", { class: "box", style: { background: "var(--bad)" } }), "却下")),
+    panel, wrap));
+  const f = query.get("focus");
+  if (f && nodeEls[f]) { focus(f); nodeEls[f].scrollIntoView?.({ block: "center", inline: "center" }); }
+}
+
+/* ------------------------------------------------------------------ views: runs */
+
+function runsTable(runs) {
+  return table([
+    { key: "run_id", label: "走行", render: (r) => h("span", { class: "mono" }, r.run_id) },
+    { key: "model_version", label: "モデル", render: (r) => (r.model_version ? h("a", { class: "mono", href: `#/models/${r.model_version}` }, r.model_version) : "—") },
+    { key: "started_at", label: "開始", render: (r) => fmtDate(r.started_at) },
+    { key: "autonomous_s", label: "自律", num: true, render: (r) => `${fmt(r.autonomous_s / 60, 1)} 分` },
+    { key: "human", label: "人の介入", num: true },
+    { key: "safety", label: "安全の介入", num: true },
+    { key: "rate", label: "人/10分", num: true, render: (r) => (r.autonomous_s > 0 ? fmt((r.human * 600) / r.autonomous_s, 1) : "—"), sort: (r) => (r.autonomous_s > 0 ? r.human / r.autonomous_s : null) },
+    { key: "end_reason", label: "終わった理由", render: (r) => r.end_reason || (r.ended ? "—" : "途中") },
+  ], runs, { empty: "走行の記録はありません（ツール → 走行記録の取り込み）" });
+}
+
+async function viewRuns(root) {
+  const c = await loadCatalog();
+  const per = c.models.filter((m) => m.field.runs);
+  root.append(h("div", { class: "stack" },
+    h("p", { class: "lead" }, "Pi の自律走行の記録（data/runs/*/run.json）です。モデルごとに、人と安全機能が介入した回数を比べられます。"),
+    card("モデル別", "人の介入が少ないほどよい", per.length
+      ? hbars(per.map((m) => ({ name: m.version, value: m.field.human_per_10min || 0, text: `${fmt(m.field.human_per_10min, 1)} 回/10分`, extra: [[null, "走行", `${m.field.runs} 回`], [null, "自律", `${fmt(m.field.autonomous_min, 1)} 分`]] })), { title: "人の介入（10分あたり）" })
+      : h("div", { class: "empty" }, "走行の記録はありません")),
+    card("走行", `${c.runs.length} 件`, runsTable([...c.runs].reverse())),
+    h("div", { class: "row" },
+      h("button", { type: "button", class: "ghost", onclick: () => launch("deploy_pull_runs") }, "Pi から走行記録を取り込む"),
+      h("button", { type: "button", class: "ghost", onclick: () => launch("interventions") }, "介入率を集計"))));
+}
+
+/* ------------------------------------------------------------------ views: tools */
+
+async function viewTools(root) {
+  const workflows = await loadWorkflows();
+  if (!state.catalog) await loadCatalog();
+  const groups = [...new Set(workflows.map((w) => w.group))];
+  root.append(h("p", { class: "lead" }, "既存のツールを別のプロセスで起動します。出力は「ジョブ」に残り、学習のジョブは作ったモデルにつながります。車体が動くツールは安全の確認が必要です。"));
+  for (const g of groups) {
+    root.append(h("div", { class: "tool-group" }, h("h2", {}, g),
+      h("div", { class: "tools" }, workflows.filter((w) => w.group === g).map((w) => h("div", { class: "card tool" },
+        h("div", { class: "title" }, w.title,
+          w.moves_car ? h("span", { class: "badge moves" }, "車体が動く") : null,
+          w.confirm ? h("span", { class: "badge confirm-badge" }, "Pi を変更") : null,
+          w.kind === "window" ? h("span", { class: "badge outline" }, "画面") : null),
+        h("div", { class: "desc" }, w.description),
+        h("div", { class: "module" }, w.module),
+        h("div", { class: "actions" }, h("a", { href: manualHref(w.id), class: "small", style: { marginRight: "auto", alignSelf: "center" } }, "使い方"), h("button", { type: "button", class: w.moves_car ? "danger small" : "small", onclick: () => launch(w.id) }, w.moves_car ? "確認して起動…" : "起動…")))))));
+  }
+}
+
+/* ------------------------------------------------------------------ views: jobs */
+
+async function viewJobs(root) {
+  const jobs = await api("/jobs");
+  state.jobs = jobs;
+  root.append(h("p", { class: "lead" }, "起動したツールの記録です（data/jobs）。何をどの引数で動かし、どう終わったかが残ります。"),
+    card("ジョブ", `${jobs.length} 件`, table([
+      { key: "status", label: "状態", render: (j) => statusDot(j.status) },
+      { key: "title", label: "ツール", render: (j) => h("b", {}, j.title) },
+      { key: "command", label: "コマンド", render: (j) => h("code", { class: "small" }, j.command), nosort: true },
+      { key: "started_at", label: "開始", render: (j) => fmtDate(j.started_at, true) },
+      { key: "dur", label: "時間", render: (j) => duration(j.started_at, j.ended_at), nosort: true },
+      { key: "produces", label: "成果物", render: (j) => j.produces || "—" },
+    ], jobs, { onRow: (j) => (location.hash = `#/jobs/${j.id}`), sortKey: "started_at", desc: true, empty: "まだジョブはありません" })));
+  if (jobs.some((j) => j.status === "running")) state.timers.push(setTimeout(render, 3000));
+}
+
+async function viewJob(root, [id]) {
+  const jobs = await api("/jobs");
+  let job = jobs.find((j) => j.id === id);
+  if (!job) { root.append(h("div", { class: "empty" }, "ジョブが見つかりません")); return; }
+  setTitle(job.title);
+  const log = h("div", { class: "log", role: "log" });
+  const statusEl = h("span", {}, statusDot(job.status));
+  const stopBtn = h("button", { type: "button", class: job.moves_car ? "danger" : "ghost", hidden: job.status !== "running", onclick: async () => {
+    stopBtn.disabled = true;
+    try { const r = await api(`/jobs/${id}/stop`, { method: "POST", body: {} }); toast(r.stop_note ? `止めました（${r.stop_note}）` : "止めました"); } catch (err) { toast(err.message, "error"); }
+  } }, job.moves_car ? "■ 車体を止めて終了" : "止める");
+  const producedLink = h("span");
+  let since = 0, stick = true;
+  log.addEventListener("scroll", () => { stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 20; });
+  const poll = async () => {
+    try {
+      const res = await api(`/jobs/${id}/log?since=${since}`);
+      since = res.next;
+      for (const line of res.lines) log.append(h("div", { class: /error|traceback|failed|失敗/i.test(line) ? "err" : /✓|success|finished|成功/i.test(line) ? "ok" : "" }, line || " "));
+      if (stick) log.scrollTop = log.scrollHeight;
+      statusEl.replaceChildren(statusDot(res.status), res.exit_code !== null && res.exit_code !== undefined ? h("span", { class: "muted small" }, `  終了コード ${res.exit_code}`) : null);
+      stopBtn.hidden = res.status !== "running";
+      if (res.status === "running") state.timers.push(setTimeout(poll, document.hidden ? 5000 : 1000));
+      else if (job.produces && /^models\//.test(job.produces)) {
+        await loadCatalog(true);
+        const v = job.produces.split("/").pop();
+        if (state.catalog.models.find((m) => m.version === v)) producedLink.replaceChildren(h("a", { href: `#/models/${v}` }, `作ったモデル ${v} を開く →`));
+      }
+    } catch (err) { log.append(h("div", { class: "err" }, err.message)); }
+  };
+  root.append(h("div", { class: "stack" },
+    h("section", { class: "card" },
+      h("div", { class: "row", style: { alignItems: "flex-start" } },
+        h("dl", { class: "kv", style: { flex: 1 } },
+          h("dt", {}, "状態"), h("dd", {}, statusEl),
+          h("dt", {}, "コマンド"), h("dd", {}, h("code", {}, job.command)),
+          h("dt", {}, "開始"), h("dd", {}, fmtDate(job.started_at, true), job.ended_at ? `（${duration(job.started_at, job.ended_at)}）` : ""),
+          job.produces ? [h("dt", {}, "成果物"), h("dd", {}, h("span", { class: "mono" }, job.produces), " ", producedLink)] : null,
+          job.stop_note ? [h("dt", {}, "停止"), h("dd", {}, job.stop_note)] : null),
+        h("div", { class: "row" }, stopBtn, h("button", { type: "button", class: "ghost", onclick: () => launch(job.workflow, job.args.map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(" ")) }, "同じ引数でもう一度…")))),
+    job.kind === "window" ? h("div", { class: "alert info" }, healthBadge("unknown", "画面"), "別のウィンドウで開いています。閉じるとこのジョブも終わります。") : null,
+    log));
+  poll();
+}
+
+/* ------------------------------------------------------------------ views: manual */
+
+// 画面（ウィンドウ）のツールは、マニュアルの画面の説明へつなぐ
+const MANUAL_GUI = { app: "gui-app", collector: "gui-collector", data_viewer: "gui-viewer" };
+const manualHref = (id) => `#/manual?s=${MANUAL_GUI[id] || `tool-${id}`}`;
+
+async function viewManual(root, _p, query) {
+  if (!state.manual) {
+    const res = await fetch("manual.html", { cache: "no-store" }).catch(() => null);
+    if (!res || !res.ok) throw new Error("マニュアルを読み込めません（サーバーが止まっていないか確かめてください）");
+    state.manual = await res.text();
+  }
+  // 同じサーバーの静的なファイル（src/gui/web/static/manual.html）なので、そのまま入れる
+  const body = h("div", { class: "manual-body card" });
+  body.innerHTML = state.manual;
+  const toc = h("nav", { class: "manual-toc", "aria-label": "目次" });
+  const search = h("input", { type: "search", placeholder: "言葉で探す（例: 引数、配置、fps）", class: "manual-search" });
+  toc.append(search);
+  const list = h("ol");
+  body.querySelectorAll("section[id]").forEach((sec) => {
+    const title = sec.querySelector("h2");
+    const item = h("li", {}, h("a", { href: `#/manual?s=${sec.id}` }, title ? title.textContent : sec.id));
+    const subs = [...sec.querySelectorAll("h3[id], .tool[id]")];
+    if (subs.length) {
+      item.append(h("ol", {}, subs.map((el) => {
+        const label = el.matches(".tool") ? el.querySelector("h4").firstChild.textContent.trim() : el.textContent;
+        return h("li", { class: el.matches(".tool") ? "tool-item" : "" }, h("a", { href: `#/manual?s=${el.id}` }, label));
+      })));
+    }
+    list.append(item);
+  });
+  toc.append(list);
+  search.addEventListener("input", () => {
+    const q = search.value.trim().toLowerCase();
+    body.querySelectorAll(".tool, section > table tbody tr").forEach((el) => {
+      el.classList.toggle("dim-out", !!q && !el.textContent.toLowerCase().includes(q));
+    });
+  });
+  root.append(h("div", { class: "manual-layout" }, toc, body));
+  const target = query.get("s");
+  requestAnimationFrame(() => {
+    const el = target && document.getElementById(target);
+    if (!el) { window.scrollTo(0, 0); return; }
+    el.scrollIntoView({ block: "start" });
+    el.classList.add("flash");
+    setTimeout(() => el.classList.remove("flash"), 1600);
+  });
+}
+
+/* ------------------------------------------------------------------ robot & emergency stop */
+
+document.addEventListener("visibilitychange", () => {
+  // 表に戻った時は、待たずに最新にする
+  if (!document.hidden) { pollRobotNow(); }
+});
+let robotPollAt = 0;
+function pollRobotNow() { if (Date.now() - robotPollAt > 3000) pollRobot(true); }
+async function pollRobot(once) {
+  robotPollAt = Date.now();
+  const pill = document.getElementById("robot-pill");
+  try {
+    const r = await api("/robot/status");
+    state.robot = r;
+    if (r.online) {
+      const st = r.status;
+      const bat = st.sensors?.battery?.voltage;
+      pill.className = `pill ${st.emergency_stop ? "bad" : "good"}`;
+      pill.replaceChildren(h("span", { class: "dot" }), st.emergency_stop ? "Pi 緊急停止中" : `Pi 接続中${bat ? `・${fmt(bat, 2)}V` : ""}`);
+      pill.title = `モード ${st.mode}`;
+    } else {
+      pill.className = "pill neutral";
+      pill.replaceChildren(h("span", { class: "dot" }), "Pi 未接続");
+      pill.title = `Pi の API サーバーに接続できません（${r.error}）`;
+    }
+  } catch { pill.className = "pill bad"; pill.replaceChildren(h("span", { class: "dot" }), "サーバー停止中"); pill.title = "Control Center のサーバーが止まっています。起動し直してください"; }
+  // タブが裏にある間は間隔を延ばす（見ていない時に Pi へ問い合わせ続けない）
+  if (once === true) return;
+  setTimeout(pollRobot, document.hidden ? 30000 : state.robot?.online ? 4000 : 10000);
+}
+async function pollJobs() {
+  if (document.hidden) { setTimeout(pollJobs, 15000); return; }
+  try {
+    const jobs = await api("/jobs");
+    const n = jobs.filter((j) => j.status === "running").length;
+    const el = document.getElementById("nav-running");
+    el.hidden = !n; el.textContent = n;
+  } catch { /* 次の回で */ }
+  setTimeout(pollJobs, 3000);
+}
+document.getElementById("estop").addEventListener("click", async () => {
+  try {
+    const r = await api("/robot/emergency_stop", { method: "POST", body: {} });
+    toast(`${r.robot}${r.stopped_jobs.length ? `・走行ジョブ ${r.stopped_jobs.length} 件を停止` : ""}`, r.ok ? "" : "error");
+    if (r.ok) {
+      modal({
+        title: "緊急停止中",
+        body: [h("div", {}, "Pi は緊急停止の状態です。解除するまで走行は拒否されます。"), h("div", { class: "muted small" }, "周囲の安全を確かめてから解除してください。")],
+        actions: (close) => [
+          h("button", { type: "button", class: "ghost", onclick: close }, "このまま"),
+          h("button", { type: "button", onclick: async () => { try { const x = await api("/robot/emergency_stop/reset", { method: "POST", body: {} }); toast(x.ok ? "緊急停止を解除しました" : `解除できません（${x.error}）`, x.ok ? "" : "error"); close(); } catch (err) { toast(err.message, "error"); } } }, "解除する"),
+        ],
+      });
+    }
+  } catch (err) { toast(err.message, "error"); }
+});
+
+/* ------------------------------------------------------------------ router */
+
+const ROUTES = {
+  overview: ["概要", viewOverview],
+  models: ["モデル", viewModels, viewModel],
+  compare: ["比較・評価", viewCompare],
+  data: ["データ", viewData, viewSession],
+  lineage: ["来歴", viewLineage],
+  runs: ["走行記録", viewRuns],
+  tools: ["ツール", viewTools],
+  jobs: ["ジョブ", viewJobs, viewJob],
+  manual: ["操作マニュアル", viewManual],
+};
+function setTitle(t) { document.getElementById("page-title").textContent = t; document.title = `${t} — PiCar-X Control Center`; }
+
+let renderSeq = 0;
+async function render() {
+  state.timers.forEach(clearTimeout);
+  state.timers = [];
+  hideTip();
+  const seq = ++renderSeq;
+  const [path, qs] = (location.hash.replace(/^#\/?/, "") || "overview").split("?");
+  const [name, ...rest] = path.split("/").map(decodeURIComponent);
+  const route = ROUTES[name] || ROUTES.overview;
+  document.querySelectorAll(".sidebar a[data-route]").forEach((a) => a.classList.toggle("active", a.dataset.route === (ROUTES[name] ? name : "overview")));
+  setTitle(route[0]);
+  document.body.classList.remove("menu-open");
+  const view = document.getElementById("view");
+  const root = h("div");
+  view.replaceChildren(h("div", { class: "loading" }, h("span", { class: "spinner" }), "読み込み中…"));
+  try {
+    const fn = rest.length && route[2] ? route[2] : route[1];
+    await fn(root, rest, new URLSearchParams(qs || ""));
+    if (seq === renderSeq) view.replaceChildren(root);
+  } catch (err) {
+    if (seq === renderSeq) view.replaceChildren(h("div", { class: "alert error" }, healthBadge("error"), h("span", {}, `読み込めません: ${err.message}`)));
+  }
+}
+window.addEventListener("hashchange", render);
+document.getElementById("refresh").addEventListener("click", async () => { await loadCatalog(true); render(); toast("最新の状態を読み直しました"); });
+document.getElementById("menu-toggle").addEventListener("click", () => document.body.classList.toggle("menu-open"));
+document.getElementById("theme-toggle").addEventListener("click", () => {
+  const dark = document.documentElement.dataset.theme === "dark" || (!document.documentElement.dataset.theme && matchMedia("(prefers-color-scheme: dark)").matches);
+  document.documentElement.dataset.theme = dark ? "light" : "dark";
+  try { localStorage.setItem("picarx-theme", document.documentElement.dataset.theme); } catch { /* 保存できなくても表示は変える */ }
+});
+try { const t = localStorage.getItem("picarx-theme"); if (t) document.documentElement.dataset.theme = t; } catch { /* なし */ }
+
+render();
+pollRobot();
+pollJobs();

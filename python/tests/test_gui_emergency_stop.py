@@ -126,7 +126,7 @@ def test_emergency_stop_reaches_robot_while_agent_is_busy(window):
     assert time.monotonic() - started < 0.5, "UI thread was blocked"
 
     assert called.wait(timeout=2)
-    assert wait_until(lambda: "EMERGENCY" in win.lbl_safety.text(), app)
+    assert wait_until(lambda: "緊急停止" in win.lbl_safety.text(), app)
     release.set()
 
 
@@ -343,7 +343,7 @@ def test_failed_emergency_stop_is_reported(window):
     win._on_emergency_stop()
 
     assert wait_until(lambda: "緊急停止に失敗" in win.chat_history.toPlainText(), app)
-    assert "EMERGENCY" not in win.lbl_safety.text()
+    assert "緊急停止" not in win.lbl_safety.text()
 
 
 def test_emergency_stop_status_survives_telemetry_poll_until_reset(window):
@@ -352,16 +352,16 @@ def test_emergency_stop_status_survives_telemetry_poll_until_reset(window):
     client.reset_emergency_stop = AsyncMock(return_value=True)
 
     win._on_emergency_stop()
-    assert wait_until(lambda: "EMERGENCY" in win.lbl_safety.text(), app)
+    assert wait_until(lambda: "緊急停止" in win.lbl_safety.text(), app)
 
     client.get_ultrasonic.reset_mock()
     win._poll_telemetry()
     assert wait_until(lambda: client.get_ultrasonic.await_count == 1, app)
     assert wait_until(lambda: win.lbl_distance.text() == "100.0 cm", app)
-    assert "EMERGENCY" in win.lbl_safety.text()
+    assert "緊急停止" in win.lbl_safety.text()
 
     win._on_emergency_reset()
-    assert wait_until(lambda: "EMERGENCY" not in win.lbl_safety.text(), app)
+    assert wait_until(lambda: "緊急停止" not in win.lbl_safety.text(), app)
     client.reset_emergency_stop.assert_awaited_once()
 
 

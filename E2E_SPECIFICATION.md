@@ -96,6 +96,7 @@ PC上でカメラ映像をリアルタイム確認しながら手動操縦し、
   - `PicarxClient` (HTTPX 同期通信) を用いたリアルタイム遠隔操作
   - 録画トグル（`R` キー / UIボタン）による必要な走行シーンのみの抽出保存
   - 画像と操舵ラベルの完全同期書き込み
+  - 画面（2026-11-19 から、`src/gui/theme.py` の共通の見た目）: 上の帯に記録先、録画の状態（● 録画中）、届いている画像の fps（10 未満は警告の色）、緊急停止。左にカメラと録画のボタン・保存したフレーム数、右に走行の状態（舵角、速さ、前方の距離、意図、動きの確認、プロコン）、前進の速さ（−・＋ のボタンはキーボードの操作を奪わない）、操作の説明。右の列は画面が低い時にスクロールする
 - **操作キーアサイン**:
   - `W`: 押している間だけ前進（設定速度）。0.1秒ごとに指令を送り直し、離すと止まる。キーの自動の連打には頼らない（走りながら `A` や `D` を押すと OS が止めるため）
   - `S`: 停止 (車速0)
@@ -107,7 +108,7 @@ PC上でカメラ映像をリアルタイム確認しながら手動操縦し、
 - **プロコン（Nintendo Switch Pro Controller）** (`gamepad.py`、2026-11-11 から): SDL（pygame-ce、`e2e` の追加の依存）の GameController として 20ms ごとに読む。面のボタンは位置で読み（`SDL_GAMECONTROLLER_USE_BUTTON_LABELS=0`）、位置からプロコンの刻印を決める。キーボードと同時に使え、前進が後退より優先
   - `A` / `ZR`: 押している間、前進（設定速度）。`B` / `ZL`: 押している間、後退（`DRIVE_SPEED`。後退で車輪が回る最低の速度は未計測のため）。両方なら止まる
   - 左スティックの左右: 倒した量に応じた舵角（中央の15%は無視）。十字キーの左右: 舵をいっぱいまで切る。どちらもキーボードと同じ毎秒60°で目標へ近づける
-  - `X`: 停止（`S` と同じ）。`HOME`: 緊急停止（画面の EMERGENCY STOP と同じ）。`＋`: 録画トグル。`－`: 舵を中央へ。`Y` は `B` の隣で押し間違えやすいので使わない
+  - `X`: 停止（`S` と同じ）。`HOME`: 緊急停止（画面の「■ 緊急停止」と同じ）。`＋`: 録画トグル。`－`: 舵を中央へ。`Y` は `B` の隣で押し間違えやすいので使わない
   - `L` / `R`: 押している間、意図（行きたい向き）を左 / 右にする。押していなければ、または両方ならおまかせ。車の動きは変えない（2026-11-12 から）
   - プロコンが抜けたら、押していた操作を離したとみなして止まる。接続と割り当ての確認は `uv run python -m src.e2e.gamepad`
 - **保存データ形式**: `python/data/raw/<session_timestamp>/`（git 管理外）
@@ -244,6 +245,15 @@ CPU推論を想定した4層の軽量CNN（推論時間の実測値は未記録�
   - 保存済みモデルのバージョン、エポック数、検証損失、MAE、ONNX/PTH成果物の有無を走査。
 - **MLOps 比較 CLI (`registry/compare.py`)**:
   - `uv run python -m src.e2e.registry.compare` でターミナル上に Rawデータセット、Processedデータセット、モデル性能を表形式で一覧表示。モデルの表には、データのハッシュと git のコミットの先頭も出す。
+- **来歴（トレーサビリティ） (`registry/lineage.py`)**:
+  - 記録だけから、セッション → 手作業のラベル → モデル → 交差検証 → Pi での走行 をつなぐ。セッションとモデルは `metadata.json` の `split`、ラベルは `data.annotations.hashes`、交差検証は学習データのハッシュ（`data_fingerprint`）が同じもの、走行は `run.json` の `model_version` でつなぐ。読むだけで、データのフォルダには書かない（`registry/dataset.py` と違い `metadata.json` を書き直さない）。
+  - モデルごとに確かめる: ONNX の有無、前処理の値、コードのコミットと未コミットの変更、学習データが学習時のままか（記録したマニフェストのハッシュと今のマニフェストの比較）、学習後のラベルの変更、走行の記録と学習データのハッシュの食い違い。全ファイルのハッシュで確かめ直す `verify_model_data` もある（Control Center の「データを検証」）。
+  - 最新 = 作成の時刻（`metadata.json` の `created_at`。ない古いモデルはファイルの時刻）が最も新しい版。有効 = ステージが `approved` で、確認に誤り（error）がない版。
+  - Control Center から学習したモデルは、作ったジョブ（コマンド、時刻、結果、`data/jobs/<id>.json`）ともつなぐ。
+  - `uv run python -m src.e2e.registry.lineage --summary` で要約を JSON で出す。
+- **ステージと配置の記録 (`registry/stages.py`)**:
+  - 採否は `models/registry.json` に置き、モデルと一緒に git で残す。`candidate`（候補、既定）、`approved`（有効）、`rejected`（却下）、`archived`（廃止）。変えるたびに前後のステージ、時刻、理由を履歴に足す。
+  - `src.e2e.deploy.pi` の `push`（使用中にする）、`push --no_activate`（`install`）、`rollback` の結果を `data/deployments.jsonl` に追記する。接続先のホスト名は残さない。push で積み、rollback で1つ戻して、記録からわかる Pi の使用中の版を出す。記録の外で Pi を操作すると合わないので、Pi の最後の走行の版とも並べて見せる。
 - **マニフェスト (`dataset/manifest.py`)**:
   - 走行データはセッション単位で追記のみとする。各セッションに `manifest.json`（ファイルごとの SHA256 と大きさ、全体のハッシュ）を作り、`--verify` で変更、欠落、追加を検出する。`metadata.json` は集計から作り直せるので対象外。既存のマニフェストは書き換えない。
 - **バックアップ (`scripts/backup.ps1`)**:
@@ -451,7 +461,7 @@ PiCarX/
 │   │   ├── evaluation/            # evaluate.py, metrics.py, compare_cv.py, interventions.py
 │   │   ├── mapping/               # occupancy_grid.py, visualizer.py
 │   │   ├── motion/                # estimator.py, checker.py, monitor.py, analyze.py
-│   │   ├── registry/              # compare.py, dataset.py, models.py
+│   │   ├── registry/              # compare.py, dataset.py, models.py, lineage.py, stages.py
 │   │   ├── cycle_profiler.py      # 走行ループの周期の内訳
 │   │   ├── m1_check.py            # M1 の完了条件を実機で計測
 │   │   ├── safety/                # body_status.py, speed_limiter.py, stuck_detector.py,
@@ -474,7 +484,7 @@ PiCarX/
 | 目的 | コマンド (PowerShell) |
 |---|---|
 | **データ収集GUI起動** | `uv run python -m src.e2e.gui_collector` |
-| **統合GUI起動** | `uv run python -m src.gui.launcher`（会話・手動操作、E2E ツールの起動） |
+| **統合GUI起動** | `uv run python -m src.gui.launcher`（会話・手動操作、E2E ツール、配置の起動。Control Center もここから開ける） |
 | **データビューア（確認、ラベル、統計）** | `uv run python -m src.e2e.data_viewer`（別のフォルダは `--data_dir`） |
 | **決まったルールで走って自動で収集** | `uv run python -m src.e2e.auto_collector --seconds 150 --i-understand-the-car-will-move`（車が動く。床のケーブルと布団などの柔らかい物を片付けてから。ルールは `auto_collector.py` の冒頭） |
 | **プロコンの接続と割り当ての確認** | `uv run python -m src.e2e.gamepad`（押したボタンの刻印と操作を表示） |
@@ -488,6 +498,7 @@ PiCarX/
 | **クリーンデータでの再学習** | `uv run python -m src.e2e.training.train --data_dir data/processed/clean_v2 --output_dir models/<version> --epochs 25` |
 | **モデルオフライン評価** | `uv run python -m src.e2e.evaluation.evaluate --data_dir data/raw --model_path models/<version>/best_model.pth` |
 | **MLOps レジストリ確認** | `uv run python -m src.e2e.registry.compare` |
+| **Control Center（来歴・採否・比較・配置・ジョブの画面）** | `uv run python -m src.gui.web`（ブラウザで開く。来歴の要約だけなら `uv run python -m src.e2e.registry.lineage --summary`） |
 | **Pi へモデルを送る** | `uv run python -m src.e2e.deploy.pi --host pi@<ホスト> push --model_dir models/<version>`（戻すのは `rollback`、Pi の版の一覧は `list`、走行の記録を持ってくるのは `pull-runs`。`--host` の代わりに `PICARX_SSH_HOST` でもよい） |
 | **Pi 上の自律走行** | `uv run python -m src.e2e.pi_autopilot --speed 50`（`--intent left` / `right`、パッドで引き継いで修正操作を記録するなら `--gamepad`。Ctrl+C で止める） |
 | **実機自律走行** | `uv run python -m src.e2e.autonomous_driver --model models/<version>/model.onnx --speed 50`（行きたい向きは `--intent left` / `right`、既定は `any`。パッドで引き継いで修正操作を記録するなら `--gamepad`） |

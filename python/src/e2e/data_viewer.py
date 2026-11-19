@@ -94,6 +94,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSplitter,
     QStyle,
@@ -108,6 +109,7 @@ from PySide6.QtWidgets import (
 )
 
 try:
+    from ..gui import theme
     from .dataset.annotations import AnnotationStore
     from .dataset.frame_table import (
         COLUMN_BY_KEY,
@@ -145,6 +147,7 @@ except ImportError:
         summary,
     )
     from src.e2e.intent import INTENTS
+    from src.gui import theme
 
 PYTHON_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_DATA_DIRS = ("data/raw", "data/interventions")
@@ -160,42 +163,44 @@ HISTOGRAM_BINS = 14
 
 # ---- 色 ----
 
-FONT_FAMILY = "Yu Gothic UI"
-C_BG = "#f4f6f9"
-C_SURFACE = "#ffffff"
-C_BORDER = "#dde2e8"
-C_TEXT = "#1f2933"
-C_MUTED = "#8a94a3"
-C_ACCENT = "#2f6fde"
-C_ACCENT_SOFT = "#e6efff"
-C_DANGER = "#d64545"
-C_DANGER_SOFT = "#fde9e9"
-C_WARN = "#b7791f"
-C_WARN_SOFT = "#fff3d1"
-C_USED = "#3aa776"
-C_UNUSED = "#cfd5dd"
-# 棒グラフの系列の色（積み上げ）
+# 色は共通の見た目（src/gui/theme.py、Control Center と同じ値）から取る
+FONT_FAMILY = theme.FONT_FAMILY
+C_BG = theme.BG
+C_SURFACE = theme.SURFACE
+C_BORDER = theme.BORDER
+C_TEXT = theme.TEXT
+C_MUTED = theme.MUTED
+C_ACCENT = theme.ACCENT
+C_ACCENT_SOFT = theme.ACCENT_SOFT
+C_DANGER = theme.DANGER
+C_DANGER_SOFT = theme.DANGER_SOFT
+C_WARN = theme.WARN
+C_WARN_SOFT = theme.WARN_SOFT
+C_USED = theme.USED
+C_UNUSED = theme.UNUSED
+# 棒グラフの系列の色（積み上げ）。色覚の違いでも隣どうしを見分けられる順に並べたもの。
+# 最後の灰色は「その他」
 SERIES_COLORS = (
-    "#2f6fde",
-    "#3aa776",
-    "#e0a020",
-    "#d64545",
-    "#8a5cd6",
-    "#2ba3b5",
-    "#d6669e",
-    "#7b8794",
-    "#a0aec0",
+    "#2a78d6",
+    "#eb6834",
+    "#1baf7a",
+    "#eda100",
+    "#e87ba4",
+    "#008300",
+    "#6250d6",
+    "#e34948",
+    "#898781",
 )
 
 # 意味のある値は、表と帯と同じ色で描く
 VALUE_COLORS = {
     USED: C_USED,
     EXCLUDED_STOPPED: C_UNUSED,
-    EXCLUDED_FLAG: "#a0aec0",
+    EXCLUDED_FLAG: "#a3a29b",
     EXCLUDED_MISMATCH: "#e0a020",
     EXCLUDED_BY_HAND: C_DANGER,
     NONE_TEXT: C_UNUSED,
-    OTHERS_TEXT: "#a0aec0",
+    OTHERS_TEXT: "#a3a29b",
 }
 
 STYLE = f"""
@@ -207,9 +212,13 @@ QFrame#card {{
 QLabel#cardTitle {{ font-weight: 600; font-size: 10.5pt; }}
 QLabel#muted {{ color: {C_MUTED}; }}
 QLabel#count {{ color: {C_MUTED}; padding: 2px 4px; }}
+QLabel#headerMark {{ background: {C_ACCENT}; color: white; border-radius: 8px;
+    font-size: 13pt; font-weight: 700; min-width: 32px; max-width: 32px;
+    min-height: 32px; max-height: 32px; qproperty-alignment: AlignCenter; }}
+QLabel#headerTitle {{ font-size: 13pt; font-weight: 700; padding-left: 8px; }}
 QToolBar {{ background: {C_SURFACE}; border: none; border-bottom: 1px solid {C_BORDER};
-    padding: 4px 8px; spacing: 6px; }}
-QToolButton {{ padding: 4px 10px; border-radius: 6px; }}
+    padding: 8px 14px; spacing: 6px; }}
+QToolButton {{ padding: 6px 12px; border-radius: 7px; border: 1px solid {C_BORDER}; }}
 QToolButton:hover {{ background: {C_ACCENT_SOFT}; }}
 QTabWidget::pane {{ border: none; }}
 QTabBar::tab {{ background: transparent; padding: 8px 18px; margin-right: 2px;
@@ -220,9 +229,9 @@ QPushButton {{ background: {C_SURFACE}; border: 1px solid {C_BORDER}; border-rad
 QPushButton:hover {{ border-color: {C_ACCENT}; color: {C_ACCENT}; }}
 QPushButton:pressed {{ background: {C_ACCENT_SOFT}; }}
 QPushButton#primary {{ background: {C_ACCENT}; border-color: {C_ACCENT}; color: white; }}
-QPushButton#primary:hover {{ background: #285fc0; color: white; }}
+QPushButton#primary:hover {{ background: {theme.ACCENT_HOVER}; color: white; }}
 QPushButton#danger {{ background: {C_DANGER}; border-color: {C_DANGER}; color: white; }}
-QPushButton#danger:hover {{ background: #b93a3a; color: white; }}
+QPushButton#danger:hover {{ background: {theme.DANGER_HOVER}; color: white; }}
 QComboBox, QLineEdit {{ background: {C_SURFACE}; border: 1px solid {C_BORDER};
     border-radius: 6px; padding: 4px 8px; min-height: 20px; }}
 QComboBox:focus, QLineEdit:focus {{ border-color: {C_ACCENT}; }}
@@ -237,7 +246,7 @@ QListWidget#chips::item {{ background: {C_ACCENT_SOFT}; color: {C_ACCENT}; borde
     padding: 2px 10px; margin: 2px; }}
 QListWidget#chips::item:selected {{ background: {C_ACCENT}; color: white; }}
 QPlainTextEdit {{ background: {C_SURFACE}; border: 1px solid {C_BORDER}; border-radius: 6px;
-    font-family: "Consolas", "{FONT_FAMILY}"; font-size: 9pt; color: #3e4c59; }}
+    font-family: "Consolas", "{FONT_FAMILY}"; font-size: 9pt; color: {theme.TEXT_2}; }}
 QSplitter::handle {{ background: transparent; }}
 QScrollBar:vertical {{ background: transparent; width: 10px; }}
 QScrollBar::handle:vertical {{ background: {C_UNUSED}; border-radius: 5px; min-height: 30px; }}
@@ -600,7 +609,9 @@ class FrameImage(QLabel):
 
     def __init__(self):
         super().__init__()
-        self.setMinimumSize(320, 220)
+        self.setMinimumSize(240, 160)
+        # 描いた画像の大きさで枠を広げない（広げると、画面が低い時に下の文字と重なる）
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.setAlignment(Qt.AlignCenter)
         self.setStyleSheet(f"background: #11161d; border-radius: 6px; color: {C_MUTED};")
         self._pixmap: Optional[QPixmap] = None
@@ -944,7 +955,7 @@ class DataViewer(QMainWindow):
         table: Optional[FrameTable] = None,
     ):
         super().__init__()
-        self.setWindowTitle("PiCar-X 走行データ")
+        self.setWindowTitle("データ確認・ラベル — PiCar-X")
         self.resize(1600, 960)
         # INI 形式にする（テストで置き場所を変えられ、利用者の設定に触れない）
         self.qsettings = QSettings(
@@ -984,6 +995,16 @@ class DataViewer(QMainWindow):
     def _build_toolbar(self) -> None:
         bar = self.addToolBar("データ")
         bar.setMovable(False)
+        # 他の画面（会話・収集・Control Center）と同じ上の帯の形にする
+        mark = QLabel("D")
+        mark.setObjectName("headerMark")
+        bar.addWidget(mark)
+        title = QLabel("データ確認・ラベル")
+        title.setObjectName("headerTitle")
+        bar.addWidget(title)
+        gap = QWidget()
+        gap.setFixedWidth(18)
+        bar.addWidget(gap)
         for text, slot in (
             ("フォルダを追加…", self.add_folder),
             ("読み込み直す", self.reload),
@@ -1105,17 +1126,28 @@ class DataViewer(QMainWindow):
         details_card, details_layout = card("記録の中身")
         details_layout.addWidget(self.details)
 
+        self.details.setMinimumHeight(90)
         right = QWidget()
+        right.setObjectName("page")
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(6, 12, 12, 12)
         right_layout.setSpacing(10)
         right_layout.addWidget(image_card, 5)
         right_layout.addWidget(self._build_editor())
         right_layout.addWidget(details_card, 3)
+        # 画面が低い時は、部品を重ねずにスクロールさせる
+        right.setMinimumHeight(right_layout.minimumSize().height() + 160)
+        right_scroll = QScrollArea()
+        right_scroll.setFrameShape(QFrame.NoFrame)
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        right_scroll.setWidget(right)
+        # 右の列の部品が横に切れないよう、列の幅は中身の最低の幅より狭くしない
+        right_scroll.setMinimumWidth(right.minimumSizeHint().width() + 12)
 
         splitter = QSplitter()
         splitter.addWidget(left)
-        splitter.addWidget(right)
+        splitter.addWidget(right_scroll)
         splitter.setSizes([1000, 600])
         page = QWidget()
         page.setObjectName("page")
@@ -1146,10 +1178,17 @@ class DataViewer(QMainWindow):
             layout.addWidget(swatch)
             layout.addWidget(label)
         layout.addStretch(1)
-        hint = QLabel("Shift+クリック / 下の帯をドラッグ / I と O で範囲を選択")
+        # 操作のヒントは別の行にする（同じ行だと画面の幅が 1500px 近く要る）
+        hint = QLabel("範囲の選択: Shift+クリック / 下の帯をドラッグ / I と O")
         hint.setObjectName("muted")
-        layout.addWidget(hint)
-        return widget
+        hint.setWordWrap(True)
+        box = QWidget()
+        rows = QVBoxLayout(box)
+        rows.setContentsMargins(0, 0, 0, 0)
+        rows.setSpacing(4)
+        rows.addWidget(widget)
+        rows.addWidget(hint)
+        return box
 
     def _build_editor(self) -> QWidget:
         frame, layout = card("ラベル（選んだすべてのフレームに付きます）")
@@ -1958,7 +1997,7 @@ class ViewerStartup(QMainWindow):
 
     def __init__(self, data_dirs: Sequence[Path]):
         super().__init__()
-        self.setWindowTitle("PiCar-X 走行データ")
+        self.setWindowTitle("データ確認・ラベル — PiCar-X")
         self.resize(520, 180)
         self.viewer: Optional[DataViewer] = None
         panel = QWidget(self)

@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QMainWindow,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -35,6 +36,7 @@ from src.e2e.motion.monitor import (
     describe,
     record_motion_event,
 )
+from src.gui import theme
 from src.gui.theme import APP_STYLE
 from src.models import DRIVE_SPEED, MIN_MOVING_SPEED, DriveDirection, RobotStatus
 from src.picarx_client.client import PicarxClient
@@ -114,9 +116,7 @@ class CameraWorker(QThread):
                 img = None
                 if cv2 is not None and np is not None:
                     try:
-                        img = cv2.imdecode(
-                            np.frombuffer(frame.jpeg, np.uint8), cv2.IMREAD_COLOR
-                        )
+                        img = cv2.imdecode(np.frombuffer(frame.jpeg, np.uint8), cv2.IMREAD_COLOR)
                     except cv2.error:
                         img = None
                 if self.running:
@@ -132,7 +132,7 @@ class CameraWorker(QThread):
 class E2ECollectorWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("PiCar-X E2E Data Collector")
+        self.setWindowTitle("走行データ収集 — PiCar-X")
         self.resize(1180, 800)
 
         # 既存クライアントの再利用
@@ -202,124 +202,169 @@ class E2ECollectorWindow(QMainWindow):
         self.setMinimumSize(980, 700)
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
-        main_layout = QHBoxLayout(central_widget)
+        page = QVBoxLayout(central_widget)
+        page.setContentsMargins(0, 0, 0, 0)
+        page.setSpacing(0)
 
-        # === 左側: カメラ映像 & 録画ステータス ===
+        # 上の帯: 画面の名前、記録先、録画の状態、届いている画像の速さ、緊急停止
+        bar, bar_right = theme.header(
+            "走行データ収集", f"記録先 {self.session_dir.as_posix()}", mark="R"
+        )
+        self.lbl_rec_state = theme.pill("録画していない")
+        bar_right.addWidget(self.lbl_rec_state)
+        self.lbl_fps = theme.pill("-- fps")
+        self.lbl_fps.setToolTip("直近1秒に届いたカメラの画像の数（10fps 以上で集める）")
+        bar_right.addWidget(self.lbl_fps)
+        header_stop = QPushButton("■ 緊急停止")
+        header_stop.setObjectName("estop")
+        header_stop.clicked.connect(self._emergency_stop)
+        bar_right.addWidget(header_stop)
+        page.addWidget(bar)
+
+        main_layout = QHBoxLayout()
+        main_layout.setContentsMargins(16, 16, 16, 16)
+        main_layout.setSpacing(16)
+        page.addLayout(main_layout, 1)
+
+        # === 左側: カメラ映像と録画 ===
         left_layout = QVBoxLayout()
+        left_layout.setSpacing(14)
 
-        camera_group = QGroupBox("Camera Live View")
+        camera_group = QGroupBox("カメラ")
         cam_box = QVBoxLayout(camera_group)
-        self.camera_label = QLabel("Connecting to Camera...")
+        self.camera_label = QLabel("カメラに接続しています…")
         self.camera_label.setAlignment(Qt.AlignCenter)
         self.camera_label.setScaledContents(True)
         self.camera_label.setMinimumSize(320, 240)
         self.camera_label.setStyleSheet(
-            "background-color: #111; color: #888; border: 2px solid #444;"
+            f"background: {theme.CAMERA_BG}; color: #8d93a0; border-radius: 10px;"
         )
         cam_box.addWidget(self.camera_label)
-        left_layout.addWidget(camera_group)
+        left_layout.addWidget(camera_group, 1)
 
-        # 録画コントロール
-        rec_group = QGroupBox("Recording Status")
+        rec_group = QGroupBox("録画")
         rec_layout = QHBoxLayout(rec_group)
-        self.rec_btn = QPushButton("● Start Recording (R)")
-        style_rec = "background-color: #d9534f; color: white; font-weight: bold; padding: 10px;"
-        self.rec_btn.setStyleSheet(style_rec)
+        rec_layout.setSpacing(14)
+        self.rec_btn = QPushButton("● 録画を始める（R）")
+        self.rec_btn.setObjectName("record")
         self.rec_btn.clicked.connect(self._toggle_recording)
         rec_layout.addWidget(self.rec_btn)
 
-        self.lbl_rec_count = QLabel("Saved: 0 frames")
-        self.lbl_rec_count.setStyleSheet("font-size: 14px; font-weight: bold;")
+        self.lbl_rec_count = QLabel("保存 0 フレーム")
+        self.lbl_rec_count.setObjectName("tileValue")
         rec_layout.addWidget(self.lbl_rec_count)
-        rec_group.setMaximumHeight(100)
+        rec_layout.addStretch(1)
         left_layout.addWidget(rec_group)
-        left_layout.addStretch(1)
 
         main_layout.addLayout(left_layout, stretch=3)
 
-        # === 右側: テレメトリ & コントロール ===
+        # === 右側: 走行の状態と操作 ===
         right_layout = QVBoxLayout()
+        right_layout.setSpacing(14)
 
-        # テレメトリ
-        telem_group = QGroupBox("Telemetry")
+        telem_group = QGroupBox("走行の状態")
         telem_layout = QGridLayout(telem_group)
-
-        telem_layout.addWidget(QLabel("Steering Angle:"), 0, 0)
+        telem_layout.setSpacing(10)
         self.lbl_steer = QLabel("0° (0.00)")
-        self.lbl_steer.setStyleSheet("font-weight: bold;")
-        telem_layout.addWidget(self.lbl_steer, 0, 1)
-
-        telem_layout.addWidget(QLabel("Speed (Throttle):"), 1, 0)
         self.lbl_speed = QLabel("0")
-        self.lbl_speed.setStyleSheet("font-weight: bold;")
-        telem_layout.addWidget(self.lbl_speed, 1, 1)
-
-        telem_layout.addWidget(QLabel("Obstacle Dist:"), 2, 0)
         self.lbl_dist = QLabel("-- cm")
-        telem_layout.addWidget(self.lbl_dist, 2, 1)
-
-        telem_layout.addWidget(QLabel("Motion Check:"), 3, 0)
+        self.lbl_intent = QLabel(INTENT_ANY)
         self.lbl_motion = QLabel("--")
         self.lbl_motion.setWordWrap(True)
-        telem_layout.addWidget(self.lbl_motion, 3, 1)
-
-        telem_layout.addWidget(QLabel("Gamepad:"), 4, 0)
         self.lbl_pad = QLabel("未接続")
         self.lbl_pad.setWordWrap(True)
-        telem_layout.addWidget(self.lbl_pad, 4, 1)
-
-        telem_layout.addWidget(QLabel("Intent:"), 5, 0)
-        self.lbl_intent = QLabel(INTENT_ANY)
-        self.lbl_intent.setStyleSheet("font-weight: bold;")
-        telem_layout.addWidget(self.lbl_intent, 5, 1)
+        telem_layout.addWidget(theme.tile("舵角", self.lbl_steer), 0, 0)
+        telem_layout.addWidget(theme.tile("速さ", self.lbl_speed), 0, 1)
+        telem_layout.addWidget(theme.tile("前方の距離", self.lbl_dist), 1, 0)
+        telem_layout.addWidget(theme.tile("行きたい向き（意図）", self.lbl_intent), 1, 1)
+        telem_layout.addWidget(theme.tile("動きの確認", self.lbl_motion, small=True), 2, 0)
+        telem_layout.addWidget(theme.tile("プロコン", self.lbl_pad, small=True), 2, 1)
+        telem_layout.setColumnStretch(0, 1)
+        telem_layout.setColumnStretch(1, 1)
         right_layout.addWidget(telem_group)
 
-        # 速度設定
-        speed_group = QGroupBox("Driving Speed")
+        speed_group = QGroupBox("前進の速さ")
         speed_layout = QHBoxLayout(speed_group)
-        speed_layout.addWidget(QLabel("Speed (0-100):"))
+        speed_hint = QLabel(
+            f"{MIN_MOVING_SPEED}〜100（{MIN_MOVING_SPEED} より遅いと車輪が回らない）"
+        )
+        speed_hint.setObjectName("hint")
         self.spin_speed = QSpinBox()
         self.spin_speed.setRange(MIN_MOVING_SPEED, 100)
         self.spin_speed.setValue(DRIVE_SPEED)
+        self.spin_speed.setMinimumWidth(90)
         self.spin_speed.valueChanged.connect(self._on_speed_changed)
+        self.spin_speed.setObjectName("stepper")
+        self.spin_speed.setAlignment(Qt.AlignCenter)
+        slower = QPushButton("−")
+        slower.setFixedWidth(40)
+        slower.setFocusPolicy(Qt.NoFocus)
+        slower.clicked.connect(self.spin_speed.stepDown)
+        faster = QPushButton("＋")
+        faster.setFixedWidth(40)
+        faster.setFocusPolicy(Qt.NoFocus)
+        faster.clicked.connect(self.spin_speed.stepUp)
+        speed_layout.addWidget(slower)
         speed_layout.addWidget(self.spin_speed)
-        speed_group.setMaximumHeight(100)
+        speed_layout.addWidget(faster)
+        speed_layout.addWidget(speed_hint, 1)
         right_layout.addWidget(speed_group)
 
-        # 操作ガイド
-        guide_group = QGroupBox("Controls")
+        guide_group = QGroupBox("操作")
         guide_layout = QVBoxLayout(guide_group)
-        guide_text = QLabel(
-            "<b>W</b> : 前進 (Forward)<br>"
-            "<b>S</b> : 停止 (Stop)<br>"
-            "<b>A</b> : 左折 (Steer Left)<br>"
-            "<b>D</b> : 右折 (Steer Right)<br>"
-            "<b>X</b> : 直進に戻す (Center)<br>"
-            "<b>Q / E</b> : 押している間、意図を左 / 右にする (Intent)<br>"
-            "<b>R</b> : 録画トグル (REC Toggle)<br><br>"
-            "<b>プロコン</b>: A/ZR 前進、B/ZL 後退、X 停止、左スティック 舵、"
-            "十字←→ 舵いっぱい、L / R 意図 左 / 右、＋ 録画トグル、－ 舵を中央へ、HOME 緊急停止<br>"
-            "<small style='color:#555;'>※ 意図は「その先の分かれ道でどちらへ行きたいか」。"
-            "基本はまっすぐ、塞がれたら空いている側へ曲がる。</small><br>"
-            "<small style='color:#555;'>※ 後退中のフレームは学習に使わない。</small><br><br>"
-            "<small style='color:#555;'>※ ウィンドウをフォーカスして操作してください。</small>"
+        guide_layout.setSpacing(6)
+        for keys, text in (
+            (["W"], "前進（押している間）"),
+            (["S"], "停止"),
+            (["A", "D"], "舵を左 / 右へ"),
+            (["X"], "舵を中央へ"),
+            (["Q", "E"], "押している間、意図を左 / 右にする"),
+            (["R"], "録画の開始 / 一時停止"),
+        ):
+            guide_layout.addWidget(theme.key_row(keys, text))
+        pad_text = QLabel(
+            "プロコン: A/ZR 前進、B/ZL 後退、X 停止、左スティック 舵、十字←→ 舵いっぱい、"
+            "L / R 意図 左 / 右、＋ 録画、－ 舵を中央へ、HOME 緊急停止"
         )
-        guide_layout.addWidget(guide_text)
+        pad_text.setWordWrap(True)
+        pad_text.setObjectName("hint")
+        guide_layout.addSpacing(4)
+        guide_layout.addWidget(pad_text)
+        notes = QLabel(
+            "意図は「その先の分かれ道でどちらへ行きたいか」。基本はまっすぐ、塞がれたら空いている"
+            "側へ曲がる。後退中のフレームは学習に使わない。ウィンドウを選んだ状態で操作する。"
+        )
+        notes.setWordWrap(True)
+        notes.setObjectName("hint")
+        guide_layout.addWidget(notes)
         right_layout.addWidget(guide_group)
+        right_layout.addStretch(1)
 
-        # 緊急停止ボタン
-        stop_btn = QPushButton("🛑 EMERGENCY STOP")
-        stop_btn.setStyleSheet(
-            "background-color: #222; color: #ff5555; font-weight: bold; padding: 12px;"
-        )
+        # 画面が低い時も説明が重ならないよう、状態と操作の列はスクロールできるようにする
+        right_content = QWidget()
+        right_content.setLayout(right_layout)
+        right_layout.setContentsMargins(0, 0, 6, 0)
+        right_scroll = QScrollArea()
+        right_scroll.setFrameShape(QScrollArea.NoFrame)
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        right_scroll.setWidget(right_content)
+        right_column = QVBoxLayout()
+        right_column.setSpacing(12)
+        right_column.addWidget(right_scroll, 1)
+
+        stop_row = QHBoxLayout()
+        stop_btn = QPushButton("■ 緊急停止")
+        stop_btn.setObjectName("estop")
         stop_btn.clicked.connect(self._emergency_stop)
-        right_layout.addWidget(stop_btn)
+        stop_row.addWidget(stop_btn, 2)
 
-        reset_btn = QPushButton("Reset Emergency Stop")
+        reset_btn = QPushButton("緊急停止を解除")
         reset_btn.clicked.connect(self._reset_emergency_stop)
-        right_layout.addWidget(reset_btn)
+        stop_row.addWidget(reset_btn, 1)
+        right_column.addLayout(stop_row)
 
-        main_layout.addLayout(right_layout, stretch=2)
+        main_layout.addLayout(right_column, stretch=2)
 
     def _on_speed_changed(self, val):
         self.drive_speed = val
@@ -327,15 +372,14 @@ class E2ECollectorWindow(QMainWindow):
     def _toggle_recording(self):
         self.is_recording = not self.is_recording
         if self.is_recording:
-            self.rec_btn.setText("⏸ Pause Recording (R)")
-            self.rec_btn.setStyleSheet(
-                "background-color: #f0ad4e; color: black; font-weight: bold; padding: 10px;"
-            )
+            self.rec_btn.setText("⏸ 一時停止（R）")
+            self.lbl_rec_state.setText("● 録画中")
+            theme.set_level(self.lbl_rec_state, "bad")
         else:
-            self.rec_btn.setText("● Start Recording (R)")
-            self.rec_btn.setStyleSheet(
-                "background-color: #d9534f; color: white; font-weight: bold; padding: 10px;"
-            )
+            self.rec_btn.setText("● 録画を始める（R）")
+            self.lbl_rec_state.setText("録画していない")
+            theme.set_level(self.lbl_rec_state, "")
+        theme.set_property(self.rec_btn, "recording", self.is_recording)
 
     def _wanted_drive(self) -> int:
         """押している操作から決まる向き。W とパッドの前進が後退より優先"""
@@ -354,8 +398,7 @@ class E2ECollectorWindow(QMainWindow):
     def _show_intent(self) -> None:
         intent = self.current_intent()
         self.lbl_intent.setText(intent)
-        color = "" if intent == INTENT_ANY else "color: #0275d8; "
-        self.lbl_intent.setStyleSheet(f"{color}font-weight: bold;")
+        theme.set_level(self.lbl_intent, "" if intent == INTENT_ANY else "accent")
 
     def _update_drive(self) -> None:
         """操作が変わった。向きが変われば走り出すか止める"""
@@ -529,9 +572,7 @@ class E2ECollectorWindow(QMainWindow):
 
         if img is not None:
             height, width = img.shape[:2]
-            qimg = QImage(
-                img.data, width, height, img.strides[0], QImage.Format_BGR888
-            ).copy()
+            qimg = QImage(img.data, width, height, img.strides[0], QImage.Format_BGR888).copy()
         else:
             qimg = QImage.fromData(img_bytes, "JPEG")
         if not qimg.isNull():
@@ -550,16 +591,19 @@ class E2ECollectorWindow(QMainWindow):
         """直近1秒に届いたフレームの数を表示する（10fps 以上で集める。M3）"""
         self._frame_times = [t for t in self._frame_times if now - t < 1.0]
         self._frame_times.append(now)
-        self.setWindowTitle(f"PiCar-X E2E Data Collector - {len(self._frame_times)} fps")
+        fps = len(self._frame_times)
+        self.setWindowTitle(f"走行データ収集 — PiCar-X - {fps} fps")
+        self.lbl_fps.setText(f"{fps} fps")
+        theme.set_level(self.lbl_fps, "good" if fps >= 10 else "warn")
 
     def _show_motion(self, update: MonitorUpdate) -> None:
         check = update.check
         if check.flags:
             text = " / ".join(describe(flag) for flag in check.flags)
-            self.lbl_motion.setStyleSheet("color: #d9534f; font-weight: bold;")
+            theme.set_level(self.lbl_motion, "bad")
         else:
             text = f"OK (unknown: {check.unknown})" if check.unknown else "OK"
-            self.lbl_motion.setStyleSheet("")
+            theme.set_level(self.lbl_motion, "")
         sample = update.sample
         self.lbl_motion.setText(
             f"{text}<br><small>yaw {sample.yaw_rate_dps:+.0f}°/s, "
@@ -606,7 +650,7 @@ class E2ECollectorWindow(QMainWindow):
             f.write(json.dumps(record) + "\n")
 
         self.frame_count += 1
-        self.lbl_rec_count.setText(f"Saved: {self.frame_count} frames")
+        self.lbl_rec_count.setText(f"保存 {self.frame_count:,} フレーム")
 
     def keyPressEvent(self, event: QKeyEvent):
         key = event.key()
