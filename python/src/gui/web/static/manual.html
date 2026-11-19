@@ -1,0 +1,435 @@
+<!-- 操作マニュアル（Control Center の「操作マニュアル」で表示する。app.js が読み込んで目次を作る） -->
+<article class="manual">
+
+<section id="start">
+  <h2>はじめに</h2>
+  <p>PiCar-X の開発で使う画面は、次の2種類です。</p>
+  <ul>
+    <li><b>Control Center（この画面、ブラウザ）</b>: モデルとデータの管理、ツールの起動、ジョブの記録。<em>まずここを開きます。</em></li>
+    <li><b>Qt の画面（デスクトップのウィンドウ）</b>: 会話・手動操作、走行データ収集、データ確認・ラベル。カメラやパッド、マイクを使う作業です。Control Center の「ツール」から開きます。</li>
+  </ul>
+
+  <h3 id="start-launch">起動と終了</h3>
+  <table>
+    <thead><tr><th>やること</th><th>方法</th></tr></thead>
+    <tbody>
+      <tr><td>Control Center を開く</td><td><code>cd python</code> の後に <code>uv run python -m src.gui.web</code>。ブラウザが自動で開きます（<code>http://127.0.0.1:8765/</code>）</td></tr>
+      <tr><td>ランチャー（Qt）から開く</td><td><code>uv run python -m src.gui.launcher</code> を起動し、右上の「Control Center を開く（ブラウザ）」</td></tr>
+      <tr><td>終了する</td><td>起動したターミナルで <kbd>Ctrl</kbd>+<kbd>C</kbd>。ランチャーから開いた場合は、ランチャーを閉じると終わります</td></tr>
+    </tbody>
+  </table>
+  <div class="note warn"><b>サーバーを止めると、開いている画面は使えません。</b>「サーバーに接続できません」と出たら、もう一度起動してからページを開き直してください。右上に「サーバー停止中」と出ている時も同じです。</div>
+
+  <h3 id="start-safety">安全のきまり</h3>
+  <ul>
+    <li>画面右上の <span class="kbd-red">■ 緊急停止</span> は、どの画面からでも押せます。Pi に緊急停止を送り、動いている走行のジョブも止めます。解除するまで、Pi は走行を受け付けません。</li>
+    <li><span class="badge moves">車体が動く</span> の付いたツールは、安全の確認にチェックを入れないと起動できません。周りに人・物・段差がないこと、すぐ緊急停止できることを確かめてから起動します。</li>
+    <li>車体が動くジョブを止める時は、ジョブの画面の「■ 車体を止めて終了」を使います。Pi に停止を送ってから PC のプロセスを止めます。<em>Pi の自律走行は、PC のプロセスを止めても続くため</em>です。</li>
+  </ul>
+</section>
+
+<section id="which">
+  <h2>やりたいこと別の早見表</h2>
+  <p>迷ったらこの表から選びます。「ツール」はサイドバーの「ツール」から起動します。</p>
+  <table>
+    <thead><tr><th>やりたいこと</th><th>使うもの</th><th>車体</th></tr></thead>
+    <tbody>
+      <tr><td>Pi に話しかける・カメラを見る・手で少し動かす</td><td><a href="#/manual?s=gui-app">会話・手動操作</a></td><td>手で動かす</td></tr>
+      <tr><td>自分で運転して学習データを集める</td><td><a href="#/manual?s=gui-collector">走行データ収集</a></td><td>手で動かす</td></tr>
+      <tr><td>ルールで自動に走らせてデータを集める</td><td><a href="#/manual?s=tool-auto_collector">自動データ収集</a></td><td class="moves-cell">動く</td></tr>
+      <tr><td>集めたデータを見る・おかしいフレームを除外する・意図を直す</td><td><a href="#/manual?s=gui-viewer">データ確認・ラベル</a></td><td>—</td></tr>
+      <tr><td>データが学習の後に変わっていないか確かめる</td><td><a href="#/manual?s=tool-manifest">マニフェスト作成・検証</a> / モデル詳細の「データを検証」</td><td>—</td></tr>
+      <tr><td>新しいモデルを作る</td><td><a href="#/manual?s=tool-train">モデル学習</a></td><td>—</td></tr>
+      <tr><td>設定を変えたら良くなるか、偏りなく確かめる</td><td><a href="#/manual?s=tool-cross_validate">交差検証</a> → <a href="#/manual?s=tool-compare_cv">交差検証の比較</a></td><td>—</td></tr>
+      <tr><td>モデルを採用するか決める</td><td><a href="#/manual?s=cc-models">モデル</a> 画面の「採否を変える」</td><td>—</td></tr>
+      <tr><td>モデルを Pi に入れて使う</td><td><a href="#/manual?s=tool-deploy_push">Pi へ配置</a>（失敗したら <a href="#/manual?s=tool-deploy_rollback">Pi のモデルを戻す</a>）</td><td>—</td></tr>
+      <tr><td>Pi で自律走行させる</td><td><a href="#/manual?s=tool-pi_autopilot">Pi 自律走行</a></td><td class="moves-cell">動く</td></tr>
+      <tr><td>走りの良し悪しをモデルごとに比べる</td><td><a href="#/manual?s=tool-deploy_pull_runs">走行記録の取り込み</a> → <a href="#/manual?s=cc-runs">走行記録</a> 画面</td><td>—</td></tr>
+      <tr><td>どのモデルがどのデータから作られたか見る</td><td><a href="#/manual?s=cc-lineage">来歴</a> 画面、モデル詳細の「来歴」タブ</td><td>—</td></tr>
+      <tr><td>車体の安全機能が働くか確かめる</td><td><a href="#/manual?s=tool-m1_check">安全チェック</a></td><td>一部動く</td></tr>
+      <tr><td>動きの食い違いの検出を校正する</td><td><a href="#/manual?s=tool-m3_check">動きの計測</a></td><td>一部動く</td></tr>
+      <tr><td>車輪が回り始める速度を測る</td><td><a href="#/manual?s=tool-speed_check">速度チェック</a></td><td class="moves-cell">動く</td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="flow">
+  <h2>いつもの開発の流れ</h2>
+  <ol class="steps">
+    <li><b>集める</b>: <a href="#/manual?s=gui-collector">走行データ収集</a>か<a href="#/manual?s=tool-auto_collector">自動データ収集</a>。1回 150 秒ほどで、セッションが <code>data/raw/&lt;日時&gt;</code> にできます。</li>
+    <li><b>確かめる</b>: <a href="#/manual?s=tool-session_report">セッションの報告</a>で記録の質を確かめ、<a href="#/manual?s=gui-viewer">データ確認・ラベル</a>でおかしいフレームを除外します。</li>
+    <li><b>封をする</b>: <a href="#/manual?s=tool-manifest">マニフェスト作成</a>（引数 <code>--data_dir data/raw</code>）。後から変わっていないかを確かめられるようになります。</li>
+    <li><b>学習する</b>: <a href="#/manual?s=tool-train">モデル学習</a>。出力先は次の版（<code>models/v007</code> など）を自動で入れます。</li>
+    <li><b>評価する</b>: <a href="#/manual?s=tool-cross_validate">交差検証</a>をして、今の設定の結果と<a href="#/manual?s=tool-compare_cv">比較</a>します。</li>
+    <li><b>決める</b>: モデル詳細の「採否を変える」で <span class="badge stage-approved">有効</span> か <span class="badge stage-rejected">却下</span> にします。理由も書きます（履歴に残ります）。</li>
+    <li><b>配置する</b>: モデル詳細の「Pi へ配置…」。</li>
+    <li><b>走らせる</b>: <a href="#/manual?s=tool-pi_autopilot">Pi 自律走行</a>。</li>
+    <li><b>振り返る</b>: <a href="#/manual?s=tool-deploy_pull_runs">走行記録の取り込み</a>をして、<a href="#/manual?s=cc-runs">走行記録</a>で人の介入の回数を比べます。介入が多い場面のデータを集めて、1 に戻ります。</li>
+  </ol>
+</section>
+
+<section id="cc">
+  <h2>Control Center の画面</h2>
+
+  <h3 id="cc-overview">概要</h3>
+  <p>全体の状態を1枚で見ます。最初に「モデルの状態」の4つを確かめます。</p>
+  <table>
+    <thead><tr><th>項目</th><th>意味</th></tr></thead>
+    <tbody>
+      <tr><td>Pi で使用中（配置の記録）</td><td>Control Center か <code>src.e2e.deploy.pi</code> で最後に使用中にした版。記録の外で Pi を操作すると合わなくなります</td></tr>
+      <tr><td>Pi の最後の走行で使った版</td><td>取り込んだ走行の記録（<code>data/runs</code>）のうち、最後の走行の版。上と違う時は「Pi のモデル一覧」で確かめます</td></tr>
+      <tr><td>最新のモデル</td><td>作った時刻が一番新しい版</td></tr>
+      <tr><td>最新の有効なモデル</td><td>「有効」にしてあり、来歴の確認に誤りがない版のうち、一番新しいもの。<em>走らせるならこれ</em>です</td></tr>
+    </tbody>
+  </table>
+  <p>「確認すること」には、来歴の誤り、採否を決めていないモデル、ラベルのないセッションなどが出ます。押すとその画面へ移ります。</p>
+
+  <h3 id="cc-models">モデル</h3>
+  <p>学習したモデルの一覧です。上のボタンで採否ごとに絞れます。行を押すと詳細を開きます。</p>
+  <table>
+    <thead><tr><th>採否</th><th>使う場面</th></tr></thead>
+    <tbody>
+      <tr><td><span class="badge stage-candidate">候補</span></td><td>学習しただけで、まだ判断していない（作った直後はこれ）</td></tr>
+      <tr><td><span class="badge stage-approved">有効</span></td><td>走行に使ってよいと判断した。理由が必要です</td></tr>
+      <tr><td><span class="badge stage-rejected">却下</span></td><td>使わない（性能や来歴に問題がある）。理由が必要です</td></tr>
+      <tr><td><span class="badge stage-archived">廃止</span></td><td>以前は使っていたが、新しい版に替えた</td></tr>
+    </tbody>
+  </table>
+  <p>採否は <code>models/registry.json</code> に、前後の採否・時刻・理由付きで残ります。「来歴の確認」が <span class="health error">要対応</span> のモデルは、「有効」にしても有効なモデルとして扱いません。</p>
+  <p>モデル詳細のタブ:</p>
+  <ul>
+    <li><b>概要</b>: 確認の結果（ONNX があるか、どのコミットで学習したか、データが学習時のままか）、要点、採否の履歴</li>
+    <li><b>来歴</b>: どのセッションを学習・検証に使ったか、今のデータが学習時と同じか、コマンド・コード・パラメーター・ハッシュ</li>
+    <li><b>学習</b>: 損失の推移（線をなぞると値が出ます）と、保存した最良のエポック</li>
+    <li><b>評価</b>: 向き別・意図別の誤差、同じデータの交差検証と、基準（常に直進、意図の平均）との比較</li>
+    <li><b>走行・配置</b>: Pi での走行の回数と介入、配置の履歴</li>
+    <li><b>環境</b>: 学習に使ったソフトの版と前処理の値</li>
+  </ul>
+  <p>上のボタン: 「データを検証」は、学習に使ったセッションの全ファイルのハッシュを確かめ直します（数秒かかります）。「バンドル作成」「Pi へ配置…」は、そのモデルを入れた状態でツールを開きます。</p>
+
+  <h3 id="cc-compare">比較・評価</h3>
+  <p>上で選んだモデル（3つまでが見やすい）の値とパラメーターを並べます。違うパラメーターには「違い」の印が、一番よい値には ◀ が付きます。下には交差検証の結果と、交差検証の比較の判定（採用してよい / 今の設定のまま / 比べられない）が出ます。<em>偏りのない比較には、モデルの検証の値ではなく、交差検証の結果を使います。</em></p>
+
+  <h3 id="cc-data">データ</h3>
+  <p>セッションごとのフレーム数、時間、舵角の分布（左・直進・右）、マニフェスト、手作業のラベル、使ったモデルです。行を押すと、等間隔に抜き出した画像が見られます。ラベル（<code>labels.jsonl</code>）のないセッションは記録が途中で止まったもので、学習には使われません。</p>
+
+  <h3 id="cc-lineage">来歴</h3>
+  <p>走行データ → 手作業のラベル → モデル → 交差検証・Pi での走行 のつながりの図です。節を押すと、その元になったものと、そこから作られたものを強調します。実線は学習に使用、破線は検証に使用、点線は同じデータで評価、を表します。</p>
+
+  <h3 id="cc-runs">走行記録</h3>
+  <p>Pi の自律走行の記録です。モデルごとに、10分あたりの人の介入の回数を比べます（少ないほどよい）。記録は「走行記録の取り込み」で Pi から持ってきます。</p>
+
+  <h3 id="cc-tools">ツール・ジョブ</h3>
+  <p>「ツール」でツールを起動すると、「ジョブ」に出力と結果が残ります（<code>data/jobs</code>）。ジョブの画面では、出力がそのまま流れ、「同じ引数でもう一度…」で再実行できます。学習のジョブは、作ったモデルの「来歴」タブからたどれます。</p>
+  <p>起動の画面の「実行引数」は、ターミナルでの <code>python -m &lt;モジュール&gt;</code> の後ろと同じ書き方です。「操作の例」から選ぶと、よく使う引数が入ります。<code>models/vNNN</code> を含むツールでは、「モデル」から版を選べます。</p>
+</section>
+
+<section id="gui">
+  <h2>各画面（Qt）の使い方</h2>
+
+  <h3 id="gui-app">会話・手動操作</h3>
+  <p class="when"><b>使う場面</b>: Pi と会話する、カメラを見る、手で少しだけ動かす、車体の状態を確かめる。</p>
+  <table>
+    <thead><tr><th>場所</th><th>使い方</th></tr></thead>
+    <tbody>
+      <tr><td>上の帯</td><td>安全の状態（安全 / 注意: 障害物が近い / 緊急停止中）と緊急停止のボタン</td></tr>
+      <tr><td>AI のモデル</td><td>会話に使う LLM を選びます。既定は設定の値です</td></tr>
+      <tr><td>カメラ</td><td>1秒ごとに更新します。「今の画像を取得」ですぐ取り直します。最小化している間は取りに行きません</td></tr>
+      <tr><td>センサー</td><td>前方の距離（2秒ごと）と床センサーの値</td></tr>
+      <tr><td>手動操作</td><td>▲▼ で 0.4 秒だけ前進・後退（速さ 30）、◀ ▶ で舵を左右へ、● で中央へ。「床を校正」は、車体を床に置いた状態で段差の基準を測ります</td></tr>
+      <tr><td>会話</td><td>文字を入れて <kbd>Enter</kbd> か「送信」。「🎤 押して話す」は押している間だけ PC のマイクで録音し、離すと送ります（音声の追加パッケージが必要）</td></tr>
+    </tbody>
+  </table>
+  <p>引数: なし。</p>
+
+  <h3 id="gui-collector">走行データ収集</h3>
+  <p class="when"><b>使う場面</b>: 自分で運転して学習データを集める。起動すると、新しいセッションのフォルダ（<code>data/raw/&lt;日時&gt;</code>）を作ります。</p>
+  <ol>
+    <li>上の帯の fps が <b>10 以上</b>（緑）になっているのを確かめます。足りない時は Wi-Fi か Pi の負荷を見直します。</li>
+    <li>「前進の速さ」を決めます（40〜100、既定 50。40 より遅いと車輪が回りません）。</li>
+    <li>ウィンドウを選んだ状態で <kbd>R</kbd> を押すか「● 録画を始める」で録画を始め、運転します。上の帯が「● 録画中」になります。</li>
+    <li>終わったら <kbd>R</kbd> で一時停止し、ウィンドウを閉じます。</li>
+  </ol>
+  <table>
+    <thead><tr><th>キー / パッド</th><th>操作</th></tr></thead>
+    <tbody>
+      <tr><td><kbd>W</kbd> / A・ZR</td><td>前進（押している間）。パッドの B・ZL は後退</td></tr>
+      <tr><td><kbd>S</kbd> / X</td><td>停止</td></tr>
+      <tr><td><kbd>A</kbd> <kbd>D</kbd> / 左スティック・十字←→</td><td>舵を左 / 右へ（十字は舵いっぱい）</td></tr>
+      <tr><td><kbd>X</kbd> / －</td><td>舵を中央へ</td></tr>
+      <tr><td><kbd>Q</kbd> <kbd>E</kbd> / L・R</td><td>押している間、意図（行きたい向き）を左 / 右にする</td></tr>
+      <tr><td><kbd>R</kbd> / ＋</td><td>録画の開始・一時停止</td></tr>
+      <tr><td>HOME</td><td>緊急停止（画面の「緊急停止を解除」で戻す）</td></tr>
+    </tbody>
+  </table>
+  <p>運転のきまり: 基本はまっすぐ、塞がれたら空いている側へ曲がる。意図は「その先の分かれ道でどちらへ行きたいか」です。後退中のフレームは学習に使いません。指令と実際の動きが食い違うと（「動きの確認」が赤）、自動で止まります。走行の操作をすべて離してから押し直してください。</p>
+  <p>引数: なし。</p>
+
+  <h3 id="gui-viewer">データ確認・ラベル</h3>
+  <p class="when"><b>使う場面</b>: 集めたデータを見て、おかしいフレームを学習から外す、意図や前方の塞がりを直す、データの偏りを統計で見る。</p>
+  <ul>
+    <li><b>フレーム</b>タブ: 「表示」と「条件」で絞り込みます。表の色は、緑=学習に使う、灰=使わない（止まっている等）、黄=注意あり、赤=手作業で除外、です。見出しの右クリックで、表示する列を選べます。</li>
+    <li>表の下の帯は、セッション全体の流れ（状態の色と舵角の線）です。ドラッグした範囲のフレームを選べます。</li>
+    <li>右側の「ラベル」で、選んだすべてのフレームに、タグ、学習からの除外、意図・前方の上書き、メモを付けます。</li>
+    <li><b>統計</b>タブ: 列ごとの数と割合、2つの列の組み合わせです。表の行をダブルクリックすると、その値で絞り込んでフレームへ戻ります。</li>
+  </ul>
+  <table>
+    <thead><tr><th>キー</th><th>操作</th></tr></thead>
+    <tbody>
+      <tr><td><kbd>Space</kbd></td><td>再生・停止</td></tr>
+      <tr><td><kbd>X</kbd></td><td>選んだフレームの除外を切り替え</td></tr>
+      <tr><td><kbd>I</kbd> / <kbd>O</kbd></td><td>範囲の始まり / 終わりを決める（Shift+クリックでも範囲を選べます）</td></tr>
+      <tr><td><kbd>Ctrl</kbd>+<kbd>Z</kbd></td><td>元に戻す</td></tr>
+    </tbody>
+  </table>
+  <p>ラベルは <code>data/annotations/&lt;セッション&gt;.json</code> に、変えるたびに保存します。元の走行データは書き換えません。学習は <code>configs/train.toml</code> の <code>annotations = true</code> でこのラベルを使います。</p>
+  <table class="args">
+    <thead><tr><th>引数</th><th>意味</th><th>既定</th></tr></thead>
+    <tbody>
+      <tr><td><code>--data_dir</code></td><td>見るセッション、またはその親のフォルダ（複数可）</td><td><code>data/raw data/interventions</code></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<section id="tools">
+  <h2>ツールと引数</h2>
+  <p>引数は、起動の画面の「実行引数」に、スペースで区切って書きます。<code>--</code> で始まる名前の後ろに値を書きます（例: <code>--epochs 20</code>）。値のない引数（例: <code>--verify</code>）は、書くだけで有効になります。<code>--turn_intent</code> のような有り無しの設定は、<code>--no-turn_intent</code> で無効にできます。</p>
+
+  <h3 id="tools-data">データ</h3>
+
+  <div class="tool" id="tool-manifest">
+    <h4>マニフェスト作成・検証 <code>src.e2e.dataset.manifest</code></h4>
+    <p class="when"><b>使う場面</b>: 集めたセッションに封をする（作成）。学習の前や、データを動かした後に、変わっていないか確かめる（検証）。</p>
+    <table class="args"><thead><tr><th>引数</th><th>意味</th><th>既定</th></tr></thead><tbody>
+      <tr><td><code>--data_dir</code></td><td>セッション、またはその親のフォルダ</td><td><code>data/raw</code></td></tr>
+      <tr><td><code>--verify</code></td><td>付けると検証。付けないと、マニフェストのないセッションに作る（既にあるものは書き換えない）</td><td>なし</td></tr>
+    </tbody></table>
+    <p class="example">例: 作成 <code>--data_dir data/raw</code> / 検証 <code>--data_dir data/raw --verify</code></p>
+  </div>
+
+  <div class="tool" id="tool-session_report">
+    <h4>セッションの報告 <code>src.e2e.dataset.session_report</code></h4>
+    <p class="when"><b>使う場面</b>: 集めた直後に、学習に使える走りになっているかを確かめる。fps が 10 未満、走っているフレームが少ない、左右の偏り、舵を切りすぎたフレーム、センサー値の欠けなどを「注意」として出します。</p>
+    <table class="args"><thead><tr><th>引数</th><th>意味</th><th>既定</th></tr></thead><tbody>
+      <tr><td><code>--data_dir</code></td><td>セッション、またはその親のフォルダ</td><td><code>data/raw</code></td></tr>
+    </tbody></table>
+    <p class="example">例: 1セッションだけ <code>--data_dir data/raw/20261113_000453</code></p>
+  </div>
+
+  <div class="tool" id="tool-cleaner">
+    <h4>データのクリーニング <code>src.e2e.dataset.cleaner</code></h4>
+    <p class="when"><b>使う場面</b>: モデルの予測と大きく食い違うフレーム（運転のミスなど）を自動で外したデータを、別のフォルダに作る。元のデータは変えません。手で選ぶ場合はデータ確認・ラベルを使います。</p>
+    <table class="args"><thead><tr><th>引数</th><th>意味</th><th>既定</th></tr></thead><tbody>
+      <tr><td><code>--model</code> <span class="req">必須</span></td><td>誤差を測るモデル（<code>.onnx</code> か <code>.pth</code>）</td><td>—</td></tr>
+      <tr><td><code>--data_dir</code></td><td>元のデータ（複数可）</td><td><code>data/raw</code></td></tr>
+      <tr><td><code>--output_dir</code></td><td>きれいにしたデータの置き場所</td><td><code>data/processed/clean_v1</code></td></tr>
+      <tr><td><code>--threshold</code></td><td>許す舵角の誤差（-1〜1 の尺度）。これより大きいフレームを外す</td><td><code>0.4</code></td></tr>
+      <tr><td><code>--top_k_percent</code></td><td>誤差の大きい順に、この割合（%）を外す</td><td>なし</td></tr>
+    </tbody></table>
+    <p class="example">例: <code>--data_dir data/raw --model models/v006/model.onnx --output_dir data/processed/clean_v2 --threshold 0.4</code></p>
+  </div>
+
+  <h3 id="tools-train">学習・評価</h3>
+
+  <div class="tool" id="tool-train">
+    <h4>モデル学習 <code>src.e2e.training.train</code></h4>
+    <p class="when"><b>使う場面</b>: 新しいモデルを作る。結果は <code>models/&lt;版&gt;/</code> に、ONNX と、使ったデータ・コード・環境・設定の記録（<code>metadata.json</code>）として残ります。</p>
+    <table class="args"><thead><tr><th>引数</th><th>意味</th><th>既定</th></tr></thead><tbody>
+      <tr><td><code>--data_dir</code> <span class="req">必須</span></td><td>学習のデータ。親フォルダ（<code>data/raw</code>）、1セッション、または複数</td><td>—</td></tr>
+      <tr><td><code>--output_dir</code> <span class="req">必須</span></td><td>新しい版のフォルダ。<em>既にある版は指定しない</em>（Control Center は次の版を自動で入れます）</td><td>—</td></tr>
+      <tr><td><code>--config</code></td><td>設定のファイル。<em>普段は <code>configs/train.toml</code> を指定</em>し、変えたい値だけ下の引数で上書きします</td><td>なし（組み込みの値）</td></tr>
+      <tr><td><code>--epochs</code></td><td>学習の回数</td><td>設定の値（15）</td></tr>
+      <tr><td><code>--batch_size</code> / <code>--lr</code> / <code>--seed</code></td><td>一度に学ぶ数 / 学習率 / 乱数の種</td><td>32 / 0.001 / 42</td></tr>
+      <tr><td><code>--val_sessions</code></td><td>検証に使うセッション ID（複数可）。指定しないと名前順で最後のセッション</td><td>なし</td></tr>
+      <tr><td><code>--blocked_loss_weight</code></td><td>「前方が塞がっているか」の出力を学ぶ重み。0 なら学ばない</td><td>0</td></tr>
+      <tr><td><code>--turn_intent</code> / <code>--no-turn_intent</code></td><td>曲がりの区間に、曲がった向きを意図として付け直す</td><td>有効</td></tr>
+      <tr><td><code>--blocked_stuck</code> / <code>--no-blocked_stuck</code></td><td>引っかかったフレームを「塞がっている」とする</td><td>有効</td></tr>
+      <tr><td><code>--flip_augment</code> / <code>--no-flip_augment</code></td><td>左右反転した複製を加える（学習の時間が倍）</td><td>無効</td></tr>
+    </tbody></table>
+    <p class="example">例: いつもの学習 <code>--config configs/train.toml --data_dir data/raw --output_dir models/v007</code><br>回数を増やす <code>--config configs/train.toml --data_dir data/raw --output_dir models/v008 --epochs 25</code></p>
+    <div class="note">学習の検証の値は、モデルの選択にも使った値なので少し甘く出ます。設定を変えた効果は交差検証で確かめます。</div>
+  </div>
+
+  <div class="tool" id="tool-cross_validate">
+    <h4>交差検証 <code>src.e2e.training.cross_validate</code></h4>
+    <p class="when"><b>使う場面</b>: 設定を変えた効果を偏りなく測る。セッションを1つずつ抜いて学習し、抜いたセッションで評価します（セッション数だけ学習するので時間がかかります）。</p>
+    <table class="args"><thead><tr><th>引数</th><th>意味</th><th>既定</th></tr></thead><tbody>
+      <tr><td><code>--data_dir</code> <span class="req">必須</span></td><td>データ（学習と同じ書き方）</td><td>—</td></tr>
+      <tr><td><code>--config</code></td><td>設定のファイル（普段は <code>configs/train.toml</code>）</td><td>なし</td></tr>
+      <tr><td><code>--output</code></td><td>結果の JSON。<em>何を変えたか分かる名前</em>にします（例: <code>data/cv/flip_on.json</code>）。比較と来歴に使います</td><td>なし（画面に出すだけ）</td></tr>
+      <tr><td><code>--epochs</code> / <code>--seed</code></td><td>学習の回数 / 乱数の種</td><td>設定の値</td></tr>
+      <tr><td><code>--blocked_loss_weight</code>、<code>--turn_intent</code>、<code>--blocked_stuck</code>、<code>--flip_augment</code></td><td>学習と同じ意味。試したい設定だけ変えます</td><td>設定の値</td></tr>
+    </tbody></table>
+    <p class="example">例: 左右反転を試す <code>--config configs/train.toml --data_dir data/raw --flip_augment --output data/cv/flip_on.json</code></p>
+  </div>
+
+  <div class="tool" id="tool-compare_cv">
+    <h4>交差検証の比較 <code>src.e2e.evaluation.compare_cv</code></h4>
+    <p class="when"><b>使う場面</b>: 2つの交差検証の結果を比べ、候補を採用してよいか判定する。同じデータで同じセッションを抜いた結果どうしだけを比べます。</p>
+    <table class="args"><thead><tr><th>引数</th><th>意味</th><th>既定</th></tr></thead><tbody>
+      <tr><td><code>--current</code> <span class="req">必須</span></td><td>今使っている設定の結果（<code>data/cv/*.json</code>）</td><td>—</td></tr>
+      <tr><td><code>--candidate</code> <span class="req">必須</span></td><td>候補の設定の結果</td><td>—</td></tr>
+      <tr><td><code>--tolerance</code></td><td>全体の MAE がこれだけ悪くなっても「悪くない」とみなす幅</td><td><code>0.0</code></td></tr>
+      <tr><td><code>--output</code></td><td>判定を JSON で残す（比較・評価の画面に出ます）</td><td>なし</td></tr>
+    </tbody></table>
+    <p>判定: <b>採用してよい</b>（adopt）/ <b>今の設定のまま</b>（keep_current: 全体の MAE が悪くなった、または「意図ごとの平均」の基準に負けた）/ <b>比べられない</b>（not_comparable: データや抜いたセッションが違う）。最後に採用するのは人です。</p>
+    <p class="example">例: <code>--current data/cv/auto_8sessions_turn.json --candidate data/cv/flip_on.json --output data/cv/compare_flip.json</code></p>
+  </div>
+
+  <div class="tool" id="tool-evaluate">
+    <h4>オフライン評価 <code>src.e2e.evaluation.evaluate</code></h4>
+    <p class="when"><b>使う場面</b>: あるモデルを、指定したデータ全部で評価し、<code>eval_metrics.json</code> を書く。学習に使ったデータを入れると、その分も含まれるので、<em>走りの良さの比較には使いません</em>。</p>
+    <table class="args"><thead><tr><th>引数</th><th>意味</th><th>既定</th></tr></thead><tbody>
+      <tr><td><code>--data_dir</code> <span class="req">必須</span></td><td>評価のデータ</td><td>—</td></tr>
+      <tr><td><code>--model_path</code> <span class="req">必須</span></td><td>モデルの重み（<code>models/&lt;版&gt;/best_model.pth</code>）</td><td>—</td></tr>
+    </tbody></table>
+  </div>
+
+  <div class="tool" id="tool-registry_compare">
+    <h4>モデル比較 <code>src.e2e.registry.compare</code></h4>
+    <p class="when"><b>使う場面</b>: データとモデルの一覧を文字の表で出す（Control Center のモデル画面と同じ内容の簡易版）。</p>
+    <table class="args"><thead><tr><th>引数</th><th>意味</th><th>既定</th></tr></thead><tbody>
+      <tr><td><code>--target</code></td><td><code>all</code>、<code>datasets</code>、<code>models</code> のどれか</td><td><code>all</code></td></tr>
+      <tr><td><code>--data_dir</code> / <code>--models_dir</code></td><td>データ / モデルのフォルダ</td><td><code>data/raw</code> / <code>models</code></td></tr>
+    </tbody></table>
+  </div>
+
+  <div class="tool" id="tool-interventions">
+    <h4>介入率の集計 <code>src.e2e.evaluation.interventions</code></h4>
+    <p class="when"><b>使う場面</b>: 走行の記録から、モデル別の人と安全機能の介入の回数を表で出す（走行記録の画面と同じ内容）。</p>
+    <table class="args"><thead><tr><th>引数</th><th>意味</th><th>既定</th></tr></thead><tbody>
+      <tr><td><code>--runs_dir</code></td><td>走行の記録のフォルダ</td><td><code>data/runs</code></td></tr>
+      <tr><td><code>--json</code></td><td>表ではなく JSON で出す</td><td>なし</td></tr>
+    </tbody></table>
+  </div>
+
+  <h3 id="tools-deploy">配置</h3>
+  <div class="note warn"><b>Pi へ接続するツールの準備</b>: 接続先を、Control Center を起動する前に環境変数 <code>PICARX_SSH_HOST</code>（例: <code>pi@rspi</code>）で決めておくか、引数の先頭に <code>--host pi@rspi</code> を付けます。Control Center のジョブはパスワードを入力できないので、<em>SSH の鍵で、パスワードなしで接続できるようにしておきます</em>。</div>
+
+  <div class="tool" id="tool-bundle">
+    <h4>バンドル作成 <code>src.e2e.deploy.bundle</code></h4>
+    <p class="when"><b>使う場面</b>: Pi へ送るフォルダを作って、Pi で読めるか（ファイルのハッシュ、入力の大きさ、使えない演算がないか）を先に確かめる。配置そのものは「Pi へ配置」が中でこれを行います。</p>
+    <table class="args"><thead><tr><th>引数</th><th>意味</th><th>既定</th></tr></thead><tbody>
+      <tr><td><code>--model_dir</code> <span class="req">必須</span></td><td>送るモデル（<code>models/&lt;版&gt;</code>）</td><td>—</td></tr>
+      <tr><td><code>--output</code></td><td>バンドルを置くフォルダ</td><td><code>dist/models</code></td></tr>
+    </tbody></table>
+  </div>
+
+  <div class="tool" id="tool-deploy_push">
+    <h4>Pi へ配置 <code>src.e2e.deploy.pi push</code> <span class="badge confirm-badge">Pi を変更</span></h4>
+    <p class="when"><b>使う場面</b>: 採用したモデルを Pi に入れて、使用中にする。次の自律走行の開始から使われます。<em>「有効」にしたモデルを送ります</em>（そうでないと警告が出ます）。結果は配置の記録に残ります。</p>
+    <table class="args"><thead><tr><th>引数</th><th>意味</th><th>既定</th></tr></thead><tbody>
+      <tr><td><code>push</code> <span class="req">必須</span></td><td>配置の操作（最初に書く）</td><td>—</td></tr>
+      <tr><td><code>--model_dir</code> <span class="req">必須</span></td><td>送るモデル（<code>models/&lt;版&gt;</code>）</td><td>—</td></tr>
+      <tr><td><code>--no_activate</code></td><td>入れるだけで、使用中にはしない</td><td>なし</td></tr>
+      <tr><td><code>--host</code>（<code>push</code> の前）</td><td>接続先。なければ <code>PICARX_SSH_HOST</code></td><td>環境変数</td></tr>
+      <tr><td><code>--pi_bin</code>（<code>push</code> の前）</td><td>Pi の実行ファイル</td><td><code>~/picar-x-rust</code></td></tr>
+    </tbody></table>
+    <p class="example">例: <code>push --model_dir models/v006</code> / 接続先を指定 <code>--host pi@rspi push --model_dir models/v006</code></p>
+  </div>
+
+  <div class="tool" id="tool-deploy_rollback">
+    <h4>Pi のモデルを戻す <code>src.e2e.deploy.pi rollback</code> <span class="badge confirm-badge">Pi を変更</span></h4>
+    <p class="when"><b>使う場面</b>: 配置したモデルの走りが悪かった時に、1つ前に使っていた版へすぐ戻す。引数は <code>rollback</code> だけです（接続先は配置と同じ）。</p>
+  </div>
+
+  <div class="tool" id="tool-deploy_list">
+    <h4>Pi のモデル一覧 <code>src.e2e.deploy.pi list</code></h4>
+    <p class="when"><b>使う場面</b>: Pi に入っている版と、使用中の版を確かめる。概要の「Pi で使用中」と「最後の走行の版」が違う時に使います。引数は <code>list</code> だけです。</p>
+  </div>
+
+  <div class="tool" id="tool-deploy_pull_runs">
+    <h4>走行記録の取り込み <code>src.e2e.deploy.pi pull-runs</code></h4>
+    <p class="when"><b>使う場面</b>: Pi の自律走行の後に、走行の記録を PC へ持ってくる。走行記録の画面とモデルの「走行・配置」タブに反映されます。</p>
+    <table class="args"><thead><tr><th>引数</th><th>意味</th><th>既定</th></tr></thead><tbody>
+      <tr><td><code>pull-runs</code> <span class="req">必須</span></td><td>取り込みの操作</td><td>—</td></tr>
+      <tr><td><code>--pi_runs</code></td><td>Pi 側の記録のフォルダ</td><td><code>~/picarx/runs</code></td></tr>
+      <tr><td><code>--runs_dir</code></td><td>PC 側の置き場所</td><td><code>data/runs</code></td></tr>
+    </tbody></table>
+  </div>
+
+  <h3 id="tools-check">車体チェック</h3>
+
+  <div class="tool" id="tool-m1_check">
+    <h4>安全チェック <code>src.e2e.m1_check</code></h4>
+    <p class="when"><b>使う場面</b>: 車体の状態や安全機能（指令の期限切れ、障害物、段差、Wi-Fi の切断で止まるか）を確かめる。最初の言葉で何をするかを選びます。</p>
+    <table class="args"><thead><tr><th>操作</th><th>内容</th><th>車体</th><th>主な引数</th></tr></thead><tbody>
+      <tr><td><code>status</code></td><td>状態を表示</td><td>—</td><td>なし</td></tr>
+      <tr><td><code>camera</code></td><td>カメラの配信の fps を測る</td><td>—</td><td><code>--seconds 20</code></td></tr>
+      <tr><td><code>events</code></td><td>安全イベントと、止まるまでの時間を表示</td><td>—</td><td>なし</td></tr>
+      <tr><td><code>ttl</code></td><td>接続が切れた時に、指令の期限で止まるか</td><td class="moves-cell">少し動く</td><td><code>--i-understand-the-car-will-move</code></td></tr>
+      <tr><td><code>approach</code></td><td>障害物や段差に近づけて止まるか</td><td class="moves-cell">動く</td><td><code>--speed 50 --seconds 3 --i-understand-the-car-will-move</code></td></tr>
+      <tr><td><code>wifi</code></td><td>走行中に Wi-Fi が切れた時に止まるか</td><td class="moves-cell">動く</td><td><code>--seconds 30 --speed …</code>、PC の Wi-Fi を切らない時は <code>--simulate --ssh_host &lt;Pi&gt;</code>、<code>--i-understand-the-car-will-move</code></td></tr>
+    </tbody></table>
+    <p class="example">例: <code>status</code> / <code>camera --seconds 20</code> / <code>approach --speed 50 --i-understand-the-car-will-move</code></p>
+  </div>
+
+  <div class="tool" id="tool-m3_check">
+    <h4>動きの計測 <code>src.e2e.m3_check</code></h4>
+    <p class="when"><b>使う場面</b>: 「指令と実際の動きの食い違い」の検出を、実機で計測して校正する。記録は <code>data/m3_checks/</code> に残ります（画像は含みません）。</p>
+    <table class="args"><thead><tr><th>引数</th><th>意味</th><th>既定</th></tr></thead><tbody>
+      <tr><td><code>run --scenario &lt;場面&gt;</code></td><td>場面ごとに計測。<code>still</code>（止めたまま）、<code>walk</code>（前を人が横切る）、<code>push</code>（手で押す）、<code>forward</code>（直進）、<code>left</code> / <code>right</code>（舵を切って前進）、<code>lifted</code>（後輪を浮かせて前進の指令）</td><td>—</td></tr>
+      <tr><td><code>--speed</code> / <code>--steer</code> / <code>--seconds</code></td><td>速さ / 舵角（既定は場面ごと）/ 時間</td><td>50 / 場面ごと / 5</td></tr>
+      <tr><td><code>--note</code></td><td>床の種類や明るさなどのメモ</td><td>なし</td></tr>
+      <tr><td><code>--i-understand-the-car-will-move</code></td><td><code>forward</code>、<code>left</code>、<code>right</code>、<code>lifted</code> では必須（車体が動く）</td><td>—</td></tr>
+      <tr><td><code>calibrate --still … --moving …</code></td><td>記録から設定（<code>configs/motion.toml</code>）の値を提案する。<code>--push</code>、<code>--turn</code> と <code>--measured_deg</code>、<code>--straight</code>、<code>--wall</code> も使えます</td><td>—</td></tr>
+    </tbody></table>
+    <p class="example">例: <code>run --scenario still</code> / <code>run --scenario forward --i-understand-the-car-will-move</code></p>
+  </div>
+
+  <div class="tool" id="tool-speed_check">
+    <h4>速度チェック <code>src.e2e.speed_check</code> <span class="badge moves">車体が動く</span></h4>
+    <p class="when"><b>使う場面</b>: 床が変わった時などに、車輪が回り始める最低の速度を測る。<em>壁の 1〜1.5m 手前に、壁へまっすぐ向けて置いてから</em>起動します。</p>
+    <table class="args"><thead><tr><th>引数</th><th>意味</th><th>既定</th></tr></thead><tbody>
+      <tr><td><code>--speeds</code></td><td>測る速さ（複数）</td><td><code>30 35 40 45</code></td></tr>
+      <tr><td><code>--mode</code></td><td><code>start</code>（止まった状態から）、<code>rolling</code>（走りながら下げる）、<code>both</code></td><td><code>both</code></td></tr>
+      <tr><td><code>--note</code></td><td>床の種類などのメモ</td><td>なし</td></tr>
+      <tr><td><code>--i-understand-the-car-will-move</code> <span class="req">必須</span></td><td>車体が壁へ向かって動くことの了承</td><td>—</td></tr>
+    </tbody></table>
+  </div>
+
+  <h3 id="tools-drive">走行</h3>
+
+  <div class="tool" id="tool-pi_autopilot">
+    <h4>Pi 自律走行 <code>src.e2e.pi_autopilot</code> <span class="badge moves">車体が動く</span></h4>
+    <p class="when"><b>使う場面</b>: Pi で使用中のモデルで自律走行させる。推論と避ける判断は Pi で行い、PC は開始・見守り・停止をします。止める時は、ジョブの画面の「■ 車体を止めて終了」か緊急停止を使います。</p>
+    <table class="args"><thead><tr><th>引数</th><th>意味</th><th>既定</th></tr></thead><tbody>
+      <tr><td><code>--speed</code></td><td>前進の速さ（40 未満では車輪が回らない）</td><td><code>50</code></td></tr>
+      <tr><td><code>--intent</code></td><td>行きたい向き: <code>any</code>、<code>left</code>、<code>right</code></td><td><code>any</code></td></tr>
+      <tr><td><code>--gamepad</code></td><td>パッドで人が運転を引き継げるようにする。引き継いだ間の画像と操作を、学習データとして残す</td><td>なし</td></tr>
+      <tr><td><code>--corrections_dir</code></td><td>引き継いだ間のデータの置き場所</td><td><code>data/interventions</code></td></tr>
+    </tbody></table>
+    <p class="example">例: <code>--speed 50</code> / パッドで介入 <code>--speed 50 --gamepad</code> / 左へ <code>--speed 50 --intent left</code></p>
+  </div>
+
+  <div class="tool" id="tool-auto_collector">
+    <h4>自動データ収集 <code>src.e2e.auto_collector</code> <span class="badge moves">車体が動く</span></h4>
+    <p class="when"><b>使う場面</b>: 決まったルール（前が空いていれば直進、近づいたら空いている側へ曲がる）で走らせ、手本のデータを集める。周りを片付けてから起動します。</p>
+    <table class="args"><thead><tr><th>引数</th><th>意味</th><th>既定</th></tr></thead><tbody>
+      <tr><td><code>--seconds</code></td><td>走る時間（秒）</td><td><code>150</code></td></tr>
+      <tr><td><code>--output</code></td><td>セッションを作るフォルダ</td><td><code>data/raw</code></td></tr>
+      <tr><td><code>--min_battery_v</code></td><td>電池の電圧がこれより低ければ始めない</td><td><code>7.0</code></td></tr>
+      <tr><td><code>--steer_trim</code></td><td>すべての舵角に足す角度（まっすぐ進まない時の補正）</td><td><code>0.0</code></td></tr>
+      <tr><td><code>--seed</code></td><td>乱数の種（同じ選び方を再現したい時）</td><td>なし</td></tr>
+      <tr><td><code>--i-understand-the-car-will-move</code> <span class="req">必須</span></td><td>車体が動くことの了承</td><td>—</td></tr>
+    </tbody></table>
+  </div>
+</section>
+
+<section id="trouble">
+  <h2>困った時</h2>
+  <table>
+    <thead><tr><th>症状</th><th>原因と対処</th></tr></thead>
+    <tbody>
+      <tr><td>「サーバーに接続できません」「Failed to fetch」</td><td>Control Center のサーバーが止まっています。起動し直して、ページを開き直します</td></tr>
+      <tr><td>「トークンが違います」</td><td>サーバーを起動し直すと合言葉が変わります。ページを開き直します</td></tr>
+      <tr><td>右上が「Pi 未接続」</td><td>Pi の電源、Wi-Fi、Pi の API サーバー（<code>./picar-x-rust</code>）を確かめます。車体を使わない作業（学習・評価・管理）はそのままできます</td></tr>
+      <tr><td>Pi への配置や取り込みのジョブが止まる・失敗する</td><td>SSH のパスワードを聞かれていると、ジョブでは入力できません。鍵で接続できるようにするか、ターミナルで実行します</td></tr>
+      <tr><td>モデルが「要対応」になる</td><td>学習の後にデータが変わったか、ONNX がありません。モデル詳細の「来歴の確認」で理由を見て、データを戻すか学習し直します</td></tr>
+      <tr><td>収集の fps が 10 未満</td><td>Wi-Fi が弱いか、Pi の負荷が高いです。Pi の近くで収集するか、ほかの処理を止めます</td></tr>
+      <tr><td>Qt の画面の文字が重なる・はみ出す</td><td>ウィンドウを広げるか、列の境目を動かします。右の列は足りない時にスクロールします</td></tr>
+    </tbody>
+  </table>
+</section>
+
+</article>

@@ -221,3 +221,16 @@ def test_stopping_a_car_job_stops_the_car_first(tmp_path):
     assert stopped.status == "stopped" and stopped.stop_note == "car stopped"
     assert wait_until(lambda: jobs.get(job.id).exit_code is not None)
     assert jobs.get(job.id).status == "stopped"
+
+
+def test_every_tool_has_a_manual_section(running):
+    """ツールの「使い方」のリンク先が、マニュアルに必ずある"""
+    _, port, _ = running
+    status, body = request(port, "GET", "/manual.html", token=None)
+    assert status == 200
+    html = body.decode("utf-8")
+    windows = {"app": "gui-app", "collector": "gui-collector", "data_viewer": "gui-viewer"}
+    missing = [
+        w.key for w in WORKFLOWS if f'id="{windows.get(w.key, "tool-" + w.key)}"' not in html
+    ]
+    assert missing == []

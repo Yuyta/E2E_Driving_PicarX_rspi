@@ -60,6 +60,7 @@ const ICONS = {
   road: '<path d="M6 21L10 3M18 21L14 3M12 7v2M12 13v2M12 19v1"/>',
   play: '<path d="M7 4l13 8-13 8z"/>',
   list: '<path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/>',
+  book: '<path d="M4 4.5A2.5 2.5 0 0 1 6.5 2H20v17H6.5A2.5 2.5 0 0 0 4 21.5z"/><path d="M4 21.5A2.5 2.5 0 0 1 6.5 19H20v3H6.5"/>',
 };
 document.querySelectorAll("i[data-icon]").forEach((i) => {
   i.innerHTML = `<svg viewBox="0 0 24 24">${ICONS[i.dataset.icon] || ""}</svg>`;
@@ -350,7 +351,9 @@ async function launch(workflowId, presetArgs) {
     title: `${wf.title} を起動`,
     body: [
       h("div", { class: "ink-2" }, wf.description),
-      h("div", { class: "mono muted" }, `python -m ${wf.module}`),
+      h("div", { class: "row", style: { justifyContent: "space-between" } },
+        h("span", { class: "mono muted" }, `python -m ${wf.module}`),
+        h("a", { href: manualHref(wf.id), onclick: () => document.getElementById("modal-root").replaceChildren() }, "使い方と引数の説明 →")),
       modelPick ? h("label", { class: "field" }, h("span", {}, "モデル"), modelPick) : null,
       preset ? h("label", { class: "field" }, h("span", {}, "操作の例"), preset) : null,
       h("label", { class: "field" }, h("span", {}, "実行引数"), args),
@@ -762,7 +765,8 @@ async function viewCompare(root, _p, query) {
   draw();
   const cvRows = c.cv.filter((x) => x.kind === "cross_validation");
   const cmpRows = c.cv.filter((x) => x.kind === "comparison");
-  const VERDICT = { adopt: ["ok", "採用してよい"], reject: ["error", "採用しない"], incomparable: ["warn", "比べられない"] };
+  // compare_cv の判定（ADOPT / KEEP / NOT_COMPARABLE と同じ値）
+  const VERDICT = { adopt: ["ok", "採用してよい"], keep_current: ["error", "今の設定のまま（採用しない）"], not_comparable: ["warn", "比べられない"] };
   root.append(h("div", { class: "stack" },
     h("p", { class: "lead" }, "モデルの値とパラメーターを並べて比べます。偏りのない比較には、同じデータの交差検証の結果を使ってください。"),
     card("比べるモデル", "", chooser),
@@ -981,7 +985,7 @@ async function viewTools(root) {
           w.kind === "window" ? h("span", { class: "badge outline" }, "画面") : null),
         h("div", { class: "desc" }, w.description),
         h("div", { class: "module" }, w.module),
-        h("div", { class: "actions" }, h("button", { type: "button", class: w.moves_car ? "danger small" : "small", onclick: () => launch(w.id) }, w.moves_car ? "確認して起動…" : "起動…")))))));
+        h("div", { class: "actions" }, h("a", { href: manualHref(w.id), class: "small", style: { marginRight: "auto", alignSelf: "center" } }, "使い方"), h("button", { type: "button", class: w.moves_car ? "danger small" : "small", onclick: () => launch(w.id) }, w.moves_car ? "確認して起動…" : "起動…")))))));
   }
 }
 
@@ -1045,6 +1049,55 @@ async function viewJob(root, [id]) {
     job.kind === "window" ? h("div", { class: "alert info" }, healthBadge("unknown", "画面"), "別のウィンドウで開いています。閉じるとこのジョブも終わります。") : null,
     log));
   poll();
+}
+
+/* ------------------------------------------------------------------ views: manual */
+
+// 画面（ウィンドウ）のツールは、マニュアルの画面の説明へつなぐ
+const MANUAL_GUI = { app: "gui-app", collector: "gui-collector", data_viewer: "gui-viewer" };
+const manualHref = (id) => `#/manual?s=${MANUAL_GUI[id] || `tool-${id}`}`;
+
+async function viewManual(root, _p, query) {
+  if (!state.manual) {
+    const res = await fetch("manual.html", { cache: "no-store" }).catch(() => null);
+    if (!res || !res.ok) throw new Error("マニュアルを読み込めません（サーバーが止まっていないか確かめてください）");
+    state.manual = await res.text();
+  }
+  // 同じサーバーの静的なファイル（src/gui/web/static/manual.html）なので、そのまま入れる
+  const body = h("div", { class: "manual-body card" });
+  body.innerHTML = state.manual;
+  const toc = h("nav", { class: "manual-toc", "aria-label": "目次" });
+  const search = h("input", { type: "search", placeholder: "言葉で探す（例: 引数、配置、fps）", class: "manual-search" });
+  toc.append(search);
+  const list = h("ol");
+  body.querySelectorAll("section[id]").forEach((sec) => {
+    const title = sec.querySelector("h2");
+    const item = h("li", {}, h("a", { href: `#/manual?s=${sec.id}` }, title ? title.textContent : sec.id));
+    const subs = [...sec.querySelectorAll("h3[id], .tool[id]")];
+    if (subs.length) {
+      item.append(h("ol", {}, subs.map((el) => {
+        const label = el.matches(".tool") ? el.querySelector("h4").firstChild.textContent.trim() : el.textContent;
+        return h("li", { class: el.matches(".tool") ? "tool-item" : "" }, h("a", { href: `#/manual?s=${el.id}` }, label));
+      })));
+    }
+    list.append(item);
+  });
+  toc.append(list);
+  search.addEventListener("input", () => {
+    const q = search.value.trim().toLowerCase();
+    body.querySelectorAll(".tool, section > table tbody tr").forEach((el) => {
+      el.classList.toggle("dim-out", !!q && !el.textContent.toLowerCase().includes(q));
+    });
+  });
+  root.append(h("div", { class: "manual-layout" }, toc, body));
+  const target = query.get("s");
+  requestAnimationFrame(() => {
+    const el = target && document.getElementById(target);
+    if (!el) { window.scrollTo(0, 0); return; }
+    el.scrollIntoView({ block: "start" });
+    el.classList.add("flash");
+    setTimeout(() => el.classList.remove("flash"), 1600);
+  });
 }
 
 /* ------------------------------------------------------------------ robot & emergency stop */
@@ -1115,6 +1168,7 @@ const ROUTES = {
   runs: ["走行記録", viewRuns],
   tools: ["ツール", viewTools],
   jobs: ["ジョブ", viewJobs, viewJob],
+  manual: ["操作マニュアル", viewManual],
 };
 function setTitle(t) { document.getElementById("page-title").textContent = t; document.title = `${t} — PiCar-X Control Center`; }
 
@@ -1127,7 +1181,7 @@ async function render() {
   const [path, qs] = (location.hash.replace(/^#\/?/, "") || "overview").split("?");
   const [name, ...rest] = path.split("/").map(decodeURIComponent);
   const route = ROUTES[name] || ROUTES.overview;
-  document.querySelectorAll("#nav a").forEach((a) => a.classList.toggle("active", a.dataset.route === (ROUTES[name] ? name : "overview")));
+  document.querySelectorAll(".sidebar a[data-route]").forEach((a) => a.classList.toggle("active", a.dataset.route === (ROUTES[name] ? name : "overview")));
   setTitle(route[0]);
   document.body.classList.remove("menu-open");
   const view = document.getElementById("view");
