@@ -244,6 +244,15 @@ CPU推論を想定した4層の軽量CNN（推論時間の実測値は未記録�
   - 保存済みモデルのバージョン、エポック数、検証損失、MAE、ONNX/PTH成果物の有無を走査。
 - **MLOps 比較 CLI (`registry/compare.py`)**:
   - `uv run python -m src.e2e.registry.compare` でターミナル上に Rawデータセット、Processedデータセット、モデル性能を表形式で一覧表示。モデルの表には、データのハッシュと git のコミットの先頭も出す。
+- **来歴（トレーサビリティ） (`registry/lineage.py`)**:
+  - 記録だけから、セッション → 手作業のラベル → モデル → 交差検証 → Pi での走行 をつなぐ。セッションとモデルは `metadata.json` の `split`、ラベルは `data.annotations.hashes`、交差検証は学習データのハッシュ（`data_fingerprint`）が同じもの、走行は `run.json` の `model_version` でつなぐ。読むだけで、データのフォルダには書かない（`registry/dataset.py` と違い `metadata.json` を書き直さない）。
+  - モデルごとに確かめる: ONNX の有無、前処理の値、コードのコミットと未コミットの変更、学習データが学習時のままか（記録したマニフェストのハッシュと今のマニフェストの比較）、学習後のラベルの変更、走行の記録と学習データのハッシュの食い違い。全ファイルのハッシュで確かめ直す `verify_model_data` もある（Control Center の「データを検証」）。
+  - 最新 = 作成の時刻（`metadata.json` の `created_at`。ない古いモデルはファイルの時刻）が最も新しい版。有効 = ステージが `approved` で、確認に誤り（error）がない版。
+  - Control Center から学習したモデルは、作ったジョブ（コマンド、時刻、結果、`data/jobs/<id>.json`）ともつなぐ。
+  - `uv run python -m src.e2e.registry.lineage --summary` で要約を JSON で出す。
+- **ステージと配置の記録 (`registry/stages.py`)**:
+  - 採否は `models/registry.json` に置き、モデルと一緒に git で残す。`candidate`（候補、既定）、`approved`（有効）、`rejected`（却下）、`archived`（廃止）。変えるたびに前後のステージ、時刻、理由を履歴に足す。
+  - `src.e2e.deploy.pi` の `push`（使用中にする）、`push --no_activate`（`install`）、`rollback` の結果を `data/deployments.jsonl` に追記する。接続先のホスト名は残さない。push で積み、rollback で1つ戻して、記録からわかる Pi の使用中の版を出す。記録の外で Pi を操作すると合わないので、Pi の最後の走行の版とも並べて見せる。
 - **マニフェスト (`dataset/manifest.py`)**:
   - 走行データはセッション単位で追記のみとする。各セッションに `manifest.json`（ファイルごとの SHA256 と大きさ、全体のハッシュ）を作り、`--verify` で変更、欠落、追加を検出する。`metadata.json` は集計から作り直せるので対象外。既存のマニフェストは書き換えない。
 - **バックアップ (`scripts/backup.ps1`)**:
@@ -451,7 +460,7 @@ PiCarX/
 │   │   ├── evaluation/            # evaluate.py, metrics.py, compare_cv.py, interventions.py
 │   │   ├── mapping/               # occupancy_grid.py, visualizer.py
 │   │   ├── motion/                # estimator.py, checker.py, monitor.py, analyze.py
-│   │   ├── registry/              # compare.py, dataset.py, models.py
+│   │   ├── registry/              # compare.py, dataset.py, models.py, lineage.py, stages.py
 │   │   ├── cycle_profiler.py      # 走行ループの周期の内訳
 │   │   ├── m1_check.py            # M1 の完了条件を実機で計測
 │   │   ├── safety/                # body_status.py, speed_limiter.py, stuck_detector.py,
@@ -488,6 +497,7 @@ PiCarX/
 | **クリーンデータでの再学習** | `uv run python -m src.e2e.training.train --data_dir data/processed/clean_v2 --output_dir models/<version> --epochs 25` |
 | **モデルオフライン評価** | `uv run python -m src.e2e.evaluation.evaluate --data_dir data/raw --model_path models/<version>/best_model.pth` |
 | **MLOps レジストリ確認** | `uv run python -m src.e2e.registry.compare` |
+| **Control Center（来歴・採否・比較・配置・ジョブの画面）** | `uv run python -m src.gui.web`（ブラウザで開く。来歴の要約だけなら `uv run python -m src.e2e.registry.lineage --summary`） |
 | **Pi へモデルを送る** | `uv run python -m src.e2e.deploy.pi --host pi@<ホスト> push --model_dir models/<version>`（戻すのは `rollback`、Pi の版の一覧は `list`、走行の記録を持ってくるのは `pull-runs`。`--host` の代わりに `PICARX_SSH_HOST` でもよい） |
 | **Pi 上の自律走行** | `uv run python -m src.e2e.pi_autopilot --speed 50`（`--intent left` / `right`、パッドで引き継いで修正操作を記録するなら `--gamepad`。Ctrl+C で止める） |
 | **実機自律走行** | `uv run python -m src.e2e.autonomous_driver --model models/<version>/model.onnx --speed 50`（行きたい向きは `--intent left` / `right`、既定は `any`。パッドで引き継いで修正操作を記録するなら `--gamepad`） |

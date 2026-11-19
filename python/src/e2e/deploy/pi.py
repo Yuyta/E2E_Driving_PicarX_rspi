@@ -26,9 +26,11 @@ from pathlib import Path
 from typing import List, Optional
 
 try:
+    from ..registry.stages import record_deployment
     from .bundle import BundleError, build_bundle
 except ImportError:
     from src.e2e.deploy.bundle import BundleError, build_bundle
+    from src.e2e.registry.stages import record_deployment
 
 HOST_ENV = "PICARX_SSH_HOST"
 # Pi の実行ファイル（rust/build の make deploy の既定の置き場所）
@@ -78,6 +80,13 @@ def pull_runs(host: str, pi_runs: str, local: Path, run=None) -> int:
     return run(step).returncode
 
 
+def _record(action: str, version: Optional[str], ok: bool, detail: str = "") -> None:
+    try:
+        record_deployment(action, version, ok, detail=detail)
+    except OSError as exc:
+        print(f"Could not record the deployment: {exc}", file=sys.stderr)
+
+
 def resolve_host(host: Optional[str]) -> str:
     host = host or os.environ.get(HOST_ENV)
     if not host:
@@ -102,13 +111,21 @@ def main(argv=None) -> int:
 
     host = resolve_host(args.host)
     if args.command == "push":
+        # 来歴に残す（接続先は残さない）。使用中にしない送信は install として残す
+        action = "install" if args.no_activate else "push"
+        version = Path(args.model_dir).name
         try:
-            return push(host, args.model_dir, args.pi_bin, activate=not args.no_activate)
+            code = push(host, args.model_dir, args.pi_bin, activate=not args.no_activate)
         except BundleError as e:
             print(f"Error: {e}", file=sys.stderr)
+            _record(action, version, False, str(e))
             return 1
+        _record(action, version, code == 0)
+        return code
     if args.command == "rollback":
-        return remote(host, f"{args.pi_bin} model rollback")
+        code = remote(host, f"{args.pi_bin} model rollback")
+        _record("rollback", None, code == 0)
+        return code
     if args.command == "list":
         return remote(host, f"{args.pi_bin} model list")
     return pull_runs(host, args.pi_runs, Path(args.runs_dir))

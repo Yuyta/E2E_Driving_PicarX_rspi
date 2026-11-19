@@ -108,6 +108,7 @@ from PySide6.QtWidgets import (
 )
 
 try:
+    from ..gui import theme
     from .dataset.annotations import AnnotationStore
     from .dataset.frame_table import (
         COLUMN_BY_KEY,
@@ -145,6 +146,7 @@ except ImportError:
         summary,
     )
     from src.e2e.intent import INTENTS
+    from src.gui import theme
 
 PYTHON_DIR = Path(__file__).resolve().parents[2]
 DEFAULT_DATA_DIRS = ("data/raw", "data/interventions")
@@ -160,42 +162,44 @@ HISTOGRAM_BINS = 14
 
 # ---- 色 ----
 
-FONT_FAMILY = "Yu Gothic UI"
-C_BG = "#f4f6f9"
-C_SURFACE = "#ffffff"
-C_BORDER = "#dde2e8"
-C_TEXT = "#1f2933"
-C_MUTED = "#8a94a3"
-C_ACCENT = "#2f6fde"
-C_ACCENT_SOFT = "#e6efff"
-C_DANGER = "#d64545"
-C_DANGER_SOFT = "#fde9e9"
-C_WARN = "#b7791f"
-C_WARN_SOFT = "#fff3d1"
-C_USED = "#3aa776"
-C_UNUSED = "#cfd5dd"
-# 棒グラフの系列の色（積み上げ）
+# 色は共通の見た目（src/gui/theme.py、Control Center と同じ値）から取る
+FONT_FAMILY = theme.FONT_FAMILY
+C_BG = theme.BG
+C_SURFACE = theme.SURFACE
+C_BORDER = theme.BORDER
+C_TEXT = theme.TEXT
+C_MUTED = theme.MUTED
+C_ACCENT = theme.ACCENT
+C_ACCENT_SOFT = theme.ACCENT_SOFT
+C_DANGER = theme.DANGER
+C_DANGER_SOFT = theme.DANGER_SOFT
+C_WARN = theme.WARN
+C_WARN_SOFT = theme.WARN_SOFT
+C_USED = theme.USED
+C_UNUSED = theme.UNUSED
+# 棒グラフの系列の色（積み上げ）。色覚の違いでも隣どうしを見分けられる順に並べたもの。
+# 最後の灰色は「その他」
 SERIES_COLORS = (
-    "#2f6fde",
-    "#3aa776",
-    "#e0a020",
-    "#d64545",
-    "#8a5cd6",
-    "#2ba3b5",
-    "#d6669e",
-    "#7b8794",
-    "#a0aec0",
+    "#2a78d6",
+    "#eb6834",
+    "#1baf7a",
+    "#eda100",
+    "#e87ba4",
+    "#008300",
+    "#6250d6",
+    "#e34948",
+    "#898781",
 )
 
 # 意味のある値は、表と帯と同じ色で描く
 VALUE_COLORS = {
     USED: C_USED,
     EXCLUDED_STOPPED: C_UNUSED,
-    EXCLUDED_FLAG: "#a0aec0",
+    EXCLUDED_FLAG: "#a3a29b",
     EXCLUDED_MISMATCH: "#e0a020",
     EXCLUDED_BY_HAND: C_DANGER,
     NONE_TEXT: C_UNUSED,
-    OTHERS_TEXT: "#a0aec0",
+    OTHERS_TEXT: "#a3a29b",
 }
 
 STYLE = f"""
@@ -220,9 +224,9 @@ QPushButton {{ background: {C_SURFACE}; border: 1px solid {C_BORDER}; border-rad
 QPushButton:hover {{ border-color: {C_ACCENT}; color: {C_ACCENT}; }}
 QPushButton:pressed {{ background: {C_ACCENT_SOFT}; }}
 QPushButton#primary {{ background: {C_ACCENT}; border-color: {C_ACCENT}; color: white; }}
-QPushButton#primary:hover {{ background: #285fc0; color: white; }}
+QPushButton#primary:hover {{ background: {theme.ACCENT_HOVER}; color: white; }}
 QPushButton#danger {{ background: {C_DANGER}; border-color: {C_DANGER}; color: white; }}
-QPushButton#danger:hover {{ background: #b93a3a; color: white; }}
+QPushButton#danger:hover {{ background: {theme.DANGER_HOVER}; color: white; }}
 QComboBox, QLineEdit {{ background: {C_SURFACE}; border: 1px solid {C_BORDER};
     border-radius: 6px; padding: 4px 8px; min-height: 20px; }}
 QComboBox:focus, QLineEdit:focus {{ border-color: {C_ACCENT}; }}
@@ -237,7 +241,7 @@ QListWidget#chips::item {{ background: {C_ACCENT_SOFT}; color: {C_ACCENT}; borde
     padding: 2px 10px; margin: 2px; }}
 QListWidget#chips::item:selected {{ background: {C_ACCENT}; color: white; }}
 QPlainTextEdit {{ background: {C_SURFACE}; border: 1px solid {C_BORDER}; border-radius: 6px;
-    font-family: "Consolas", "{FONT_FAMILY}"; font-size: 9pt; color: #3e4c59; }}
+    font-family: "Consolas", "{FONT_FAMILY}"; font-size: 9pt; color: {theme.TEXT_2}; }}
 QSplitter::handle {{ background: transparent; }}
 QScrollBar:vertical {{ background: transparent; width: 10px; }}
 QScrollBar::handle:vertical {{ background: {C_UNUSED}; border-radius: 5px; min-height: 30px; }}

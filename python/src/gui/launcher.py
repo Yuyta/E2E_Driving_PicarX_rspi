@@ -2,7 +2,6 @@
 
 import os
 import sys
-from dataclasses import dataclass
 from pathlib import Path
 
 from PySide6.QtCore import QProcess
@@ -27,92 +26,13 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from src.gui import theme
+from src.gui.workflows import WORKFLOWS, Workflow
+
 PYTHON_DIR = Path(__file__).resolve().parents[2]
+WEB_PORT = 8765
 
-
-@dataclass(frozen=True)
-class Workflow:
-    title: str
-    description: str
-    module: str
-    group: str
-    moves_car: bool = False
-    arguments: str = ""
-    examples: tuple[tuple[str, str], ...] = ()
-
-
-WORKFLOWS = (
-    Workflow("会話・手動操作", "車体の状態確認、会話、手動操作", "src.gui.app", "操作"),
-    Workflow(
-        "走行データ収集",
-        "カメラを見ながら操作と走行データを記録",
-        "src.e2e.gui_collector",
-        "データ",
-    ),
-    Workflow("データ確認・ラベル", "走行データの確認、注釈、統計", "src.e2e.data_viewer", "データ"),
-    Workflow(
-        "モデル学習",
-        "記録データからモデルを学習し ONNX を出力",
-        "src.e2e.training.train",
-        "学習・評価",
-        arguments="--config configs/train.toml --data_dir data/raw --output_dir models/v007",
-    ),
-    Workflow(
-        "交差検証",
-        "セッションを分けてモデルを評価",
-        "src.e2e.training.cross_validate",
-        "学習・評価",
-        arguments="--config configs/train.toml --data_dir data/raw",
-    ),
-    Workflow(
-        "モデル比較", "登録済みモデルの評価値を比較", "src.e2e.registry.compare", "学習・評価"
-    ),
-    Workflow(
-        "安全チェック",
-        "M1 の車体・安全機能を確認",
-        "src.e2e.m1_check",
-        "車体チェック",
-        arguments="status",
-        examples=(
-            ("状態", "status"),
-            ("カメラ計測", "camera --seconds 20"),
-            ("安全イベント", "events"),
-        ),
-    ),
-    Workflow(
-        "動きの計測",
-        "M3 の動き計測・校正",
-        "src.e2e.m3_check",
-        "車体チェック",
-        arguments="run --scenario still",
-        examples=(
-            ("静止", "run --scenario still"),
-            ("直進（車体が動く）", "run --scenario forward --i-understand-the-car-will-move"),
-            ("校正", "calibrate"),
-        ),
-    ),
-    Workflow(
-        "速度チェック",
-        "車輪が回り始める速度を計測",
-        "src.e2e.speed_check",
-        "車体チェック",
-        True,
-        "--i-understand-the-car-will-move",
-        (("速度確認", "--speeds 30 35 40 45 --i-understand-the-car-will-move"),),
-    ),
-    Workflow(
-        "Pi 自律走行", "選択したモデルで Pi の車体を自律走行", "src.e2e.pi_autopilot", "走行", True
-    ),
-    Workflow(
-        "自動データ収集",
-        "ルールに従って車体を走らせデータを記録",
-        "src.e2e.auto_collector",
-        "走行",
-        True,
-        "--i-understand-the-car-will-move",
-        (("150秒（車体が動く）", "--seconds 150 --i-understand-the-car-will-move"),),
-    ),
-)
+__all__ = ["WORKFLOWS", "Workflow", "LauncherWindow"]
 
 
 class WorkflowCard(QFrame):
@@ -129,7 +49,7 @@ class WorkflowCard(QFrame):
         description.setWordWrap(True)
         description.setObjectName("muted")
         button = QPushButton("起動" if not workflow.moves_car else "確認して起動…")
-        button.setObjectName("launchButton")
+        button.setObjectName("carButton" if workflow.moves_car else "launchButton")
         button.clicked.connect(lambda: launch(workflow))
         text_layout = QVBoxLayout()
         text_layout.setSpacing(5)
@@ -185,6 +105,7 @@ class LauncherWindow(QMainWindow):
         self.resize(1080, 860)
         self.setMinimumSize(760, 620)
         self.processes: list[QProcess] = []
+        self.web_process: QProcess | None = None
         self._build_ui()
 
     def _build_ui(self):
@@ -194,7 +115,15 @@ class LauncherWindow(QMainWindow):
         layout.setSpacing(12)
         header = QLabel("PiCar-X Control Center")
         header.setObjectName("header")
-        layout.addWidget(header)
+        web_button = QPushButton("Control Center を開く（ブラウザ）")
+        web_button.setObjectName("primary")
+        web_button.setToolTip("モデルとデータの来歴、採否、比較、配置、ジョブの記録を管理する画面")
+        web_button.clicked.connect(self._open_web)
+        header_row = QHBoxLayout()
+        header_row.addWidget(header)
+        header_row.addStretch(1)
+        header_row.addWidget(web_button)
+        layout.addLayout(header_row)
         subtitle = QLabel("操作、データ、学習、評価をここから始められます")
         subtitle.setObjectName("muted")
         layout.addWidget(subtitle)
@@ -212,9 +141,9 @@ class LauncherWindow(QMainWindow):
             grid.addWidget(label, row, 0, 1, 3)
             row += 1
             entries = [workflow for workflow in WORKFLOWS if workflow.group == group]
-            for col, workflow in enumerate(entries):
-                grid.addWidget(WorkflowCard(workflow, self._launch), row, col)
-            row += 1
+            for i, workflow in enumerate(entries):
+                grid.addWidget(WorkflowCard(workflow, self._launch), row + i // 3, i % 3)
+            row += (len(entries) + 2) // 3
         content = QWidget()
         content.setLayout(grid)
         scroll = QScrollArea()
@@ -232,33 +161,43 @@ class LauncherWindow(QMainWindow):
         layout.addWidget(QLabel("実行ログ"))
         layout.addWidget(self.log)
         self.setCentralWidget(root)
-        self.setStyleSheet("""
-            QMainWindow, QWidget { background: #f5f7fa; color: #172033; font-size: 14px; }
-            #header { font-size: 28px; font-weight: 700; }
-            #muted { color: #64748b; }
-            #sectionTitle { font-size: 17px; font-weight: 650; padding-top: 8px; }
-            #workflowCard { background: white; border: 1px solid #dbe2ea;
-                border-radius: 10px; min-height: 102px; }
-            #cardTitle { font-size: 15px; font-weight: 650; }
-            #workflowCard QLabel { background: transparent; }
-            QScrollArea, QScrollArea QWidget { background: transparent; }
-            QScrollBar:vertical { background: transparent; width: 10px; margin: 4px 2px; }
-            QScrollBar::handle:vertical { background: #b8c4d4; min-height: 28px;
-                border-radius: 5px; }
-            QScrollBar::handle:vertical:hover { background: #8192a8; }
-            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
-            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {
-                background: transparent; }
-            QPushButton { background: #2563eb; color: white; border: 0;
-                border-radius: 6px; padding: 9px; }
-            QPushButton#launchButton { background-color: #2563eb; color: #ffffff;
+        self.setStyleSheet(
+            theme.APP_STYLE
+            + f"""
+            #header {{ font-size: 26px; font-weight: 700; }}
+            #muted {{ color: {theme.MUTED}; }}
+            #sectionTitle {{ font-size: 16px; font-weight: 650; padding-top: 10px;
+                color: {theme.TEXT}; }}
+            #workflowCard {{ background: {theme.SURFACE}; border: 1px solid {theme.BORDER};
+                border-radius: 10px; }}
+            #workflowCard:hover {{ border-color: {theme.BORDER_STRONG}; }}
+            #cardTitle {{ font-size: 14px; font-weight: 650; }}
+            #workflowCard QLabel {{ background: transparent; }}
+            #movesBadge {{ color: {theme.DANGER}; font-size: 12px; font-weight: 600; }}
+            QScrollArea, QScrollArea QWidget {{ background: transparent; }}
+            QPushButton#launchButton {{ background-color: {theme.ACCENT}; color: #ffffff;
                 border: 0; border-radius: 7px; font-weight: 600; min-width: 132px;
-                max-width: 132px; min-height: 38px; max-height: 38px; }
-            QPushButton:hover { background: #1d4ed8; }
-            QTextEdit { background: white; border: 1px solid #dbe2ea; border-radius: 6px; }
-        """)
+                max-width: 132px; min-height: 38px; max-height: 38px; }}
+            QPushButton#launchButton:hover {{ background-color: {theme.ACCENT_HOVER}; }}
+            QPushButton#carButton {{ background-color: {theme.DANGER}; color: #ffffff;
+                border: 0; border-radius: 7px; font-weight: 600; min-width: 132px;
+                max-width: 132px; min-height: 38px; max-height: 38px; }}
+            QPushButton#carButton:hover {{ background-color: {theme.DANGER_HOVER}; }}
+            QTextEdit {{ font-family: "Consolas", "{theme.FONT_FAMILY}"; font-size: 9pt; }}
+            """
+        )
 
     def _launch(self, workflow: Workflow):
+        if workflow.confirm and not workflow.moves_car:
+            answer = QMessageBox.question(
+                self,
+                "確認",
+                workflow.confirm,
+                QMessageBox.Yes | QMessageBox.Cancel,
+                QMessageBox.Cancel,
+            )
+            if answer != QMessageBox.Yes:
+                return
         if workflow.moves_car:
             answer = QMessageBox.warning(
                 self,
@@ -282,32 +221,41 @@ class LauncherWindow(QMainWindow):
             QMessageBox.warning(self, "引数を確認してください", str(error))
             return
 
+        self._start(workflow.title, workflow.module, parsed_arguments)
+
+    def _open_web(self):
+        if self.web_process is not None and self.web_process.state() != QProcess.NotRunning:
+            # もう動いている。ブラウザだけ開き直す
+            import webbrowser
+
+            webbrowser.open(f"http://127.0.0.1:{WEB_PORT}/")
+            return
+        self.web_process = self._start("Control Center", "src.gui.web", ["--port", str(WEB_PORT)])
+
+    def _start(self, title: str, module: str, arguments: list) -> QProcess:
         process = QProcess(self)
         process.setWorkingDirectory(str(PYTHON_DIR))
         environment = process.processEnvironment()
         environment.insert("PYTHONPATH", str(PYTHON_DIR))
         process.setProcessEnvironment(environment)
         process.setProgram(sys.executable)
-        process.setArguments(["-m", workflow.module, *parsed_arguments])
+        process.setArguments(["-m", module, *arguments])
         process.readyReadStandardOutput.connect(
-            lambda p=process, name=workflow.title: self._append_output(
-                name, p.readAllStandardOutput()
-            )
+            lambda p=process, name=title: self._append_output(name, p.readAllStandardOutput())
         )
         process.readyReadStandardError.connect(
-            lambda p=process, name=workflow.title: self._append_output(
-                name, p.readAllStandardError()
-            )
+            lambda p=process, name=title: self._append_output(name, p.readAllStandardError())
         )
         process.finished.connect(lambda *_args, p=process: self._reap(p))
         process.errorOccurred.connect(
-            lambda _error, p=process, name=workflow.title: self.log.append(
+            lambda _error, p=process, name=title: self.log.append(
                 f"起動エラー ({name}): {p.errorString()}"
             )
         )
         self.processes.append(process)
-        self.log.append(f"▶ {workflow.title}: {workflow.module}")
+        self.log.append(f"▶ {title}: {module}")
         process.start()
+        return process
 
     def _append_output(self, name: str, data):
         output = bytes(data).decode("utf-8", errors="replace").strip()

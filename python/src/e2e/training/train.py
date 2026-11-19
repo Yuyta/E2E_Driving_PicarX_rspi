@@ -14,6 +14,7 @@ import json
 import os
 import random
 import sys
+import time
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
@@ -472,6 +473,8 @@ def train(data_dir, output_model_dir, params: Optional[Dict[str, Any]] = None) -
 
     metadata = {
         "model_version": output_dir.name,
+        # 学習を終えた時刻（モデルの一覧で最新版を決めるのに使う）
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         "epochs": params["epochs"],
         "batch_size": params["batch_size"],
         "best_val_loss": best_val_loss,
