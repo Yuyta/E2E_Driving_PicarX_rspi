@@ -1024,7 +1024,7 @@ async function viewJob(root, [id]) {
       if (stick) log.scrollTop = log.scrollHeight;
       statusEl.replaceChildren(statusDot(res.status), res.exit_code !== null && res.exit_code !== undefined ? h("span", { class: "muted small" }, `  終了コード ${res.exit_code}`) : null);
       stopBtn.hidden = res.status !== "running";
-      if (res.status === "running") state.timers.push(setTimeout(poll, 1000));
+      if (res.status === "running") state.timers.push(setTimeout(poll, document.hidden ? 5000 : 1000));
       else if (job.produces && /^models\//.test(job.produces)) {
         await loadCatalog(true);
         const v = job.produces.split("/").pop();
@@ -1049,7 +1049,14 @@ async function viewJob(root, [id]) {
 
 /* ------------------------------------------------------------------ robot & emergency stop */
 
-async function pollRobot() {
+document.addEventListener("visibilitychange", () => {
+  // 表に戻った時は、待たずに最新にする
+  if (!document.hidden) { pollRobotNow(); }
+});
+let robotPollAt = 0;
+function pollRobotNow() { if (Date.now() - robotPollAt > 3000) pollRobot(true); }
+async function pollRobot(once) {
+  robotPollAt = Date.now();
   const pill = document.getElementById("robot-pill");
   try {
     const r = await api("/robot/status");
@@ -1066,9 +1073,12 @@ async function pollRobot() {
       pill.title = `Pi の API サーバーに接続できません（${r.error}）`;
     }
   } catch { pill.className = "pill bad"; pill.replaceChildren(h("span", { class: "dot" }), "サーバー停止中"); pill.title = "Control Center のサーバーが止まっています。起動し直してください"; }
-  setTimeout(pollRobot, state.robot?.online ? 4000 : 10000);
+  // タブが裏にある間は間隔を延ばす（見ていない時に Pi へ問い合わせ続けない）
+  if (once === true) return;
+  setTimeout(pollRobot, document.hidden ? 30000 : state.robot?.online ? 4000 : 10000);
 }
 async function pollJobs() {
+  if (document.hidden) { setTimeout(pollJobs, 15000); return; }
   try {
     const jobs = await api("/jobs");
     const n = jobs.filter((j) => j.status === "running").length;

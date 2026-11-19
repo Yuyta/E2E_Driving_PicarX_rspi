@@ -285,7 +285,7 @@ class PicarxMainWindow(QMainWindow):
         self.poll_timer.start(2000)
 
         self.camera_timer = QTimer(self)
-        self.camera_timer.timeout.connect(self._on_snapshot_clicked)
+        self.camera_timer.timeout.connect(self._on_camera_tick)
         self.camera_timer.start(1000)
 
     def _on_model_changed(self, index: int):
@@ -392,6 +392,12 @@ class PicarxMainWindow(QMainWindow):
         self._emergency_active = False
         self.lbl_safety.setText("安全（速度の制限が有効）")
         theme.set_level(self.lbl_safety, "good")
+
+    def _on_camera_tick(self):
+        # 最小化している間は、見ていない画像のために Pi と通信しない（ボタンを押せば取る）
+        if self.isMinimized() or not self.isVisible():
+            return
+        self._on_snapshot_clicked()
 
     def _on_snapshot_clicked(self):
         if self._camera_request_active:

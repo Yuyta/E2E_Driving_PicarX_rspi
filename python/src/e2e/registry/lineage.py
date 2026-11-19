@@ -36,6 +36,32 @@ def _read_json(path: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
+# マニフェストは全ファイルの一覧で大きい（1セッション 2,000 件以上）。画面を開くたびに読み直さない
+# よう、更新の時刻と大きさが同じなら前の結果を使う
+_MANIFEST_CACHE: Dict[str, Any] = {}
+
+
+def _manifest_summary(session_dir: Path) -> Optional[Dict[str, Any]]:
+    path = Path(session_dir) / "manifest.json"
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    key = str(path)
+    stamp = (stat.st_mtime_ns, stat.st_size)
+    cached = _MANIFEST_CACHE.get(key)
+    if cached and cached[0] == stamp:
+        return cached[1]
+    manifest = load_manifest(session_dir)
+    summary = (
+        {"hash": manifest.get("hash"), "created_at": manifest.get("created_at")}
+        if manifest
+        else None
+    )
+    _MANIFEST_CACHE[key] = (stamp, summary)
+    return summary
+
+
 def _iso(timestamp: Optional[float]) -> Optional[str]:
     if not timestamp:
         return None
@@ -106,7 +132,7 @@ def collect_sessions(data_dirs: Iterable[Path], annotations_dir: Optional[Path] 
             stats = session_stats(path)
             if stats is None:
                 continue
-            manifest = load_manifest(path)
+            manifest = _manifest_summary(path)
             collector = _read_json(path / "collector.json") or {}
             annotation = (annotations_dir / f"{path.name}.json") if annotations_dir else None
             sessions.append(

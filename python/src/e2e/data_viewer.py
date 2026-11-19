@@ -94,6 +94,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
+    QScrollArea,
     QSizePolicy,
     QSplitter,
     QStyle,
@@ -608,7 +609,9 @@ class FrameImage(QLabel):
 
     def __init__(self):
         super().__init__()
-        self.setMinimumSize(320, 220)
+        self.setMinimumSize(240, 160)
+        # 描いた画像の大きさで枠を広げない（広げると、画面が低い時に下の文字と重なる）
+        self.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
         self.setAlignment(Qt.AlignCenter)
         self.setStyleSheet(f"background: #11161d; border-radius: 6px; color: {C_MUTED};")
         self._pixmap: Optional[QPixmap] = None
@@ -1123,17 +1126,28 @@ class DataViewer(QMainWindow):
         details_card, details_layout = card("記録の中身")
         details_layout.addWidget(self.details)
 
+        self.details.setMinimumHeight(90)
         right = QWidget()
+        right.setObjectName("page")
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(6, 12, 12, 12)
         right_layout.setSpacing(10)
         right_layout.addWidget(image_card, 5)
         right_layout.addWidget(self._build_editor())
         right_layout.addWidget(details_card, 3)
+        # 画面が低い時は、部品を重ねずにスクロールさせる
+        right.setMinimumHeight(right_layout.minimumSize().height() + 160)
+        right_scroll = QScrollArea()
+        right_scroll.setFrameShape(QFrame.NoFrame)
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        right_scroll.setWidget(right)
+        # 右の列の部品が横に切れないよう、列の幅は中身の最低の幅より狭くしない
+        right_scroll.setMinimumWidth(right.minimumSizeHint().width() + 12)
 
         splitter = QSplitter()
         splitter.addWidget(left)
-        splitter.addWidget(right)
+        splitter.addWidget(right_scroll)
         splitter.setSizes([1000, 600])
         page = QWidget()
         page.setObjectName("page")
@@ -1164,10 +1178,17 @@ class DataViewer(QMainWindow):
             layout.addWidget(swatch)
             layout.addWidget(label)
         layout.addStretch(1)
-        hint = QLabel("Shift+クリック / 下の帯をドラッグ / I と O で範囲を選択")
+        # 操作のヒントは別の行にする（同じ行だと画面の幅が 1500px 近く要る）
+        hint = QLabel("範囲の選択: Shift+クリック / 下の帯をドラッグ / I と O")
         hint.setObjectName("muted")
-        layout.addWidget(hint)
-        return widget
+        hint.setWordWrap(True)
+        box = QWidget()
+        rows = QVBoxLayout(box)
+        rows.setContentsMargins(0, 0, 0, 0)
+        rows.setSpacing(4)
+        rows.addWidget(widget)
+        rows.addWidget(hint)
+        return box
 
     def _build_editor(self) -> QWidget:
         frame, layout = card("ラベル（選んだすべてのフレームに付きます）")

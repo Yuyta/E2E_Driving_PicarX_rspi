@@ -83,7 +83,9 @@ class App:
         self.base = Path(base)
         self.token = token or secrets.token_urlsafe(24)
         self.jobs = jobs or JobManager(self.base, self.base / "data" / "jobs", stop_car=stop_car)
-        self.robot = robot
+        self._robot_factory = robot
+        self._robot = None
+        self._robot_lock = threading.Lock()
         self._catalog_cache: Tuple[float, Optional[Dict[str, Any]]] = (0.0, None)
         self._catalog_lock = threading.Lock()
 
@@ -148,6 +150,13 @@ class App:
         return job.public()
 
     # ---------------------------------------------------------------- robot
+
+    def robot(self):
+        """Pi のクライアントを使い回す（状態の確認のたびに接続を作り直さない）"""
+        with self._robot_lock:
+            if self._robot is None:
+                self._robot = self._robot_factory()
+            return self._robot
 
     def robot_status(self) -> Dict[str, Any]:
         try:
