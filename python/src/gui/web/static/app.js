@@ -99,7 +99,13 @@ const statusDot = (st) => h("span", { class: `status-dot ${st}` }, STATUS_TEXT[s
 async function api(path, { method = "GET", body } = {}) {
   const headers = { "X-PicarX-Token": TOKEN };
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  const res = await fetch(`/api${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  let res;
+  try {
+    res = await fetch(`/api${path}`, { method, headers, body: body === undefined ? undefined : JSON.stringify(body) });
+  } catch {
+    // ブラウザの「Failed to fetch」はサーバーに届かなかった時に出る
+    throw new Error("Control Center のサーバーに接続できません。サーバーが止まっています（ランチャーを閉じた、ターミナルで Ctrl+C を押したなど）。`uv run python -m src.gui.web` で起動し直してから、このページを開き直してください");
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data.error || `${res.status} ${res.statusText}`);
   return data;
@@ -1059,7 +1065,7 @@ async function pollRobot() {
       pill.replaceChildren(h("span", { class: "dot" }), "Pi 未接続");
       pill.title = `Pi の API サーバーに接続できません（${r.error}）`;
     }
-  } catch { pill.className = "pill neutral"; pill.replaceChildren(h("span", { class: "dot" }), "Control Center 停止?"); }
+  } catch { pill.className = "pill bad"; pill.replaceChildren(h("span", { class: "dot" }), "サーバー停止中"); pill.title = "Control Center のサーバーが止まっています。起動し直してください"; }
   setTimeout(pollRobot, state.robot?.online ? 4000 : 10000);
 }
 async function pollJobs() {
