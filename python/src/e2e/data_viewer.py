@@ -211,9 +211,13 @@ QFrame#card {{
 QLabel#cardTitle {{ font-weight: 600; font-size: 10.5pt; }}
 QLabel#muted {{ color: {C_MUTED}; }}
 QLabel#count {{ color: {C_MUTED}; padding: 2px 4px; }}
+QLabel#headerMark {{ background: {C_ACCENT}; color: white; border-radius: 8px;
+    font-size: 13pt; font-weight: 700; min-width: 32px; max-width: 32px;
+    min-height: 32px; max-height: 32px; qproperty-alignment: AlignCenter; }}
+QLabel#headerTitle {{ font-size: 13pt; font-weight: 700; padding-left: 8px; }}
 QToolBar {{ background: {C_SURFACE}; border: none; border-bottom: 1px solid {C_BORDER};
-    padding: 4px 8px; spacing: 6px; }}
-QToolButton {{ padding: 4px 10px; border-radius: 6px; }}
+    padding: 8px 14px; spacing: 6px; }}
+QToolButton {{ padding: 6px 12px; border-radius: 7px; border: 1px solid {C_BORDER}; }}
 QToolButton:hover {{ background: {C_ACCENT_SOFT}; }}
 QTabWidget::pane {{ border: none; }}
 QTabBar::tab {{ background: transparent; padding: 8px 18px; margin-right: 2px;
@@ -948,7 +952,7 @@ class DataViewer(QMainWindow):
         table: Optional[FrameTable] = None,
     ):
         super().__init__()
-        self.setWindowTitle("PiCar-X 走行データ")
+        self.setWindowTitle("データ確認・ラベル — PiCar-X")
         self.resize(1600, 960)
         # INI 形式にする（テストで置き場所を変えられ、利用者の設定に触れない）
         self.qsettings = QSettings(
@@ -988,6 +992,16 @@ class DataViewer(QMainWindow):
     def _build_toolbar(self) -> None:
         bar = self.addToolBar("データ")
         bar.setMovable(False)
+        # 他の画面（会話・収集・Control Center）と同じ上の帯の形にする
+        mark = QLabel("D")
+        mark.setObjectName("headerMark")
+        bar.addWidget(mark)
+        title = QLabel("データ確認・ラベル")
+        title.setObjectName("headerTitle")
+        bar.addWidget(title)
+        gap = QWidget()
+        gap.setFixedWidth(18)
+        bar.addWidget(gap)
         for text, slot in (
             ("フォルダを追加…", self.add_folder),
             ("読み込み直す", self.reload),
@@ -1962,7 +1976,7 @@ class ViewerStartup(QMainWindow):
 
     def __init__(self, data_dirs: Sequence[Path]):
         super().__init__()
-        self.setWindowTitle("PiCar-X 走行データ")
+        self.setWindowTitle("データ確認・ラベル — PiCar-X")
         self.resize(520, 180)
         self.viewer: Optional[DataViewer] = None
         panel = QWidget(self)

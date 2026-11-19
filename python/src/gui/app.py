@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 
 from src.agents.stop_intent import StopIntent, parse_stop_intent
 from src.config import ModelPreset, settings
+from src.gui import theme
 from src.gui.async_runner import AsyncRunner
 from src.gui.theme import APP_STYLE
 from src.memory.events import EventRecorder
@@ -86,110 +87,143 @@ class PicarxMainWindow(QMainWindow):
 
     def _init_ui(self):
         self.setStyleSheet(APP_STYLE)
+        self.setWindowTitle("会話・手動操作 — PiCar-X")
         self.setMinimumSize(980, 700)
         central_widget = QWidget(self)
         self.setCentralWidget(central_widget)
-        main_layout = QHBoxLayout(central_widget)
+        page = QVBoxLayout(central_widget)
+        page.setContentsMargins(0, 0, 0, 0)
+        page.setSpacing(0)
 
-        # 左カラム: コントロール & センサー & カメラ
+        # 上の帯: 画面の名前、安全の状態、緊急停止（いつでも押せる場所に置く）
+        bar, bar_right = theme.header("会話・手動操作", "PiCar-X と話す・カメラを見る・手で動かす")
+        self.lbl_safety = theme.pill("安全（速度の制限が有効）", "good")
+        bar_right.addWidget(self.lbl_safety)
+        header_stop = QPushButton("■ 緊急停止")
+        header_stop.setObjectName("estop")
+        header_stop.setToolTip("車体を止めます。解除するまで走行を受け付けません")
+        header_stop.clicked.connect(self._on_emergency_stop)
+        bar_right.addWidget(header_stop)
+        page.addWidget(bar)
+
+        main_layout = QHBoxLayout()
+        main_layout.setContentsMargins(16, 16, 16, 16)
+        main_layout.setSpacing(16)
+        page.addLayout(main_layout, 1)
+
+        # 左の列: AI のモデル、カメラ、センサー、手動操作
         left_layout = QVBoxLayout()
+        left_layout.setSpacing(14)
+        left_layout.setContentsMargins(0, 0, 6, 0)
 
-        # 1. モデル選択セクション (4種モデル切り替え)
-        model_group = QGroupBox("LLM Model Selection (4 Presets)")
+        model_group = QGroupBox("AI のモデル")
         model_group.setObjectName("modelSelectionGroup")
         model_layout = QHBoxLayout(model_group)
-        model_layout.addWidget(QLabel("Active Model:"))
+        model_label = QLabel("使うモデル")
+        model_label.setObjectName("muted")
+        model_layout.addWidget(model_label)
 
         self.model_combo = QComboBox()
         for preset in ModelPreset:
-            is_default = " (Default)" if preset == settings.default_model else ""
+            is_default = "（既定）" if preset == settings.default_model else ""
             self.model_combo.addItem(f"{preset.value}{is_default}", preset)
         # 一覧の先頭ではなく、実際に使う既定のモデルを表示する
         self.model_combo.setCurrentIndex(self.model_combo.findData(self.current_model))
 
         self.model_combo.currentIndexChanged.connect(self._on_model_changed)
-        model_layout.addWidget(self.model_combo)
+        model_layout.addWidget(self.model_combo, 1)
         left_layout.addWidget(model_group)
 
-        # 2. カメラプレビューエリア
-        camera_group = QGroupBox("Camera Stream / Snapshot")
+        camera_group = QGroupBox("カメラ")
         camera_group.setObjectName("cameraGroup")
         camera_layout = QVBoxLayout(camera_group)
-        self.camera_label = QLabel("Camera Connecting...")
+        camera_layout.setSpacing(10)
+        self.camera_label = QLabel("カメラに接続しています…")
         self.camera_label.setObjectName("cameraPreview")
         self.camera_label.setAlignment(Qt.AlignCenter)
         self.camera_label.setScaledContents(True)
         self.camera_label.setMinimumHeight(200)
         self.camera_label.setMaximumHeight(280)
-        self.camera_label.setStyleSheet("background-color: #222; color: #aaa;")
+        self.camera_label.setStyleSheet(
+            f"background: {theme.CAMERA_BG}; color: #8d93a0; border-radius: 10px;"
+        )
         camera_layout.addWidget(self.camera_label)
 
-        snap_btn = QPushButton("Capture On-Demand Snapshot (Save Tokens)")
+        snap_btn = QPushButton("今の画像を取得")
         snap_btn.setObjectName("snapshotButton")
+        snap_btn.setToolTip("1秒ごとにも自動で更新します。押すとすぐに取り直します")
         snap_btn.clicked.connect(self._on_snapshot_clicked)
         camera_layout.addWidget(snap_btn)
         left_layout.addWidget(camera_group)
 
-        # 3. センサー状態モニタ
-        sensor_group = QGroupBox("Telemetry & Sensor Monitor")
+        sensor_group = QGroupBox("センサー")
         sensor_group.setObjectName("sensorGroup")
         sensor_layout = QGridLayout(sensor_group)
-        sensor_layout.addWidget(QLabel("Obstacle Distance:"), 0, 0)
+        sensor_layout.setSpacing(10)
         self.lbl_distance = QLabel("-- cm")
-        sensor_layout.addWidget(self.lbl_distance, 0, 1)
-
-        sensor_layout.addWidget(QLabel("Grayscale (L/M/R):"), 1, 0)
         self.lbl_grayscale = QLabel("[--, --, --]")
-        sensor_layout.addWidget(self.lbl_grayscale, 1, 1)
-
-        sensor_layout.addWidget(QLabel("Safety Status:"), 2, 0)
-        self.lbl_safety = QLabel("SAFE (Limiter Active)")
-        self.lbl_safety.setStyleSheet("color: green; font-weight: bold;")
-        sensor_layout.addWidget(self.lbl_safety, 2, 1)
+        sensor_layout.addWidget(theme.tile("前方の距離", self.lbl_distance), 0, 0)
+        sensor_layout.addWidget(theme.tile("床センサー（左・中・右）", self.lbl_grayscale), 0, 1)
         left_layout.addWidget(sensor_group)
 
-        # 4. 手動制御パネル (緊急停止含む)
-        control_group = QGroupBox("Manual Vehicle Controls")
+        control_group = QGroupBox("手動操作")
         control_group.setObjectName("manualControlsGroup")
         grid = QGridLayout(control_group)
+        grid.setSpacing(8)
 
-        btn_forward = QPushButton("▲ Forward")
+        btn_forward = QPushButton("▲")
+        btn_forward.setToolTip("前進（速さ 30、0.4 秒）")
         btn_forward.clicked.connect(
             lambda: self._async_call(self.client.move(DriveDirection.FORWARD, 30, 400))
         )
-        btn_backward = QPushButton("▼ Backward")
+        btn_backward = QPushButton("▼")
+        btn_backward.setToolTip("後退（速さ 30、0.4 秒）")
         btn_backward.clicked.connect(
             lambda: self._async_call(self.client.move(DriveDirection.BACKWARD, 30, 400))
         )
-        btn_left = QPushButton("◄ Left (Steer)")
+        btn_left = QPushButton("◀")
+        btn_left.setToolTip("舵を左へ")
         btn_left.clicked.connect(lambda: self._async_call(self.client.steer(-30)))
-        btn_right = QPushButton("Right (Steer) ►")
+        btn_right = QPushButton("▶")
+        btn_right.setToolTip("舵を右へ")
         btn_right.clicked.connect(lambda: self._async_call(self.client.steer(30)))
-        btn_center = QPushButton("● Center")
+        btn_center = QPushButton("●")
+        btn_center.setToolTip("舵を中央へ")
         btn_center.clicked.connect(lambda: self._async_call(self.client.steer(0)))
+        for pad in (btn_forward, btn_backward, btn_left, btn_right, btn_center):
+            pad.setObjectName("pad")
+            pad.setFixedSize(84, 50)
 
-        btn_stop = QPushButton("🛑 EMERGENCY STOP")
-        btn_stop.setStyleSheet(
-            "background-color: #d9534f; color: white; font-weight: bold; padding: 10px;"
-        )
+        btn_stop = QPushButton("■ 緊急停止")
+        btn_stop.setObjectName("estop")
         btn_stop.clicked.connect(self._on_emergency_stop)
 
-        btn_reset = QPushButton("Reset Emergency Stop")
+        btn_reset = QPushButton("緊急停止を解除")
         btn_reset.clicked.connect(self._on_emergency_reset)
 
-        btn_calibrate = QPushButton("Calibrate Floor")
+        btn_calibrate = QPushButton("床を校正")
         btn_calibrate.setToolTip("車体を床に置いた状態で、段差検知の基準を測ります")
         btn_calibrate.clicked.connect(self._on_calibrate_floor)
 
-        grid.addWidget(btn_forward, 0, 1)
-        grid.addWidget(btn_left, 1, 0)
-        grid.addWidget(btn_center, 1, 1)
-        grid.addWidget(btn_right, 1, 2)
-        grid.addWidget(btn_backward, 2, 1)
+        pad_grid = QGridLayout()
+        pad_grid.setSpacing(8)
+        pad_grid.addWidget(btn_forward, 0, 1)
+        pad_grid.addWidget(btn_left, 1, 0)
+        pad_grid.addWidget(btn_center, 1, 1)
+        pad_grid.addWidget(btn_right, 1, 2)
+        pad_grid.addWidget(btn_backward, 2, 1)
+        pad_row = QHBoxLayout()
+        pad_row.addStretch(1)
+        pad_row.addLayout(pad_grid)
+        pad_row.addStretch(1)
+        grid.addLayout(pad_row, 0, 0, 3, 3)
         grid.addWidget(btn_stop, 3, 0, 1, 3)
-        grid.addWidget(btn_reset, 4, 0, 1, 3)
-        grid.addWidget(btn_calibrate, 5, 0, 1, 3)
+        actions = QHBoxLayout()
+        actions.addWidget(btn_reset)
+        actions.addWidget(btn_calibrate)
+        grid.addLayout(actions, 4, 0, 1, 3)
         left_layout.addWidget(control_group)
+        left_layout.addStretch(1)
 
         left_content = QWidget()
         left_content.setLayout(left_layout)
@@ -200,29 +234,37 @@ class PicarxMainWindow(QMainWindow):
         left_scroll.setWidgetResizable(True)
         left_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         left_scroll.setWidget(left_content)
-        main_layout.addWidget(left_scroll, 1)
+        main_layout.addWidget(left_scroll, 2)
 
-        # 右カラム: チャット対話 & エージェントログ
-        right_layout = QVBoxLayout()
-        chat_group = QGroupBox("Agentic AI Chat & Autonomous Reasoning")
+        # 右の列: 会話と Agent の考えた過程
+        chat_group = QGroupBox("会話")
+        chat_group.setObjectName("chatGroup")
         chat_vbox = QVBoxLayout(chat_group)
+        chat_vbox.setSpacing(10)
 
         self.chat_history = QTextEdit()
+        self.chat_history.setObjectName("chatHistory")
         self.chat_history.setReadOnly(True)
         # 会話・エージェントログの肥大化で、長時間利用時の再描画が遅くなるのを防ぐ。
         self.chat_history.document().setMaximumBlockCount(4000)
+        self.chat_history.document().setDefaultStyleSheet(
+            f"b {{ color: {theme.ACCENT_HOVER}; }} i {{ color: {theme.MUTED}; }}"
+        )
         self.chat_history.setPlaceholderText(
-            "Agentic AIの推論過程や対話ログがここに表示されます..."
+            "話しかけると、ここに会話と Agent の考えた過程が出ます"
         )
         chat_vbox.addWidget(self.chat_history)
 
         input_layout = QHBoxLayout()
+        input_layout.setSpacing(8)
         self.chat_input = QLineEdit()
-        self.chat_input.setPlaceholderText("指示を入力 (例: 前の障害物までの距離を測って)")
+        self.chat_input.setObjectName("chatInput")
+        self.chat_input.setPlaceholderText("指示を入力（例: 前の障害物までの距離を測って）")
         self.chat_input.returnPressed.connect(self._on_send_chat)
-        input_layout.addWidget(self.chat_input)
+        input_layout.addWidget(self.chat_input, 1)
 
-        btn_send = QPushButton("Send")
+        btn_send = QPushButton("送信")
+        btn_send.setObjectName("primary")
         btn_send.clicked.connect(self._on_send_chat)
         input_layout.addWidget(btn_send)
 
@@ -234,8 +276,7 @@ class PicarxMainWindow(QMainWindow):
         input_layout.addWidget(self.btn_talk)
         chat_vbox.addLayout(input_layout)
 
-        right_layout.addWidget(chat_group)
-        main_layout.addLayout(right_layout, 1)
+        main_layout.addWidget(chat_group, 3)
 
     def _init_timer(self):
         # センサー値の定期取得（2秒間隔でトークン・帯域節約）
@@ -295,11 +336,11 @@ class PicarxMainWindow(QMainWindow):
         if self._emergency_active:
             return
         if dist < 15.0:
-            self.lbl_safety.setText("ALERT: Obstacle Close!")
-            self.lbl_safety.setStyleSheet("color: red; font-weight: bold;")
+            self.lbl_safety.setText("注意: 障害物が近い")
+            theme.set_level(self.lbl_safety, "warn")
         else:
-            self.lbl_safety.setText("SAFE (Limiter Active)")
-            self.lbl_safety.setStyleSheet("color: green; font-weight: bold;")
+            self.lbl_safety.setText("安全（速度の制限が有効）")
+            theme.set_level(self.lbl_safety, "good")
 
     def _on_emergency_stop(self):
         # LLMの処理や共有イベントループの状態に左右されないよう、専用スレッドで送信する
@@ -320,8 +361,8 @@ class PicarxMainWindow(QMainWindow):
 
     def _show_emergency_active(self):
         self._emergency_active = True
-        self.lbl_safety.setText("EMERGENCY STOP (Reset Required)")
-        self.lbl_safety.setStyleSheet("color: red; font-weight: bold;")
+        self.lbl_safety.setText("緊急停止中（解除が必要）")
+        theme.set_level(self.lbl_safety, "bad")
 
     def _on_emergency_reset(self):
         async def task():
@@ -349,8 +390,8 @@ class PicarxMainWindow(QMainWindow):
 
     def _show_emergency_cleared(self):
         self._emergency_active = False
-        self.lbl_safety.setText("SAFE (Limiter Active)")
-        self.lbl_safety.setStyleSheet("color: green; font-weight: bold;")
+        self.lbl_safety.setText("安全（速度の制限が有効）")
+        theme.set_level(self.lbl_safety, "good")
 
     def _on_snapshot_clicked(self):
         if self._camera_request_active:
@@ -365,7 +406,7 @@ class PicarxMainWindow(QMainWindow):
                     raise ValueError("Pi側から有効なJPEG画像が返されませんでした")
                 self._ui(lambda: self.camera_label.setPixmap(QPixmap.fromImage(image)))
             except Exception as e:
-                message = f"Camera Error: {e}"
+                message = f"カメラの画像を取得できません: {e}"
                 self._ui(lambda: self.camera_label.setText(message))
             finally:
                 self._camera_request_active = False
@@ -401,7 +442,7 @@ class PicarxMainWindow(QMainWindow):
         except Exception as error:
             self._append_chat(f"<b>[Voice Error]</b> マイクを使えません: {error}")
             return
-        self.btn_talk.setText("🔴 録音中（離すと送信）")
+        self.btn_talk.setText("● 録音中（離すと送信）")
 
     def _on_talk_released(self):
         if self._recorder is None or not self._recorder.recording:

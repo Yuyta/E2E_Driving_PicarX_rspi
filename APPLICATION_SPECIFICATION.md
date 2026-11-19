@@ -260,15 +260,15 @@ GUI起動後、1秒間隔で `/api/camera/snapshot` を自動呼び出しする�
 
 Rust APIサーバーは `rpicam-vid`（起動できない場合は `libcamera-vid`）で MJPEG を常時配信し、`/api/camera/snapshot` はその最新フレームを返す。カメラは要求がある間と、最後の要求から10秒間だけ動く（§7）。
 
-フレームを取得できない場合、API は HTTP 503 を返し、GUI には `Camera Error` を表示する。
+フレームを取得できない場合、API は HTTP 503 を返し、GUI には `カメラの画像を取得できません` を表示する。
 
 ### 4.3 カメラ表示状態
 
 | 状態 | GUI表示 |
 |---|---|
-| 起動直後 | `Camera Connecting...` |
+| 起動直後 | `カメラに接続しています…` |
 | 取得成功 | JPEG画像 |
-| 取得失敗 | `Camera Error: ...` |
+| 取得失敗 | `カメラの画像を取得できません: ...` |
 
 カメラ取得成功ログをチャット欄には表示しない。
 
@@ -278,8 +278,8 @@ Rust APIサーバーは `rpicam-vid`（起動できない場合は `libcamera-vi
 
 | 距離 | 安全状態 |
 |---:|---|
-| 15cm未満 | `ALERT: Obstacle Close!` |
-| 15cm以上 | `SAFE (Limiter Active)` |
+| 15cm未満 | `注意: 障害物が近い` |
+| 15cm以上 | `安全（速度の制限が有効）` |
 
 APIエラー時は距離表示を `Disconnected` に変更する。
 
