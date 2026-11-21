@@ -79,6 +79,7 @@ class JobManager:
         self._jobs: Dict[str, Job] = {}
         self._procs: Dict[str, subprocess.Popen] = {}
         self._lock = threading.Lock()
+        self._save_lock = threading.Lock()
         self._counter = 0
         self._load_history()
 
@@ -106,10 +107,21 @@ class JobManager:
     def _save(self, job: Job) -> None:
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
         path = self.jobs_dir / f"{job.id}.json"
-        # 書きかけを読まれないよう、別のファイルに書いてから置き換える
-        tmp = path.with_suffix(f".{threading.get_ident()}.tmp")
-        tmp.write_text(json.dumps(job.public(), indent=2, ensure_ascii=False), encoding="utf-8")
-        os.replace(tmp, path)
+        text = json.dumps(job.public(), indent=2, ensure_ascii=False)
+        # 書きかけを読まれないよう、別のファイルに書いてから置き換える。出力を読むスレッドと
+        # 止める操作が同時に書くことがあるので、順番に書く
+        with self._save_lock:
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(text, encoding="utf-8")
+            # Windows では、ほかが読んでいる間は置き換えられない。少し待ってやり直す
+            for _ in range(40):
+                try:
+                    os.replace(tmp, path)
+                    return
+                except PermissionError:
+                    time.sleep(0.025)
+            path.write_text(text, encoding="utf-8")
+            tmp.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------ run
 
