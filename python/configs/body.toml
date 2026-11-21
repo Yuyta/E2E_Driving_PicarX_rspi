@@ -1,0 +1,42 @@
+# 車体の版（ハードウェアの構成と校正）
+#
+# 走行データは、どの車体で集めたかで意味が変わる。装備や校正を変えたら、ここに新しい版を足す。
+# 既存の版は書き換えない（書き換えると、記録した時の中身と違うと来歴に印が付く）。
+#
+# - since: その版を使い始めた日時。ある時刻の版は、その時刻より前で最後の版
+# - 収集の時に、その時の版がセッションの body.json に書かれる。古いセッションは日時から決める
+# - 足す時は Control Center の「車体」から「車体の版を登録」を使うか、次を実行する
+#     uv run python -m src.e2e.registry.body add --id b4 --title "M6 の後" \
+#         --equipment "ジャイロ（I2C）" --set motor_balance=0
+#
+# 校正の値は Pi の ~/.env と /opt/picar-x/picar-x.conf にある実機の値を写す（E2E_SPECIFICATION §4.6）。
+
+[[versions]]
+id = "b1"
+since = "2026-11-09T00:00"
+title = "M1 の再構築後"
+equipment = ["前向きカメラ", "前方の超音波 1 本", "床のグレースケール 3ch"]
+notes = "舵0で左へ寄るので DIR_SERVO_OFFSET で補正（3秒 −0.4°）"
+[versions.calibration]
+dir_servo_offset = 6
+motor_balance = 0
+
+[[versions]]
+id = "b2"
+since = "2026-11-11T00:00"
+title = "左右の後輪の差を補正"
+equipment = ["前向きカメラ", "前方の超音波 1 本", "床のグレースケール 3ch"]
+notes = "MOTOR_BALANCE=10 で直進3秒 −0.8°。2026-11-16 には同じ値で毎秒約 −14° まで左へ寄った"
+[versions.calibration]
+dir_servo_offset = 6
+motor_balance = 10
+
+[[versions]]
+id = "b3"
+since = "2026-11-17T00:00"
+title = "補正を 0 に戻す（M6 まで）"
+equipment = ["前向きカメラ", "前方の超音波 1 本", "床のグレースケール 3ch"]
+notes = "M6（前輪の点検、ジャイロ）まで調整しないと決めた。戻した日時は記録からの推定なので、Pi の ~/.env と合わせて確かめる"
+[versions.calibration]
+dir_servo_offset = 6
+motor_balance = 0

@@ -250,7 +250,13 @@ CPU推論を想定した4層の軽量CNN（推論時間の実測値は未記録�
   - モデルごとに確かめる: ONNX の有無、前処理の値、コードのコミットと未コミットの変更、学習データが学習時のままか（記録したマニフェストのハッシュと今のマニフェストの比較）、学習後のラベルの変更、走行の記録と学習データのハッシュの食い違い。全ファイルのハッシュで確かめ直す `verify_model_data` もある（Control Center の「データを検証」）。
   - 最新 = 作成の時刻（`metadata.json` の `created_at`。ない古いモデルはファイルの時刻）が最も新しい版。有効 = ステージが `approved` で、確認に誤り（error）がない版。
   - Control Center から学習したモデルは、作ったジョブ（コマンド、時刻、結果、`data/jobs/<id>.json`）ともつなぐ。
+  - 車体の版もつなぐ（下の「車体の版」）。違う版のデータを混ぜて学習したモデル、学習データの版と今の版が違うモデル、記録した後に版の中身が書き換えられたものに注意（warn）を付ける。版が1つも登録されていなければ何も言わない。
   - `uv run python -m src.e2e.registry.lineage --summary` で要約を JSON で出す。
+- **車体の版 (`registry/body.py`、`configs/body.toml`)**（2026-11-21）:
+  - 走行データは集めた車体（装備と校正）で意味が変わるので、車体の版を `configs/body.toml` に人が書いて残す。各版は `id`、`since`（使い始めた日時）、`title`、`equipment`、`calibration`（Pi の `~/.env` などの実機の値の写し）、`notes`。ある時刻の版は、その時刻より前で最後の版。既存の版は書き換えず、変えたら新しい版を足す（`uv run python -m src.e2e.registry.body add --id b4 --title … --set motor_balance=0`、一覧は `show`）。
+  - 収集（`gui_collector`、`auto_collector`）の開始時に、その時の版をセッションの `body.json` に書く（版の id、中身のハッシュ、装備と校正の写し）。`body.json` のない古いセッションと、走行（`run.json` の `started_at`）は日時から版を決める。版のファイルが読めなくても収集と学習は止めない。
+  - 学習は `metadata.json` の `body` に、セッションごとの版と各版の中身のハッシュを残す。
+  - 今の版は b3（2026-11-17、`MOTOR_BALANCE` を 0 に戻した）。M6 で装備や校正を変えたら、走行データを集め直す前に新しい版を登録する。
 - **ステージと配置の記録 (`registry/stages.py`)**:
   - 採否は `models/registry.json` に置き、モデルと一緒に git で残す。`candidate`（候補、既定）、`approved`（有効）、`rejected`（却下）、`archived`（廃止）。変えるたびに前後のステージ、時刻、理由を履歴に足す。
   - `src.e2e.deploy.pi` の `push`（使用中にする）、`push --no_activate`（`install`）、`rollback` の結果を `data/deployments.jsonl` に追記する。接続先のホスト名は残さない。push で積み、rollback で1つ戻して、記録からわかる Pi の使用中の版を出す。記録の外で Pi を操作すると合わないので、Pi の最後の走行の版とも並べて見せる。
@@ -461,7 +467,7 @@ PiCarX/
 │   │   ├── evaluation/            # evaluate.py, metrics.py, compare_cv.py, interventions.py
 │   │   ├── mapping/               # occupancy_grid.py, visualizer.py
 │   │   ├── motion/                # estimator.py, checker.py, monitor.py, analyze.py
-│   │   ├── registry/              # compare.py, dataset.py, models.py, lineage.py, stages.py
+│   │   ├── registry/              # compare.py, dataset.py, models.py, lineage.py, stages.py, body.py
 │   │   ├── cycle_profiler.py      # 走行ループの周期の内訳
 │   │   ├── m1_check.py            # M1 の完了条件を実機で計測
 │   │   ├── safety/                # body_status.py, speed_limiter.py, stuck_detector.py,

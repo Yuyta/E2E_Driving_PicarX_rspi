@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Deque, Dict, List, Optional
 
 from src.e2e.intent import INTENT_ANY, INTENT_LEFT, INTENT_RIGHT
+from src.e2e.registry import body as body_versions
 from src.models import DRIVE_SPEED, DriveDirection
 
 LEFT, RIGHT = -1, 1
@@ -389,6 +390,8 @@ def run(
             ensure_ascii=False,
         )
         f.write("\n")
+    # どの車体（装備と校正）で集めたかを残す（configs/body.toml の今の版）
+    body_versions.record_session(session_dir)
     labels = open(labels_path, "a", encoding="utf-8")
 
     def write(record: dict) -> None:

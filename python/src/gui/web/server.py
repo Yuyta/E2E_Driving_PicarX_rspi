@@ -25,6 +25,7 @@ import sys
 import threading
 import time
 import webbrowser
+from dataclasses import asdict
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -33,7 +34,7 @@ from urllib.parse import parse_qs, urlparse
 
 from src.e2e.registry import lineage, stages
 from src.gui.web.jobs import JobManager
-from src.gui.workflows import WORKFLOWS, WORKFLOWS_BY_ID
+from src.gui.workflows import PATH_ARGS, PHASES, WORKFLOWS, WORKFLOWS_BY_ID
 
 PYTHON_DIR = Path(__file__).resolve().parents[3]
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -43,6 +44,9 @@ SESSION_ID = re.compile(r"^[A-Za-z0-9_\-]{1,64}$")
 VERSION_ID = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
 FRAME_DIRS = ("data/raw", "data/processed")
 ROBOT_TIMEOUT_SEC = 1.5
+# フォルダの選択の画面に出さないもの（隠しファイル、ツールの作業用のフォルダ）
+BROWSE_HIDDEN = {"__pycache__", "node_modules", "target", "build", "dist-info"}
+BROWSE_LIMIT = 1000
 
 
 def _robot_client():
@@ -123,7 +127,7 @@ class App:
                 "title": w.title,
                 "description": w.description,
                 "module": w.module,
-                "group": w.group,
+                "phase": w.phase,
                 "moves_car": w.moves_car,
                 "arguments": w.arguments,
                 "examples": [list(e) for e in w.examples],
@@ -132,6 +136,39 @@ class App:
             }
             for w in WORKFLOWS
         ]
+
+    @staticmethod
+    def path_args():
+        return {flag: asdict(arg) for flag, arg in PATH_ARGS.items()}
+
+    def browse(self, relative: str) -> Dict[str, Any]:
+        """引数のフォルダやファイルを選ぶための一覧。プロジェクト（python/）の中だけを見せる"""
+        base = self.base.resolve()
+        target = (base / (relative or ".")).resolve()
+        if target != base and base not in target.parents:
+            raise PermissionError("プロジェクトの外のフォルダは開けません")
+        # まだないパス（これから作る出力先など）は、あるところまで上がって開く
+        while target != base and not target.is_dir():
+            target = target.parent
+        dirs, files = [], []
+        for entry in sorted(target.iterdir(), key=lambda e: e.name.lower()):
+            if entry.name.startswith(".") or entry.name in BROWSE_HIDDEN:
+                continue
+            if entry.is_dir():
+                dirs.append(entry.name)
+            elif entry.is_file():
+                files.append({"name": entry.name, "size": entry.stat().st_size})
+        path = target.relative_to(base).as_posix()
+        return {
+            "path": "" if path == "." else path,
+            "dirs": dirs[:BROWSE_LIMIT],
+            "files": files[:BROWSE_LIMIT],
+            "truncated": len(dirs) > BROWSE_LIMIT or len(files) > BROWSE_LIMIT,
+        }
+
+    @staticmethod
+    def phases():
+        return [{**asdict(phase), "icon": phase.icon} for phase in PHASES]
 
     def start_job(self, body: Dict[str, Any]) -> Dict[str, Any]:
         workflow = WORKFLOWS_BY_ID.get(str(body.get("workflow")))
@@ -311,6 +348,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, app.catalog(fresh="fresh" in query))
             if parts == ["workflows"]:
                 return self._json(200, app.workflows())
+            if parts == ["phases"]:
+                return self._json(200, app.phases())
+            if parts == ["path_args"]:
+                return self._json(200, app.path_args())
+            if parts == ["browse"]:
+                return self._json(200, app.browse((query.get("path") or [""])[0]))
             if parts == ["jobs"]:
                 return self._json(200, [j.public() for j in app.jobs.list()])
             if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "log":

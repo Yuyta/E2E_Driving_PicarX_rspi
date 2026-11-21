@@ -86,3 +86,29 @@ def session_records(session_dirs: Iterable[Path]) -> List[Dict[str, Optional[Any
             }
         )
     return records
+
+
+def body_record(session_dirs: Iterable[Path]) -> Dict[str, Any]:
+    """学習データを集めた車体の版（configs/body.toml）。セッションごとの版と、各版の中身のハッシュ
+
+    車体の版のファイルが読めない時も学習は止めず、理由を残す。
+    """
+    try:
+        from ..registry import body
+    except ImportError:
+        from src.e2e.registry import body
+    try:
+        versions = body.load_versions()
+    except body.BodyError as exc:
+        return {"error": str(exc), "sessions": {}, "versions": {}}
+    by_id = {v["id"]: v for v in versions}
+    sessions: Dict[str, Optional[str]] = {}
+    for session_dir in session_dirs:
+        session_dir = Path(session_dir)
+        resolved = body.resolve(versions, body.read_session_record(session_dir), session_dir.name)
+        sessions[session_dir.name] = resolved["id"]
+    used = sorted({v for v in sessions.values() if v})
+    return {
+        "sessions": sessions,
+        "versions": {v: by_id[v]["fingerprint"] for v in used if v in by_id},
+    }

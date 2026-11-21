@@ -11,11 +11,11 @@ const STAGES = {
 const STAGE_HELP = {
   candidate: "まだ判断していない",
   approved: "走行に使ってよい",
-  rejected: "使わない（性能や来歴に問題）",
+  rejected: "使わない（性能やトレーサビリティに問題）",
   archived: "以前は使っていたが今は使わない",
 };
 const SERIES = ["var(--series-1)", "var(--series-2)", "var(--series-3)"];
-const state = { catalog: null, workflows: null, jobs: [], timers: [], robot: null };
+const state = { catalog: null, workflows: null, phases: [], jobs: [], timers: [], robot: null };
 
 /* ------------------------------------------------------------------ DOM helpers */
 
@@ -37,7 +37,13 @@ function applyProps(el, props, svg) {
   for (const [k, v] of Object.entries(props)) {
     if (v === undefined || v === null || v === false) continue;
     if (k === "class") el.setAttribute("class", v);
-    else if (k === "style" && typeof v === "object") Object.assign(el.style, v);
+    else if (k === "style" && typeof v === "object") {
+      // CSS の変数（--ph など）は setProperty でしか入らない
+      for (const [name, value] of Object.entries(v)) {
+        if (name.startsWith("--")) el.style.setProperty(name, value);
+        else el.style[name] = value;
+      }
+    }
     else if (k.startsWith("on") && typeof v === "function") el.addEventListener(k.slice(2), v);
     else if (k === "text") el.textContent = v;
     else if (!svg && k in el && typeof v !== "string") el[k] = v;
@@ -94,6 +100,121 @@ const HEALTH_TEXT = { ok: "問題なし", warn: "注意", error: "要対応", un
 const healthBadge = (level, text) => h("span", { class: `health ${level}` }, text || HEALTH_TEXT[level]);
 const STATUS_TEXT = { running: "実行中", succeeded: "成功", failed: "失敗", stopped: "停止", unknown: "不明" };
 const statusDot = (st) => h("span", { class: `status-dot ${st}` }, STATUS_TEXT[st] || st);
+const BODY_SOURCE = { recorded: "収集の時に記録した版", date: "セッションの日時から決めた版" };
+function bodyBadge(id, source, changed) {
+  if (!id) return h("span", { class: "muted" }, "—");
+  const title = [BODY_SOURCE[source], changed ? "記録した後に版の中身が書き換えられた" : null].filter(Boolean).join("・");
+  return h("a", { class: `badge body${changed ? " changed" : ""}`, href: "#/body", title: title || "車体の版", onclick: (e) => e.stopPropagation() }, id, source === "date" ? h("span", { class: "est" }, "推定") : null);
+}
+
+/* ------------------------------------------------------------------ MLOps phases */
+
+// フェーズの定義（名前、色、アイコン、画面）はサーバー（src/gui/workflows.py の PHASES）から読む。
+// ランチャーと同じ色と絵を使う。番号は並び順にだけ使い、画面には出さない
+const phaseById = (id) => state.phases.find((p) => p.id === id);
+const loopPhases = () => state.phases.filter((p) => p.number !== null);
+const routePhases = (route) => loopPhases().filter((p) => p.page === route);
+const iconSvg = (markup) => `<svg viewBox="0 0 24 24" aria-hidden="true">${markup}</svg>`;
+function phaseIcon(p, extra) {
+  const el = h("span", { class: `ph-icon ${extra || ""}`, style: { "--ph": p.color }, title: `${p.title}: ${p.summary}` });
+  el.innerHTML = iconSvg(p.icon);
+  return el;
+}
+
+/** フェーズごとに「流れているもの」の量。0 の段階へは粒を流さない */
+function phaseCounts(c) {
+  if (!c) return null;
+  return {
+    prepare: (c.bodies || []).length,
+    collect: c.summary.sessions,
+    curate: c.sessions.filter((x) => x.annotation_hash || x.manifest_hash).length,
+    train: c.models.length,
+    evaluate: c.cv.length + c.models.filter((m) => m.stage !== "candidate").length,
+    // デプロイの記録がなくても、Pi の走行記録にモデルの版があれば、そのモデルは Pi に入っていた
+    deploy: (c.deployments || []).length + (c.summary.deployed.version ? 1 : 0) + (c.summary.last_pi_run?.model_version ? 1 : 0),
+    operate: c.summary.runs,
+  };
+}
+
+let flowSeq = 0;
+/** MLOps の流れの図。段階を線でつなぎ、記録のある区間に粒を流す。実走行からデータ収集へ戻る輪も描く
+ *  nodes: 各段階の下に出す中身（なければ名前だけの小さい図）。current: 強調する段階 */
+function flowDiagram({ counts, current = [], details, compact }) {
+  const ps = loopPhases();
+  const gid = `flow-grad-${++flowSeq}`;
+  const svg = s("svg", { class: "flow-track", "aria-hidden": "true" });
+  const nodes = ps.map((p) => {
+    const d = details?.[p.id];
+    return h("a", { class: `flow-node ${current.includes(p) ? "on" : ""} ${counts && !counts[p.id] ? "idle" : ""}`, href: `#/${p.page}`, style: { "--ph": p.color }, title: p.summary, "aria-current": current.includes(p) ? "step" : null },
+      phaseIcon(p, "orb"),
+      h("span", { class: "flow-name" }, p.title),
+      d ? [h("span", { class: "flow-value" }, d[0], h("small", {}, d[1])), h("span", { class: "flow-foot" }, d[2])] : null);
+  });
+  const row = h("div", { class: "flow-row", style: { gridTemplateColumns: `repeat(${ps.length}, minmax(0, 1fr))` } }, nodes);
+  const box = h("div", { class: `flow ${compact ? "compact" : ""}`, role: "img", "aria-label": `開発の流れ: ${ps.map((p) => p.title).join(" → ")} → ${ps[1]?.title || ""}へ戻る` }, svg, row);
+  // 置いた場所の実際の大きさで描く（縦横の伸び縮みで粒がつぶれないように）
+  const draw = () => {
+    const B = box.getBoundingClientRect();
+    if (!B.width) return;
+    const orbs = nodes.map((n) => n.querySelector(".orb").getBoundingClientRect());
+    const xs = orbs.map((o) => o.left + o.width / 2 - B.left);
+    const y = orbs[0].top + orbs[0].height / 2 - B.top;
+    const W = B.width, H = B.height, r = compact ? 8 : 14;
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    svg.setAttribute("width", W); svg.setAttribute("height", H);
+    const grad = s("linearGradient", { id: gid, gradientUnits: "userSpaceOnUse", x1: xs[0], x2: xs[xs.length - 1], y1: 0, y2: 0 },
+      ps.map((p, i) => s("stop", { offset: i / Math.max(1, ps.length - 1), "stop-color": p.color })));
+    const parts = [s("defs", {}, grad)];
+    const flowing = (i) => !counts || (counts[ps[i].id] > 0 && counts[ps[i + 1].id] > 0);
+    for (let i = 0; i < xs.length - 1; i++) {
+      const d = `M${xs[i]},${y} H${xs[i + 1]}`;
+      parts.push(s("path", { class: "flow-base", d }));
+      if (flowing(i)) parts.push(s("path", { class: "flow-dots", d, stroke: `url(#${gid})` }));
+    }
+    // 実走行 → データ収集 の輪（下を回って、データ収集の手前で本線に合流する）
+    if (xs.length > 2) {
+      const R = W - 4, L = (xs[0] + xs[1]) / 2, yb = H - 3;
+      const d = `M${xs[xs.length - 1]},${y} H${R - r} Q${R},${y} ${R},${y + r} V${yb - r} Q${R},${yb} ${R - r},${yb} H${L + r} Q${L},${yb} ${L},${yb - r} V${y + r} Q${L},${y} ${L + r},${y}`;
+      parts.push(s("path", { class: "flow-base loop", d }));
+      if (!counts || counts.operate > 0) parts.push(s("path", { class: "flow-dots loop", d, stroke: `url(#${gid})` }));
+    }
+    svg.replaceChildren(...parts);
+  };
+  let last = "";
+  new ResizeObserver(() => { const k = `${Math.round(box.clientWidth)}x${Math.round(box.clientHeight)}`; if (k !== last) { last = k; draw(); } }).observe(box);
+  return h("div", { class: "flow-scroll" }, box);
+}
+
+/** サイドバーの「開発の流れ」。フェーズを縦に並べ、線に沿って粒が流れる */
+function buildNavFlow() {
+  const holder = document.getElementById("nav-flow");
+  if (!holder || !state.phases.length) return;
+  const ps = loopPhases();
+  holder.style.setProperty("--flow-grad", `linear-gradient(to bottom, ${ps.map((p) => p.color).join(", ")})`);
+  holder.replaceChildren(...ps.map((p) => h("a", { href: `#/${p.page}`, "data-route": p.page, style: { "--ph": p.color }, title: p.summary },
+    phaseIcon(p), h("span", { class: "nav-text" }, h("span", {}, p.title),
+      // 画面の名前がフェーズの名前と同じ時（デプロイ）は繰り返さない
+      ROUTES[p.page]?.[0] && ROUTES[p.page][0] !== p.title ? h("small", {}, ROUTES[p.page][0]) : null))));
+}
+
+/** 画面の上に置く「今どのフェーズか」の流れの図と、そのフェーズで使うツール */
+function phaseHeader(route) {
+  const mine = routePhases(route);
+  if (!mine.length) return null;
+  const workflows = state.workflows || [];
+  const blocks = mine.map((p) => h("div", { class: "phase-block", style: { "--ph": p.color } },
+    h("div", { class: "phase-title" }, phaseIcon(p, "solid"), h("div", {}, h("b", {}, p.title), h("span", {}, p.summary))),
+    h("div", { class: "phase-tools" }, workflows.filter((w) => w.phase === p.id).map((w) =>
+      h("button", { type: "button", class: `small ${w.moves_car ? "danger-ghost" : "ghost"}`, title: w.description, onclick: () => launch(w.id) },
+        w.title, w.moves_car ? h("span", { class: "tiny-badge" }, "車体が動く") : null)))));
+  return h("section", { class: "phase-head" },
+    flowDiagram({ counts: phaseCounts(state.catalog), current: mine, compact: true }),
+    h("div", { class: "phase-blocks" }, blocks));
+}
+function setPagePhase(route) {
+  const el = document.getElementById("page-phase");
+  el.replaceChildren(...routePhases(route).map((p) => phaseIcon(p, "solid")));
+}
 
 /* ------------------------------------------------------------------ api */
 
@@ -321,42 +442,156 @@ function nextVersion() {
   return `v${String((nums.length ? Math.max(...nums) : 0) + 1).padStart(3, "0")}`;
 }
 
+/* 引数の文字列 ⇔ フォーム。フォルダやファイルの引数（src/gui/workflows.py の PATH_ARGS）は欄と「選ぶ…」にする */
+function tokenize(text) {
+  const out = [];
+  const re = /"((?:[^"\\]|\\.)*)"|'([^']*)'|(\S+)/g;
+  let m;
+  while ((m = re.exec(text))) out.push(m[1] !== undefined ? m[1].replace(/\\(.)/g, "$1") : m[2] ?? m[3]);
+  return out;
+}
+const quoteArg = (s) => (s === "" || /[\s"'\\]/.test(s) ? `"${s.replace(/(["\\])/g, "\\$1")}"` : s);
+function parseArgs(text, specs) {
+  const toks = tokenize(text);
+  const fields = [], rest = [];
+  for (let i = 0; i < toks.length; i++) {
+    const [flag, inline] = toks[i].split(/=(.*)/s);
+    if (specs[flag]) {
+      const value = inline ?? (toks[i + 1] !== undefined && !toks[i + 1].startsWith("--") ? toks[++i] : "");
+      fields.push({ flag, value });
+    } else rest.push(toks[i]);
+  }
+  return { fields, rest: rest.map(quoteArg).join(" ") };
+}
+// 位置で決まる引数（push など）が先に来るよう、ほかの引数を前に置く
+const composeArgs = (rest, fields) => [rest.trim(), ...fields.filter((f) => f.value.trim()).map((f) => `${f.flag} ${quoteArg(f.value.trim())}`)].filter(Boolean).join(" ");
+async function loadPathArgs() {
+  if (!state.pathArgs) state.pathArgs = await api("/path_args").catch(() => ({}));
+  return state.pathArgs;
+}
+
+/** プロジェクト（python/）の中のフォルダやファイルを選ぶ。選んだ相対パスを返す（やめたら null） */
+function pickPath(spec, current) {
+  return new Promise((resolve) => {
+    const isNew = spec.kind === "new";
+    const parts = String(current || "").split("/").filter(Boolean);
+    let dir = spec.kind === "dir" ? parts.join("/") : parts.slice(0, -1).join("/");
+    const name = isNew ? h("input", { type: "text", class: "mono", value: parts[parts.length - 1] || "", spellcheck: false }) : null;
+    const crumbs = h("div", { class: "picker-crumbs" });
+    const list = h("div", { class: "picker-list", role: "listbox" });
+    const here = h("span", { class: "mono small muted" });
+    const join = (...xs) => xs.filter(Boolean).join("/");
+    const fileOk = (f) => !spec.exts?.length || spec.exts.some((x) => f.name.toLowerCase().endsWith(x));
+    let back;
+    const onKey = (e) => { if (e.key === "Escape") { e.stopImmediatePropagation(); finish(null); } };
+    function finish(value) { back.remove(); document.removeEventListener("keydown", onKey, true); resolve(value); }
+    const row = (icon, label, onclick, extra) => h("div", { class: "picker-row", role: "option", tabindex: 0, onclick, onkeydown: (e) => { if (e.key === "Enter") onclick(); } },
+      h("span", { class: "picker-icon" }, icon), h("span", { class: "picker-name" }, label), extra || null);
+    const showHere = () => { here.textContent = isNew ? join(dir, name.value) || "—" : spec.kind === "dir" ? dir || "python（一番上）" : ""; };
+    async function open(path) {
+      list.replaceChildren(h("div", { class: "loading" }, h("span", { class: "spinner" })));
+      let res;
+      try { res = await api(`/browse?path=${encodeURIComponent(path)}`); } catch (err) { list.replaceChildren(h("div", { class: "alert error" }, err.message)); return; }
+      dir = res.path;
+      const segs = dir ? dir.split("/") : [];
+      crumbs.replaceChildren(h("a", { href: "#", onclick: (e) => { e.preventDefault(); open(""); } }, "python"),
+        ...segs.flatMap((sg, i) => [h("span", { class: "muted" }, " / "), h("a", { href: "#", onclick: (e) => { e.preventDefault(); open(segs.slice(0, i + 1).join("/")); } }, sg)]));
+      showHere();
+      const files = spec.kind === "dir" ? [] : res.files.filter(fileOk);
+      list.replaceChildren(
+        dir ? row("↰", "1つ上へ", () => open(segs.slice(0, -1).join("/"))) : "",
+        ...res.dirs.map((d) => row("📁", d, () => open(join(dir, d)),
+          spec.kind === "dir" ? h("button", { type: "button", class: "small ghost", onclick: (e) => { e.stopPropagation(); finish(join(dir, d)); } }, "選ぶ") : null)),
+        ...files.map((f) => row("📄", f.name, () => { if (isNew) { name.value = f.name; showHere(); } else finish(join(dir, f.name)); },
+          h("span", { class: "muted small" }, f.size >= 1048576 ? `${fmt(f.size / 1048576, 1)} MB` : `${fmt(f.size / 1024, 1)} KB`))),
+        !res.dirs.length && !files.length ? h("div", { class: "empty small" }, spec.kind === "file" ? `${spec.exts.join(" / ")} のファイルがありません` : "フォルダがありません") : "",
+        res.truncated ? h("div", { class: "muted small" }, "多いので先頭だけを出しています") : "");
+    }
+    if (name) name.addEventListener("input", showHere);
+    const hint = spec.kind === "dir" ? "フォルダを開いて「このフォルダを選ぶ」か、行の「選ぶ」を押します"
+      : spec.kind === "file" ? `${spec.exts.join(" / ")} のファイルを押して選びます`
+      : "置き場所のフォルダを開き、名前を決めて「ここに作る」を押します（まだないフォルダやファイルは、ツールが作ります）";
+    back = h("div", { class: "modal-back picker-back", onclick: (e) => { if (e.target === back) finish(null); } },
+      h("div", { class: "modal picker", role: "dialog", "aria-modal": "true", "aria-label": `${spec.label}を選ぶ` },
+        h("header", {}, h("h2", {}, `${spec.label}を選ぶ`)),
+        h("div", { class: "body" }, h("div", { class: "muted small" }, hint), crumbs, list,
+          name ? h("label", { class: "field" }, h("span", {}, "名前"), name) : null),
+        h("footer", {}, here, h("span", { style: { flex: 1 } }),
+          h("button", { type: "button", class: "ghost", onclick: () => finish(null) }, "キャンセル"),
+          spec.kind === "dir" ? h("button", { type: "button", onclick: () => finish(dir) }, "このフォルダを選ぶ") : null,
+          isNew ? h("button", { type: "button", onclick: () => { if (!name.value.trim()) return toast("名前を入れてください", "error"); finish(join(dir, name.value.trim())); } }, "ここに作る") : null)));
+    document.body.append(back);
+    document.addEventListener("keydown", onKey, true);
+    open(dir);
+  });
+}
+
 async function launch(workflowId, presetArgs) {
   const workflows = await loadWorkflows();
+  const specs = await loadPathArgs();
   const wf = workflows.find((w) => w.id === workflowId);
   if (!wf) return toast("ツールが見つかりません", "error");
   let initial = presetArgs ?? wf.arguments;
   if (wf.id === "train" && presetArgs === undefined) initial = initial.replace(/models\/v\d+/, `models/${nextVersion()}`);
-  const args = h("input", { type: "text", class: "mono", value: initial, spellcheck: false, style: { width: "100%" } });
+  const models = state.catalog?.models || [];
+  const approved = models.filter((m) => m.usable).map((m) => m.version);
+  // フォームの中身。fields はフォルダやファイルの引数、rest はそれ以外の引数
+  let fields = [];
+  const rest = h("input", { type: "text", class: "mono", spellcheck: false, style: { width: "100%" }, placeholder: "なし" });
+  const formBox = h("div", { class: "stack", style: { gap: "10px" } });
+  const preview = h("code", { class: "cmd-preview" });
+  const warnBox = h("div", { class: "warn-box small", hidden: true }, "このモデルは「有効」になっていません。モデルの画面で採否を判断してからデプロイすることを勧めます。");
+  const current = () => composeArgs(rest.value, fields);
+  const refresh = () => {
+    preview.textContent = `python -m ${wf.module} ${current()}`;
+    const m = /models\/([A-Za-z0-9_.-]+)/.exec(current());
+    warnBox.hidden = !(wf.id === "deploy_push" && m && !approved.includes(m[1]));
+  };
+  rest.addEventListener("input", refresh);
+  const fill = (text) => {
+    const parsed = parseArgs(text, specs);
+    fields = parsed.fields;
+    rest.value = parsed.rest;
+    formBox.replaceChildren(...fields.map((f) => {
+      const spec = specs[f.flag];
+      const input = h("input", { type: "text", class: "mono", value: f.value, spellcheck: false, oninput: (e) => { f.value = e.target.value; refresh(); } });
+      f.input = input;
+      return h("div", { class: "field" },
+        h("span", {}, spec.label, h("code", { class: "flag" }, f.flag)),
+        h("div", { class: "path-row" }, input, h("button", { type: "button", class: "ghost", onclick: async () => {
+          const picked = await pickPath(spec, input.value);
+          if (picked !== null) { input.value = f.value = picked; refresh(); }
+        } }, "選ぶ…")));
+    }), h("label", { class: "field" }, h("span", {}, fields.length ? "ほかの引数" : "実行引数"), rest));
+    refresh();
+  };
+  fill(initial);
   const preset = wf.examples.length
-    ? h("select", { onchange: (e) => { if (e.target.value) args.value = e.target.value; } },
+    ? h("select", { onchange: (e) => { if (e.target.value) fill(e.target.value); } },
       h("option", { value: "" }, "例から選ぶ…"), wf.examples.map(([label, value]) => h("option", { value }, label)))
     : null;
-  const models = state.catalog?.models || [];
+  // モデルのフォルダを含むツールは、版の一覧からも選べる（欄の models/<版> を置き換える）
+  const swapModel = (text, v) => text.replace(/models\/[A-Za-z0-9_.-]+/, `models/${v}`);
   const modelPick = /models\/v\d+/.test(initial) && wf.id !== "train" && models.length
-    ? h("select", { onchange: (e) => { args.value = args.value.replace(/models\/[A-Za-z0-9_.-]+/, `models/${e.target.value}`); } },
-      models.map((m) => h("option", { value: m.version, selected: initial.includes(`models/${m.version}`) }, `${m.version}（${STAGES[m.stage]}）`)))
+    ? h("select", { onchange: (e) => {
+      for (const f of fields) if (/models\/[A-Za-z0-9_.-]+/.test(f.value)) { f.value = swapModel(f.value, e.target.value); f.input.value = f.value; }
+      rest.value = swapModel(rest.value, e.target.value);
+      refresh();
+    } }, models.map((m) => h("option", { value: m.version, selected: initial.includes(`models/${m.version}`) }, `${m.version}（${STAGES[m.stage]}）`)))
     : null;
   const carCheck = wf.moves_car ? h("input", { type: "checkbox" }) : null;
   const confirmCheck = wf.confirm ? h("input", { type: "checkbox" }) : null;
-  const approved = models.filter((m) => m.usable).map((m) => m.version);
-  const deployWarn = () => {
-    const m = /models\/([A-Za-z0-9_.-]+)/.exec(args.value);
-    return wf.id === "deploy_push" && m && !approved.includes(m[1]);
-  };
-  const warnBox = h("div", { class: "warn-box small", hidden: !deployWarn() }, "このモデルは「有効」になっていません。モデルの画面で採否を判断してから配置することを勧めます。");
-  args.addEventListener("input", () => (warnBox.hidden = !deployWarn()));
-  if (modelPick) modelPick.addEventListener("change", () => (warnBox.hidden = !deployWarn()));
   modal({
     title: `${wf.title} を起動`,
     body: [
-      h("div", { class: "ink-2" }, wf.description),
-      h("div", { class: "row", style: { justifyContent: "space-between" } },
-        h("span", { class: "mono muted" }, `python -m ${wf.module}`),
-        h("a", { href: manualHref(wf.id), onclick: () => document.getElementById("modal-root").replaceChildren() }, "使い方と引数の説明 →")),
+      h("div", { class: "row", style: { gap: "8px", flexWrap: "nowrap", alignItems: "flex-start" } },
+        phaseById(wf.phase) ? phaseIcon(phaseById(wf.phase)) : null,
+        h("span", { class: "ink-2" }, phaseById(wf.phase) ? h("b", {}, `${phaseById(wf.phase).title}: `) : null, wf.description,
+          " ", h("a", { href: manualHref(wf.id), onclick: () => document.getElementById("modal-root").replaceChildren() }, "使い方 →"))),
       modelPick ? h("label", { class: "field" }, h("span", {}, "モデル"), modelPick) : null,
       preset ? h("label", { class: "field" }, h("span", {}, "操作の例"), preset) : null,
-      h("label", { class: "field" }, h("span", {}, "実行引数"), args),
+      formBox,
+      h("div", { class: "field" }, h("span", {}, "実行するコマンド"), preview),
       warnBox,
       wf.kind === "window" ? h("div", { class: "muted small" }, "別の画面（ウィンドウ）が開きます。") : null,
       confirmCheck ? h("label", { class: "check warn-box" }, confirmCheck, h("span", {}, wf.confirm)) : null,
@@ -372,7 +607,7 @@ async function launch(workflowId, presetArgs) {
           if (confirmCheck && !confirmCheck.checked) return toast("確認にチェックを入れてください", "error");
           e.target.disabled = true;
           try {
-            const job = await api("/jobs", { method: "POST", body: { workflow: wf.id, args: args.value, confirm_moves_car: !!carCheck?.checked, confirmed: !!confirmCheck?.checked } });
+            const job = await api("/jobs", { method: "POST", body: { workflow: wf.id, args: current(), confirm_moves_car: !!carCheck?.checked, confirmed: !!confirmCheck?.checked } });
             close();
             toast(`${wf.title} を起動しました`);
             location.hash = `#/jobs/${job.id}`;
@@ -400,31 +635,39 @@ function collectAlerts(c) {
   for (const m of c.models) {
     for (const ch of m.checks) if (ch.level !== "ok") alerts.push({ level: ch.level, text: `${m.version}: ${ch.message}`, href: `#/models/${m.version}` });
     if (m.stage === "candidate") alerts.push({ level: "info", text: `${m.version} は採否が未判断です（候補）`, href: `#/models/${m.version}` });
+    if (m.field.body_mismatch) alerts.push({ level: "warn", text: `${m.version}: 学習データと違う車体の版で走った走行が ${m.field.body_mismatch} 件`, href: `#/models/${m.version}?tab=走行・デプロイ` });
     if (m.field.fingerprint_mismatch) alerts.push({ level: "error", text: `${m.version}: 走行の記録と学習データのハッシュが違う走行が ${m.field.fingerprint_mismatch} 件`, href: `#/models/${m.version}` });
   }
   const inc = c.summary.incomplete_sessions || [];
   if (inc.length) alerts.push({ level: "warn", text: `ラベルのないセッション（記録が途中で止まった）が ${inc.length} 件: ${inc.map((x) => x.session_id).join(", ")}`, href: "#/data" });
   if (c.summary.unused_sessions.length) alerts.push({ level: "info", text: `どのモデルの学習にも使っていないセッションが ${c.summary.unused_sessions.length} 件`, href: "#/data" });
   const dep = c.summary.deployed, run = c.summary.last_pi_run;
-  if (dep.version && run && run.model_version !== dep.version) alerts.push({ level: "warn", text: `配置の記録（${dep.version}）と Pi の最後の走行の版（${run.model_version}）が違います。Pi のモデル一覧で確かめてください`, href: "#/tools" });
+  if (c.summary.body_error) alerts.push({ level: "error", text: `車体の版（configs/body.toml）を読めません: ${c.summary.body_error}`, href: "#/body" });
+  else if (!(c.bodies || []).length) alerts.push({ level: "info", text: "車体の版がまだ登録されていません。どの車体で集めたデータかを残すため、車体の画面から登録してください", href: "#/body" });
+  if (dep.version && run && run.model_version !== dep.version) alerts.push({ level: "warn", text: `デプロイの記録（${dep.version}）と Pi の最後の走行の版（${run.model_version}）が違います。Pi のモデル一覧で確かめてください`, href: "#/deploy" });
   if (dep.version && !c.models.find((m) => m.version === dep.version)?.usable) alerts.push({ level: "warn", text: `Pi で使用中の ${dep.version} は「有効」ではありません`, href: `#/models/${dep.version}` });
   return alerts;
 }
 
+/** 開発の流れ（MLOps のフェーズ）ごとの今の状態。押すとそのフェーズの画面へ */
 function pipeline(c) {
-  const steps = [
-    ["収集", `${c.summary.sessions} セッション`, "#/tools"],
-    ["確認・ラベル", `${c.sessions.filter((x) => x.annotation_hash).length} 件のラベル`, "#/data"],
-    ["学習", `${c.models.length} モデル`, "#/models"],
-    ["評価", `${c.cv.filter((x) => x.kind === "cross_validation").length} 件の交差検証`, "#/compare"],
-    ["採否の判断", `有効 ${c.summary.usable_models}`, "#/models"],
-    ["配置", c.summary.deployed.version || "記録なし", "#/tools"],
-    ["走行", `${c.summary.runs} 回`, "#/runs"],
-  ];
-  return h("div", { class: "card" },
-    h("div", { class: "card-head" }, h("h2", {}, "開発の流れ"), h("span", { class: "sub" }, "データ → モデル → 評価 → 配置 → 走行の記録 → 次のデータ")),
-    h("div", { class: "pipeline" },
-      steps.map(([name, value, href], i) => h("a", { href }, h("span", { class: "muted small" }, `${i + 1}. ${name}`), h("b", {}, value)))));
+  const sm = c.summary;
+  const cvCount = c.cv.filter((x) => x.kind === "cross_validation").length;
+  const values = {
+    prepare: [sm.body_current || "未登録", "今の車体", `${(c.bodies || []).length} 版を登録`],
+    collect: [fmtInt(sm.sessions), "セッション", `${fmtInt(sm.frames)} フレーム・${fmt(sm.hours * 60, 1)} 分`],
+    curate: [c.sessions.filter((x) => x.annotation_hash).length, "件のラベル", `マニフェスト ${c.sessions.filter((x) => x.manifest_hash).length} / ${c.sessions.length}`],
+    train: [sm.models, "モデル", sm.latest ? `最新 ${sm.latest}` : "まだない"],
+    evaluate: [cvCount, "件の交差検証", `有効なモデル ${sm.usable_models}`],
+    deploy: sm.deployed.version
+      ? [sm.deployed.version, "Pi で使用中", sm.deployed.at ? `${fmtDate(sm.deployed.at)} にデプロイ` : ""]
+      : [sm.last_pi_run?.model_version || "—", "Pi で使用中", sm.last_pi_run ? "走行記録から" : "デプロイの記録なし"],
+    operate: [sm.runs, "回の走行", `自律 ${fmt(c.runs.reduce((a, r) => a + r.autonomous_s, 0) / 60, 1)} 分`],
+  };
+  if (!state.phases.length) return null;
+  return h("section", { class: "card flow-card" },
+    h("div", { class: "card-head" }, h("h2", {}, "開発の流れ"), h("span", { class: "sub" }, "光の流れている区間に記録があります。実走行の記録は下の輪からデータ収集へ戻ります")),
+    flowDiagram({ counts: phaseCounts(c), details: values }));
 }
 
 async function viewOverview(root) {
@@ -434,22 +677,17 @@ async function viewOverview(root) {
   const facts = h("section", { class: "card" },
     h("div", { class: "card-head" }, h("h2", {}, "モデルの状態"), h("span", { class: "sub" }, "どれが最新か・有効か・Pi で使われているか")),
     h("div", { class: "facts" },
-      fact("Pi で使用中（配置の記録）", sm.deployed.version, sm.deployed.at ? `${fmtDate(sm.deployed.at)} に配置` : "Control Center からの配置の記録なし"),
+      fact("Pi で使用中（デプロイの記録）", sm.deployed.version, sm.deployed.at ? `${fmtDate(sm.deployed.at)} にデプロイ` : "Control Center からのデプロイの記録なし"),
       fact("Pi の最後の走行で使った版", sm.last_pi_run?.model_version, sm.last_pi_run ? `${fmtDate(sm.last_pi_run.started_at)} の走行` : "走行の記録なし"),
       fact("最新のモデル", sm.latest, latest ? `${fmtDate(latest.created_at)} 作成・${STAGES[latest.stage]}` : ""),
-      fact("最新の有効なモデル", sm.latest_approved, sm.latest_approved ? "採用済みで来歴に誤りなし" : "「有効」にしたモデルがまだない")));
+      fact("最新の有効なモデル", sm.latest_approved, sm.latest_approved ? "採用済みでトレーサビリティに誤りなし" : "「有効」にしたモデルがまだない")));
   const alerts = collectAlerts(c);
   const jobs = await api("/jobs");
   root.append(
-    h("p", { class: "lead" }, "走行データからモデルを作り、評価し、Pi へ配置して走らせるまでを一つの画面で管理します。各モデルがどのデータとコードから作られたかを記録からたどれます。"),
+    h("p", { class: "lead" }, "走行データからモデルを作り、評価し、Pi へデプロイして走らせるまでを一つの画面で管理します。各モデルがどのデータとコードから作られたかを記録からたどれます。"),
     h("div", { class: "stack" },
-      facts,
-      h("div", { class: "grid cols-4" },
-        stat("モデル", sm.models, "版", `有効 ${sm.usable_models} 版`),
-        stat("走行データ", fmtInt(sm.frames), "フレーム", `${sm.sessions} セッション・${fmt(sm.hours * 60, 1)} 分`),
-        stat("交差検証", c.cv.filter((x) => x.kind === "cross_validation").length, "件", `比較 ${c.cv.filter((x) => x.kind === "comparison").length} 件`),
-        stat("走行の記録", sm.runs, "回", `自律 ${fmt(c.runs.reduce((a, r) => a + r.autonomous_s, 0) / 60, 1)} 分`)),
       pipeline(c),
+      facts,
       h("div", { class: "grid cols-2" },
         card("確認すること", `${alerts.length} 件`, alerts.length
           ? h("div", { class: "stack", style: { gap: "8px" } }, alerts.slice(0, 12).map((a) => h("a", { class: `alert ${a.level === "info" ? "info" : a.level}`, href: a.href, style: { color: "var(--ink)", textDecoration: "none" } }, healthBadge(a.level === "info" ? "unknown" : a.level, a.level === "info" ? "情報" : null), h("span", {}, a.text))))
@@ -479,9 +717,10 @@ async function viewModels(root, _params, query) {
     holder.replaceChildren(table([
       { key: "version", label: "版", render: (m) => h("span", { class: "row", style: { gap: "6px" } }, h("b", { class: "mono" }, m.version), m.version === c.summary.latest ? h("span", { class: "badge tag" }, "最新") : null, m.deployed ? h("span", { class: "badge outline" }, "Pi で使用中") : null), sort: (m) => m.version },
       { key: "stage", label: "採否", render: (m) => stageBadge(m.stage) },
-      { key: "health", label: "来歴の確認", render: (m) => healthBadge(m.health), sort: (m) => ({ error: 0, warn: 1, ok: 2 })[m.health] },
+      { key: "health", label: "トレーサビリティ", render: (m) => healthBadge(m.health), sort: (m) => ({ error: 0, warn: 1, ok: 2 })[m.health] },
       { key: "created_at", label: "作成", render: (m) => fmtDate(m.created_at, true) },
       { key: "sessions", label: "学習データ", render: (m) => `${m.train_sessions.length + m.val_sessions.length} セッション / ${fmtInt(m.total_samples)}`, sort: (m) => m.total_samples },
+      { key: "body", label: "車体", title: "学習データを集めた車体の版", render: (m) => (m.body_versions?.length ? h("span", { class: "row", style: { gap: "4px" } }, m.body_versions.map((b) => bodyBadge(b, m.body_source === "date" ? "date" : "recorded"))) : "—"), sort: (m) => (m.body_versions || []).join(",") },
       { key: "mae", label: "検証 MAE", num: true, title: "学習時の検証セッションでの舵角の誤差（度）", render: (m) => m.validation.steering_mae_deg !== undefined ? `±${fmt(m.validation.steering_mae_deg, 2)}°` : "—", sort: (m) => m.validation.steering_mae_deg },
       { key: "cv", label: "交差検証", num: true, render: (m) => m.cv.length || "—", sort: (m) => m.cv.length },
       { key: "field", label: "人の介入/10分", num: true, title: "Pi の自律走行での人の介入の回数（10分あたり）", render: (m) => fmt(m.field.human_per_10min, 1), sort: (m) => m.field.human_per_10min },
@@ -494,11 +733,10 @@ async function viewModels(root, _params, query) {
   }));
   draw();
   root.append(
-    h("p", { class: "lead" }, "学習したモデルの一覧です。採否（候補・有効・却下・廃止）は models/registry.json に履歴付きで残ります。「有効」は、採用と判断していて来歴に誤りがないモデルです。"),
+    h("p", { class: "lead" }, "学習したモデルの一覧です。採否（候補・有効・却下・廃止）は models/registry.json に履歴付きで残ります。「有効」は、採用と判断していてトレーサビリティに誤りがないモデルです。"),
     h("section", { class: "card" },
       h("div", { class: "card-head" }, seg, h("span", { class: "spacer" }),
-        h("button", { type: "button", class: "ghost small", onclick: () => (location.hash = "#/compare") }, "比較する"),
-        h("button", { type: "button", onclick: () => launch("train") }, "＋ 新しく学習")),
+        h("button", { type: "button", class: "ghost small", onclick: () => (location.hash = "#/compare") }, "比較する")),
       holder));
 }
 
@@ -518,13 +756,13 @@ async function viewModel(root, [version]) {
         h("button", { type: "button", class: "ghost", onclick: () => stageDialog(m) }, "採否を変える"),
         h("button", { type: "button", class: "ghost", onclick: () => verifyDialog(m) }, "データを検証"),
         h("button", { type: "button", class: "ghost", onclick: () => launch("bundle", `--model_dir models/${m.version} --output dist/models`) }, "バンドル作成"),
-        h("button", { type: "button", onclick: () => launch("deploy_push", `push --model_dir models/${m.version}`) }, "Pi へ配置…"))));
+        h("button", { type: "button", onclick: () => launch("deploy_push", `push --model_dir models/${m.version}`) }, "Pi へデプロイ…"))));
   const tabs = [
     ["概要", () => modelSummary(m, c)],
-    ["来歴", () => modelLineage(m, c)],
+    ["トレーサビリティ", () => modelLineage(m, c)],
     ["学習", () => modelTraining(m)],
     ["評価", () => modelEval(m, c)],
-    ["走行・配置", () => modelField(m, c)],
+    ["走行・デプロイ", () => modelField(m, c)],
     ["環境", () => modelEnv(m)],
   ];
   root.append(h("div", { class: "stack" }, head, tabbed(tabs, new URLSearchParams(location.hash.split("?")[1] || "").get("tab"))));
@@ -551,7 +789,7 @@ function modelSummary(m, c) {
   const v = m.validation;
   const hist = m.history || [];
   return h("div", { class: "grid cols-2" },
-    card("来歴と成果物の確認", "", checksList(m.checks)),
+    card("トレーサビリティと成果物の確認", "", checksList(m.checks)),
     card("要点", "", h("dl", { class: "kv" },
       h("dt", {}, "検証の誤差"), h("dd", {}, v.steering_mae !== undefined ? `MAE ${fmt(v.steering_mae, 4)}（±${fmt(v.steering_mae_deg, 2)}°）` : "—"),
       h("dt", {}, "最良の検証損失"), h("dd", {}, fmt(m.best_val_loss, 4)),
@@ -595,6 +833,8 @@ function modelLineage(m, c) {
         job ? [h("dt", {}, "ジョブ"), h("dd", {}, h("a", { href: `#/jobs/${job.id}` }, job.id), " ", statusDot(job.status))] : null,
         h("dt", {}, "コード"), h("dd", {}, m.code.commit ? h("span", { class: "hash" }, m.code.commit) : "—", m.code.dirty ? h("span", { class: "badge confirm-badge", style: { marginLeft: "6px" } }, "未コミットの変更あり") : null),
         h("dt", {}, "学習データのハッシュ"), h("dd", {}, h("span", { class: "hash", title: "学習に使ったサンプル（画像の中身・舵角・セッション）のハッシュ" }, m.data_fingerprint || "—")),
+        h("dt", {}, "車体の版"), h("dd", {}, m.body_versions?.length ? m.body_versions.map((b) => bodyBadge(b, m.body_source === "date" ? "date" : "recorded")) : "—",
+          h("span", { class: "muted small", style: { marginLeft: "6px" } }, m.body_source === "metadata" ? "学習の時に記録" : "セッションの日時から決めた")),
         h("dt", {}, "ONNX の SHA256"), h("dd", {}, h("span", { class: "hash" }, m.onnx_sha256 || "—")),
         h("dt", {}, "成果物"), h("dd", {}, Object.entries(m.artifacts).map(([k, v]) => h("span", { class: `badge ${v ? "outline" : "stage-rejected"}`, style: { marginRight: "4px" } }, `${v ? "✓" : "×"} ${k}`))))),
       card("パラメーター", "metadata.json の params", h("dl", { class: "kv" }, Object.entries(m.params).flatMap(([k, v]) => [h("dt", { class: "mono" }, k), h("dd", { class: "mono" }, JSON.stringify(v))])))),
@@ -603,12 +843,13 @@ function modelLineage(m, c) {
       { key: "role", label: "用途" },
       { key: "frames", label: "フレーム", num: true, render: (r) => fmtInt(r.cur?.frames), sort: (r) => r.cur?.frames },
       { key: "collector", label: "収集", render: (r) => r.cur?.collector || "—" },
+      { key: "body", label: "車体", render: (r) => bodyBadge(m.body_record?.sessions?.[r.id] || r.cur?.body_version, m.body_record?.sessions?.[r.id] ? "recorded" : r.cur?.body_source, r.cur?.body_changed), sort: (r) => r.cur?.body_version },
       { key: "hash", label: "マニフェスト（学習時）", render: (r) => h("span", { class: "hash" }, short(r.rec.manifest_hash, 12)) },
       { key: "level", label: "今のデータ", render: (r) => healthBadge(r.level, r.text) },
       { key: "ann", label: "ラベル", render: (r) => (m.annotations[r.id] ? h("span", { class: "badge tag" }, short(m.annotations[r.id])) : "—"), nosort: true },
     ], rows)),
     filters.length ? card("学習データの絞り込み", "学習の時に外した・付け直したフレームの数", hbars(filters.map(([k, v]) => ({ name: FILTER_LABEL[k] || k, value: v, text: fmtInt(v) })), { title: "フレーム数" })) : null,
-    h("div", {}, h("a", { href: `#/lineage?focus=${encodeURIComponent(`model:${m.version}`)}` }, "来歴の図でこのモデルを見る →")));
+    h("div", {}, h("a", { href: `#/lineage?focus=${encodeURIComponent(`model:${m.version}`)}` }, "トレーサビリティの図でこのモデルを見る →")));
 }
 
 function modelTraining(m) {
@@ -663,9 +904,9 @@ function modelField(m, c) {
       stat("自律の時間", fmt(m.field.autonomous_min, 1), "分"),
       stat("人の介入", m.field.human, "回", `${fmt(m.field.human_per_10min, 1)} 回/10分`),
       stat("安全の介入", m.field.safety, "回", "障害物・段差・引っかかり")),
-    card("配置の履歴", "data/deployments.jsonl", m.deployments.length
-      ? h("ul", { class: "timeline" }, [...m.deployments].reverse().map((d) => h("li", {}, h("div", {}, `${{ push: "配置して使用中に", install: "配置のみ", rollback: "戻した" }[d.action] || d.action} `, healthBadge(d.ok ? "ok" : "error", d.ok ? "成功" : "失敗")), h("div", { class: "when" }, fmtDate(d.at, true)))))
-      : h("div", { class: "empty" }, "Control Center からの配置の記録はありません")),
+    card("デプロイの履歴", "data/deployments.jsonl", m.deployments.length
+      ? h("ul", { class: "timeline" }, [...m.deployments].reverse().map((d) => h("li", {}, h("div", {}, `${{ push: "デプロイして使用中に", install: "デプロイのみ", rollback: "戻した" }[d.action] || d.action} `, healthBadge(d.ok ? "ok" : "error", d.ok ? "成功" : "失敗")), h("div", { class: "when" }, fmtDate(d.at, true)))))
+      : h("div", { class: "empty" }, "Control Center からのデプロイの記録はありません")),
     card("このモデルの走行", "", runsTable(runs.reverse())));
 }
 
@@ -689,7 +930,7 @@ function stageDialog(m) {
       h("div", {}, "今: ", stageBadge(m.stage)),
       options,
       h("label", { class: "field" }, h("span", {}, "理由（履歴に残ります）"), note),
-      errors.length ? h("div", { class: "warn-box small" }, "来歴の確認に誤りがあります。「有効」にしても、直すまでは有効なモデルとして扱いません: ", errors.map((e) => e.message).join(" / ")) : null,
+      errors.length ? h("div", { class: "warn-box small" }, "トレーサビリティの確認に誤りがあります。「有効」にしても、直すまでは有効なモデルとして扱いません: ", errors.map((e) => e.message).join(" / ")) : null,
     ],
     actions: (close) => [
       h("button", { class: "ghost", type: "button", onclick: close }, "キャンセル"),
@@ -738,13 +979,14 @@ async function viewCompare(root, _p, query) {
     const differs = (k) => new Set(ms.map((m) => JSON.stringify(m.params[k]))).size > 1;
     const rowsDef = [
       ["採否", (m) => stageBadge(m.stage)],
-      ["来歴の確認", (m) => healthBadge(m.health)],
+      ["トレーサビリティ", (m) => healthBadge(m.health)],
       ["作成", (m) => fmtDate(m.created_at, true)],
       ["検証 MAE（度）", (m) => `±${fmt(m.validation.steering_mae_deg, 2)}°`, (m) => m.validation.steering_mae_deg],
       ["最良の検証損失", (m) => fmt(m.best_val_loss, 4), (m) => m.best_val_loss],
       ["学習サンプル", (m) => fmtInt(m.train_samples)],
       ["検証セッション", (m) => m.val_sessions.join(", ") || "—"],
       ["学習データのハッシュ", (m) => h("span", { class: "hash" }, short(m.data_fingerprint))],
+      ["車体の版", (m) => (m.body_versions?.length ? m.body_versions.join(", ") : "—"), null, new Set(ms.map((m) => (m.body_versions || []).join(","))).size > 1],
       ["コード", (m) => h("span", { class: "hash" }, short(m.code.commit, 7) + (m.code.dirty ? "*" : ""))],
       ["人の介入/10分", (m) => fmt(m.field.human_per_10min, 1), (m) => m.field.human_per_10min],
       ...paramKeys.map((k) => [`params.${k}`, (m) => h("span", { class: "mono", style: differs(k) ? { fontWeight: 700, color: "var(--accent-ink)" } : {} }, JSON.stringify(m.params[k] ?? null)), null, differs(k)]),
@@ -800,12 +1042,13 @@ async function viewData(root) {
     h("div", { class: "grid cols-4" },
       stat("セッション", c.sessions.length, "件", inc.length ? `ほかにラベルのないもの ${inc.length} 件` : ""),
       stat("フレーム", fmtInt(total), "", `${fmt(c.summary.hours * 60, 1)} 分`),
-      stat("マニフェストあり", c.sessions.filter((x) => x.manifest_hash).length, `/ ${c.sessions.length}`, "ないものは ツール → マニフェスト で作る"),
+      stat("マニフェストあり", c.sessions.filter((x) => x.manifest_hash).length, `/ ${c.sessions.length}`, "ないものは上の「マニフェスト作成・検証」で作る"),
       h("div", { class: "card stat" }, h("span", { class: "label" }, "全体の舵角の分布"), h("div", { style: { margin: "10px 0 4px" } }, distBar({ left_ratio: avg("left_ratio"), straight_ratio: avg("straight_ratio"), right_ratio: avg("right_ratio") })), distLegend())),
     inc.length ? h("div", { class: "alert warn" }, healthBadge("warn"), h("span", {}, `ラベル（labels.jsonl）のないセッションは学習に使われません: ${inc.map((x) => `${x.session_id}（画像 ${x.images}）`).join("、")}`)) : null,
     card("セッション", "行を押すと画像と詳細", table([
       { key: "session_id", label: "セッション", render: (x) => h("b", { class: "mono" }, x.session_id) },
       { key: "collector", label: "収集", render: (x) => x.collector || "—" },
+      { key: "body_version", label: "車体", title: "このデータを集めた車体の版", render: (x) => bodyBadge(x.body_version, x.body_source, x.body_changed) },
       { key: "frames", label: "フレーム", num: true, render: (x) => fmtInt(x.frames) },
       { key: "duration_sec", label: "時間", num: true, render: (x) => `${fmt(x.duration_sec, 0)} 秒` },
       { key: "dist", label: "舵角の分布（左・直進・右）", nosort: true, render: (x) => distBar(x.distribution) },
@@ -813,11 +1056,7 @@ async function viewData(root) {
       { key: "annotation_hash", label: "ラベル", render: (x) => (x.annotation_hash ? h("span", { class: "badge tag" }, "あり") : "—") },
       { key: "used_by", label: "使ったモデル", render: (x) => (x.used_by.length ? x.used_by.map((v) => h("span", { class: "badge outline", style: { marginRight: "4px" } }, v)) : h("span", { class: "muted" }, "未使用")), sort: (x) => x.used_by.length },
     ], c.sessions, { onRow: (x) => (location.hash = `#/data/${x.session_id}`), sortKey: "session_id", desc: true }),
-    h("div", { style: { marginTop: "10px" } }, distLegend())),
-    h("div", { class: "row" },
-      h("button", { type: "button", class: "ghost", onclick: () => launch("data_viewer") }, "データ確認・ラベルを開く"),
-      h("button", { type: "button", class: "ghost", onclick: () => launch("manifest") }, "マニフェストを検証"),
-      h("button", { type: "button", class: "ghost", onclick: () => launch("session_report") }, "セッションの報告"))));
+    h("div", { style: { marginTop: "10px" } }, distLegend()))));
 }
 
 async function viewSession(root, [sid]) {
@@ -832,6 +1071,7 @@ async function viewSession(root, [sid]) {
       card("概要", "", h("dl", { class: "kv" },
         h("dt", {}, "フォルダ"), h("dd", { class: "mono" }, x.path),
         h("dt", {}, "収集の方法"), h("dd", {}, x.collector || "—"),
+        h("dt", {}, "車体の版"), h("dd", {}, bodyBadge(x.body_version, x.body_source, x.body_changed), x.body_source ? h("span", { class: "muted small", style: { marginLeft: "6px" } }, BODY_SOURCE[x.body_source]) : null),
         h("dt", {}, "フレーム"), h("dd", {}, `${fmtInt(x.frames)}（${fmt(x.duration_sec, 1)} 秒・${fmt(x.fps, 1)} fps）`),
         h("dt", {}, "舵角の分布"), h("dd", {}, distBar(x.distribution), h("div", { class: "small muted", style: { marginTop: "4px" } }, `左 ${pct(x.distribution.left_ratio)}・直進 ${pct(x.distribution.straight_ratio)}・右 ${pct(x.distribution.right_ratio)}`)),
         h("dt", {}, "マニフェスト"), h("dd", {}, x.manifest_hash ? h("span", { class: "hash" }, x.manifest_hash) : healthBadge("warn", "なし"), x.manifest_created_at ? h("div", { class: "small muted" }, `${fmtDate(x.manifest_created_at, true)} 作成`) : null),
@@ -848,10 +1088,13 @@ async function viewSession(root, [sid]) {
 
 const KIND_LABEL = { session: "走行データ", annotation: "手作業のラベル", model: "モデル", cv: "交差検証", field: "Pi での走行" };
 const COLUMN_TITLES = ["走行データ", "手作業のラベル", "モデル", "評価・走行"];
+// 節の種類ごとの色（開発の流れのフェーズと同じ色）
+const KIND_PHASE = { session: "collect", annotation: "curate", model: "train", cv: "evaluate", field: "operate" };
+const kindColor = (kind) => phaseById(KIND_PHASE[kind])?.color || "var(--axis)";
 async function viewLineage(root, _p, query) {
   const c = await loadCatalog();
   const { nodes, edges } = c.graph;
-  if (!nodes.length) { root.append(h("div", { class: "empty" }, "まだ来歴がありません")); return; }
+  if (!nodes.length) { root.append(h("div", { class: "empty" }, "まだたどれる記録がありません")); return; }
   const cols = [0, 1, 2, 3].filter((i) => nodes.some((n) => n.column === i));
   const NW = 200, NH = 42, GAP = 10, CG = 110, TOP = 40;
   const pos = {};
@@ -868,26 +1111,53 @@ async function viewLineage(root, _p, query) {
   });
   const W = 20 + cols.length * (NW + CG) - CG + 20;
   const H = TOP + most * (NH + GAP) + 10;
-  const svg = s("svg", { width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "データとモデルの来歴の図" });
-  cols.forEach((col, ci) => svg.append(s("text", { class: "lin-col-title", x: 20 + ci * (NW + CG), y: 22 }, COLUMN_TITLES[col])));
-  const edgeEls = edges.map((e) => {
+  const svg = s("svg", { width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "データとモデルのトレーサビリティの図" });
+  const COLUMN_KIND = ["session", "annotation", "model", "cv"];
+  cols.forEach((col, ci) => svg.append(
+    s("circle", { cx: 24 + ci * (NW + CG), cy: 18, r: 4, fill: kindColor(COLUMN_KIND[col]) }),
+    s("text", { class: "lin-col-title", x: 34 + ci * (NW + CG), y: 22 }, COLUMN_TITLES[col])));
+  // つながりだけに線を引き、元から先へ光の粒を流す（色は元の種類の色から先の種類の色へ）
+  const kindOf = Object.fromEntries(nodes.map((n) => [n.id, n.kind]));
+  const defs = s("defs");
+  svg.append(defs);
+  const edgeEls = edges.map((e, i) => {
     const a = pos[e.from], b = pos[e.to];
     if (!a || !b) return null;
-    const x1 = a.x + NW, y1 = a.y + NH / 2, x2 = b.x, y2 = b.y + NH / 2, mx = (x1 + x2) / 2;
-    const el = s("path", { class: `lin-edge ${e.kind}`, d: `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}` });
+    const x1 = a.x + NW, y1 = a.y + NH / 2, x2 = b.x, y2 = b.y + NH / 2;
+    // 列を飛ばすつながり（走行データ → モデル）は、間の列を自分の行のまま横切り、最後の隙間で曲がる。
+    // 間の列の節（ほかのセッションのラベル）の後ろを通って、つながっているように見えないようにする
+    const xa = b.x - CG > x1 + 1 ? b.x - CG : x1;
+    // 間の列の、同じ行に節がある時（そのセッションのラベル）は、節のすぐ下の隙間を通る
+    const blocked = xa > x1 && Object.entries(pos).some(([id, q]) => q.x > a.x && q.x < b.x && Math.abs(q.y - a.y) < NH && id !== e.from && id !== e.to);
+    const yr = blocked ? a.y + NH + GAP / 2 : y1;
+    const mx = (xa + x2) / 2;
+    const d = blocked
+      ? `M${x1},${y1} C${x1 + 24},${y1} ${x1 + 24},${yr} ${x1 + 48},${yr} H${xa} C${mx},${yr} ${mx},${y2} ${x2},${y2}`
+      : `M${x1},${y1} H${xa} C${mx},${y1} ${mx},${y2} ${x2},${y2}`;
+    const gid = `lin-grad-${i}`;
+    defs.append(s("linearGradient", { id: gid, gradientUnits: "userSpaceOnUse", x1, x2, y1: 0, y2: 0 },
+      s("stop", { offset: 0, "stop-color": kindColor(kindOf[e.from]) }),
+      s("stop", { offset: 1, "stop-color": kindColor(kindOf[e.to]) })));
+    const el = s("g", { class: `lin-link ${e.kind}` },
+      s("path", { class: `lin-edge ${e.kind}`, d }),
+      s("path", { class: "lin-flow", d, stroke: `url(#${gid})` }));
     el.dataset.from = e.from; el.dataset.to = e.to;
     svg.append(el);
     return el;
   }).filter(Boolean);
+  const linked = new Set(edgeEls.flatMap((el) => [el.dataset.from, el.dataset.to]));
   const STAGE_COLOR = { approved: "var(--good)", rejected: "var(--bad)", candidate: "var(--muted)", archived: "var(--axis)" };
   const nodeEls = {};
   nodes.forEach((n) => {
     const p = pos[n.id];
-    const sub = n.kind === "session" ? (n.missing ? "この PC にない" : `${fmtInt(n.frames)} フレーム`)
+    const lone = !linked.has(n.id);
+    const sub = lone && n.kind === "session" ? `${fmtInt(n.frames)} フレーム・まだ使われていない`
+      : n.kind === "session" ? (n.missing ? "この PC にない" : `${fmtInt(n.frames)} フレーム${n.body ? `・車体 ${n.body}` : ""}`)
       : n.kind === "model" ? `${STAGES[n.stage]}・${HEALTH_TEXT[n.health]}`
       : n.kind === "field" ? `${n.runs} 回・${n.autonomous_min} 分・人の介入 ${n.human}` : KIND_LABEL[n.kind];
-    const g = s("g", { class: `lin-node ${n.kind} ${n.missing ? "missing" : ""}`, transform: `translate(${p.x},${p.y})`, tabindex: 0 },
+    const g = s("g", { class: `lin-node ${n.kind} ${n.missing ? "missing" : ""} ${lone ? "lone" : ""}`, transform: `translate(${p.x},${p.y})`, tabindex: 0, style: `--kind:${kindColor(n.kind)}` },
       s("rect", { width: NW, height: NH, rx: 7 }),
+      n.kind !== "model" ? s("rect", { class: "kind-bar", width: 3, height: NH - 14, x: 4, y: 7, rx: 1.5 }) : null,
       n.kind === "model" ? s("rect", { class: "stripe", width: 4, height: NH - 12, x: 6, y: 6, rx: 2, style: `fill:${STAGE_COLOR[n.stage]};stroke:none` }) : null,
       s("text", { class: "t", x: n.kind === "model" ? 16 : 10, y: 17 }, n.kind === "annotation" ? n.label.replace("ラベル ", "") : n.kind === "field" ? "Pi での走行" : n.label),
       s("text", { class: "k", x: n.kind === "model" ? 16 : 10, y: 32 }, sub));
@@ -923,12 +1193,13 @@ async function viewLineage(root, _p, query) {
     svg.classList.remove("dim");
     Object.values(nodeEls).forEach((el) => el.classList.remove("hi"));
     edgeEls.forEach((el) => el.classList.remove("hi"));
-    panel.replaceChildren(h("div", { class: "muted small" }, "節を押すと、その元になったデータと、そこから作られたもの（モデル・評価・走行）を強調します。"));
+    panel.replaceChildren(h("div", { class: "muted small" }, "線はつながっているところだけに引き、光の粒が元から作られたものへ流れます。節を押すと、その節につながる流れだけを強調します。どこにもつながっていない節は薄く表示します。"));
   }
   clear();
   root.append(h("div", { class: "stack" },
-    h("p", { class: "lead" }, "走行データ → 手作業のラベル → モデル → 交差検証・Pi での走行 のつながりです。記録（metadata.json のセッション、データのハッシュ、run.json の版）だけから作っています。"),
+    h("p", { class: "lead" }, "どのモデルがどのデータから作られ、どう評価され、どこで走ったかをたどれます（走行データ → 手作業のラベル → モデル → 交差検証・Pi での走行）。記録（metadata.json のセッション、データのハッシュ、run.json の版）だけから作っています。"),
     h("div", { class: "legend" },
+      h("span", {}, s("svg", { width: 34, height: 8 }, s("line", { class: "legend-flow", x1: 2, x2: 32, y1: 4, y2: 4 })), "流れの向き（元 → 作られたもの）"),
       h("span", {}, s("svg", { width: 28, height: 8 }, s("line", { x1: 0, x2: 28, y1: 4, y2: 4, stroke: "var(--axis)", "stroke-width": 2 })), "学習に使用"),
       h("span", {}, s("svg", { width: 28, height: 8 }, s("line", { x1: 0, x2: 28, y1: 4, y2: 4, stroke: "var(--axis)", "stroke-width": 2, "stroke-dasharray": "5 4" })), "検証に使用"),
       h("span", {}, s("svg", { width: 28, height: 8 }, s("line", { x1: 0, x2: 28, y1: 4, y2: 4, stroke: "var(--axis)", "stroke-width": 2, "stroke-dasharray": "2 4" })), "同じデータで評価"),
@@ -947,12 +1218,13 @@ function runsTable(runs) {
     { key: "run_id", label: "走行", render: (r) => h("span", { class: "mono" }, r.run_id) },
     { key: "model_version", label: "モデル", render: (r) => (r.model_version ? h("a", { class: "mono", href: `#/models/${r.model_version}` }, r.model_version) : "—") },
     { key: "started_at", label: "開始", render: (r) => fmtDate(r.started_at) },
+    { key: "body_version", label: "車体", render: (r) => bodyBadge(r.body_version, "date") },
     { key: "autonomous_s", label: "自律", num: true, render: (r) => `${fmt(r.autonomous_s / 60, 1)} 分` },
     { key: "human", label: "人の介入", num: true },
     { key: "safety", label: "安全の介入", num: true },
     { key: "rate", label: "人/10分", num: true, render: (r) => (r.autonomous_s > 0 ? fmt((r.human * 600) / r.autonomous_s, 1) : "—"), sort: (r) => (r.autonomous_s > 0 ? r.human / r.autonomous_s : null) },
     { key: "end_reason", label: "終わった理由", render: (r) => r.end_reason || (r.ended ? "—" : "途中") },
-  ], runs, { empty: "走行の記録はありません（ツール → 走行記録の取り込み）" });
+  ], runs, { empty: "走行の記録はありません（実走行の「走行記録の取り込み」で Pi から持ってくる）" });
 }
 
 async function viewRuns(root) {
@@ -963,30 +1235,110 @@ async function viewRuns(root) {
     card("モデル別", "人の介入が少ないほどよい", per.length
       ? hbars(per.map((m) => ({ name: m.version, value: m.field.human_per_10min || 0, text: `${fmt(m.field.human_per_10min, 1)} 回/10分`, extra: [[null, "走行", `${m.field.runs} 回`], [null, "自律", `${fmt(m.field.autonomous_min, 1)} 分`]] })), { title: "人の介入（10分あたり）" })
       : h("div", { class: "empty" }, "走行の記録はありません")),
-    card("走行", `${c.runs.length} 件`, runsTable([...c.runs].reverse())),
-    h("div", { class: "row" },
-      h("button", { type: "button", class: "ghost", onclick: () => launch("deploy_pull_runs") }, "Pi から走行記録を取り込む"),
-      h("button", { type: "button", class: "ghost", onclick: () => launch("interventions") }, "介入率を集計"))));
+    card("走行", `${c.runs.length} 件`, runsTable([...c.runs].reverse()))));
 }
 
 /* ------------------------------------------------------------------ views: tools */
 
-async function viewTools(root) {
+async function viewTools(root, _p, query) {
   const workflows = await loadWorkflows();
   if (!state.catalog) await loadCatalog();
-  const groups = [...new Set(workflows.map((w) => w.group))];
-  root.append(h("p", { class: "lead" }, "既存のツールを別のプロセスで起動します。出力は「ジョブ」に残り、学習のジョブは作ったモデルにつながります。車体が動くツールは安全の確認が必要です。"));
-  for (const g of groups) {
-    root.append(h("div", { class: "tool-group" }, h("h2", {}, g),
-      h("div", { class: "tools" }, workflows.filter((w) => w.group === g).map((w) => h("div", { class: "card tool" },
+  const phases = state.phases.length ? state.phases : [{ id: null, number: null, title: "ツール", summary: "", color: "var(--muted)", page: "tools", icon: "" }];
+  const inPhase = (p) => workflows.filter((w) => (p.id ? w.phase === p.id : true));
+  const used = phases.filter((p) => inPhase(p).length);
+  root.append(
+    h("p", { class: "lead" }, "既存のツールを、使う段階（フェーズ）の順に並べています。どれも別のプロセスで起動し、出力は「ジョブ」に残ります。車体が動くツールは安全の確認が必要です。"),
+    // フェーズへ飛ぶ目次。並びの順が作業の順
+    h("nav", { class: "phase-jump", "aria-label": "フェーズへ移動" }, used.map((p) => h("a", {
+      href: `#/tools?phase=${p.id}`, style: { "--ph": p.color },
+      onclick: (e) => { e.preventDefault(); document.getElementById(`phase-${p.id}`)?.scrollIntoView({ behavior: "smooth", block: "start" }); },
+    }, phaseIcon(p), p.title, h("small", {}, inPhase(p).length)))));
+  for (const p of used) {
+    root.append(h("section", { class: "tool-group", id: `phase-${p.id}`, style: { "--ph": p.color } },
+      h("header", {}, phaseIcon(p, "solid"), h("h2", {}, p.title), h("span", { class: "sub" }, p.summary),
+        p.number !== null ? h("a", { class: "small open-page", href: `#/${p.page}` }, `${ROUTES[p.page]?.[0] || ""}の画面へ →`) : null),
+      h("div", { class: "tools" }, inPhase(p).map((w) => h("div", { class: "card tool" },
         h("div", { class: "title" }, w.title,
           w.moves_car ? h("span", { class: "badge moves" }, "車体が動く") : null,
-          w.confirm ? h("span", { class: "badge confirm-badge" }, "Pi を変更") : null,
+          w.confirm ? h("span", { class: "badge confirm-badge", title: w.confirm }, "変更の確認") : null,
           w.kind === "window" ? h("span", { class: "badge outline" }, "画面") : null),
         h("div", { class: "desc" }, w.description),
         h("div", { class: "module" }, w.module),
         h("div", { class: "actions" }, h("a", { href: manualHref(w.id), class: "small", style: { marginRight: "auto", alignSelf: "center" } }, "使い方"), h("button", { type: "button", class: w.moves_car ? "danger small" : "small", onclick: () => launch(w.id) }, w.moves_car ? "確認して起動…" : "起動…")))))));
   }
+  const target = query?.get("phase");
+  if (target) requestAnimationFrame(() => document.getElementById(`phase-${target}`)?.scrollIntoView({ block: "start" }));
+}
+
+/* ------------------------------------------------------------------ views: body (0 準備) */
+
+async function viewBody(root) {
+  const c = await loadCatalog();
+  const bodies = [...(c.bodies || [])].reverse();
+  const cur = bodies.find((b) => b.current);
+  const err = c.summary.body_error;
+  const warnings = c.models.flatMap((m) => m.checks.filter((ch) => ch.key === "body" && ch.level !== "ok").map((ch) => ({ m, ch })));
+  const calib = (b) => Object.entries(b.calibration || {});
+  root.append(h("div", { class: "stack" },
+    h("p", { class: "lead" }, "車体の版は、走行データを集めた時の装備と校正の記録です。装備や校正を変えたら新しい版を登録します。セッション・モデル・走行は、どの版の車体のものかでつながり、違う車体のデータを混ぜた時や、学習した時と車体が変わった時に印が付きます（configs/body.toml）。"),
+    err ? h("div", { class: "alert error" }, healthBadge("error"), h("span", {}, `configs/body.toml を読めません: ${err}`)) : null,
+    h("div", { class: "grid cols-2" },
+      card("今の車体", cur ? `${fmtDate(cur.since, true)} から使用` : "", cur
+        ? h("div", { class: "stack", style: { gap: "12px" } },
+          h("div", { class: "row" }, h("span", { class: "body-id" }, cur.id), h("b", {}, cur.title)),
+          h("dl", { class: "kv" },
+            h("dt", {}, "装備"), h("dd", {}, cur.equipment.length ? h("div", { class: "row", style: { gap: "4px" } }, cur.equipment.map((x) => h("span", { class: "badge outline" }, x))) : "—"),
+            h("dt", {}, "校正"), h("dd", {}, calib(cur).length ? h("div", { class: "row", style: { gap: "4px" } }, calib(cur).map(([k, v]) => h("span", { class: "hash" }, `${k} = ${v}`))) : "—"),
+            cur.notes ? [h("dt", {}, "メモ"), h("dd", {}, cur.notes)] : null,
+            h("dt", {}, "この版のデータ"), h("dd", {}, `${cur.sessions.length} セッション・${fmtInt(cur.frames)} フレーム・走行 ${cur.runs} 回`)))
+        : h("div", { class: "empty" }, "車体の版がまだありません。上の「車体の版を登録」で登録してください")),
+      card("車体の違いの確認", "モデルのトレーサビリティの確認のうち、車体に関するもの", warnings.length
+        ? h("div", { class: "stack", style: { gap: "8px" } }, warnings.map(({ m, ch }) => h("a", { class: "alert warn", href: `#/models/${m.version}`, style: { color: "var(--ink)", textDecoration: "none" } }, healthBadge("warn"), h("span", {}, h("b", { class: "mono" }, m.version), ` ${ch.message}`))))
+        : h("div", { class: "empty" }, bodies.length ? "車体の違いによる問題はありません" : "車体の版を登録すると確認できます"))),
+    card("車体の版の履歴", `${bodies.length} 版・新しい順`, table([
+      { key: "id", label: "版", render: (b) => h("span", { class: "row", style: { gap: "6px" } }, h("b", { class: "mono" }, b.id), b.current ? h("span", { class: "badge tag" }, "使用中") : null) },
+      { key: "since", label: "使い始め", render: (b) => fmtDate(b.since, true) },
+      { key: "title", label: "内容", render: (b) => h("div", {}, h("div", {}, b.title), b.notes ? h("div", { class: "muted small" }, b.notes) : null), nosort: true },
+      { key: "calibration", label: "校正", nosort: true, render: (b) => h("span", { class: "mono small" }, calib(b).map(([k, v]) => `${k}=${v}`).join("  ") || "—") },
+      { key: "frames", label: "データ", num: true, render: (b) => `${b.sessions.length} セッション / ${fmtInt(b.frames)}`, sort: (b) => b.frames },
+      { key: "models", label: "学習したモデル", nosort: true, render: (b) => (b.models.length ? b.models.map((v) => h("a", { class: "badge outline", href: `#/models/${v}`, style: { marginRight: "4px" } }, v)) : h("span", { class: "muted" }, "—")) },
+      { key: "runs", label: "走行", num: true },
+    ], bodies, { empty: "車体の版がまだありません" }))));
+}
+
+/* ------------------------------------------------------------------ views: deploy (5 デプロイ) */
+
+async function viewDeploy(root) {
+  const c = await loadCatalog();
+  const sm = c.summary;
+  const deps = [...(c.deployments || [])].reverse();
+  const ACTION = { push: "デプロイして使用中に", install: "デプロイのみ", rollback: "戻した" };
+  const alerts = collectAlerts(c).filter((a) => a.href === "#/deploy" || /Pi で使用中/.test(a.text));
+  const models = [...c.models].sort((a, b) => Number(b.usable) - Number(a.usable) || String(b.version).localeCompare(String(a.version)));
+  root.append(h("div", { class: "stack" },
+    h("p", { class: "lead" }, "使うと決めた（有効な）モデルを Pi へ送り、使用中にします。Pi は送られたモデルのハッシュを確かめてから切り替え、問題があれば1つ前の版へ戻せます。"),
+    h("section", { class: "card" }, h("div", { class: "facts" },
+      fact("Pi で使用中（デプロイの記録）", sm.deployed.version, sm.deployed.at ? `${fmtDate(sm.deployed.at)} にデプロイ` : "Control Center からのデプロイの記録なし"),
+      fact("Pi の最後の走行で使った版", sm.last_pi_run?.model_version, sm.last_pi_run ? `${fmtDate(sm.last_pi_run.started_at)} の走行` : "走行の記録なし"),
+      fact("最新の有効なモデル", sm.latest_approved, sm.latest_approved ? "採用済みでトレーサビリティに誤りなし" : "「有効」にしたモデルがまだない"),
+      h("div", { class: "fact" }, h("div", { class: "label" }, "今の車体"), h("div", { class: "value" }, sm.body_current ? h("a", { href: "#/body" }, sm.body_current) : h("span", { class: "muted" }, "—")), h("div", { class: "foot" }, "学習データの車体と同じかを下の表で確かめる")))),
+    // 記録の外（手作業など）でデプロイしたモデルで走っている時は、記録がないことをはっきり出す
+    !deps.length && sm.last_pi_run?.model_version
+      ? h("div", { class: "alert warn" }, healthBadge("warn", "記録なし"),
+        h("span", {}, `デプロイの記録がありません。Pi は ${sm.last_pi_run.model_version} で走っています（${fmtDate(sm.last_pi_run.started_at)} の走行記録から）。Control Center の外でデプロイしたと考えられます。次から上の「Pi へデプロイ」を使うと、いつ・どの版を入れたかが記録に残ります。`))
+      : null,
+    alerts.length ? h("div", { class: "stack", style: { gap: "8px" } }, alerts.map((a) => h("div", { class: `alert ${a.level}` }, healthBadge(a.level), h("span", {}, a.text)))) : null,
+    card("デプロイするモデル", "有効なモデルを上に並べています", table([
+      { key: "version", label: "版", render: (m) => h("span", { class: "row", style: { gap: "6px" } }, h("b", { class: "mono" }, m.version), m.deployed ? h("span", { class: "badge outline" }, "Pi で使用中") : null), sort: (m) => m.version },
+      { key: "stage", label: "採否", render: (m) => stageBadge(m.stage) },
+      { key: "health", label: "トレーサビリティ", render: (m) => healthBadge(m.health), sort: (m) => ({ error: 0, warn: 1, ok: 2 })[m.health] },
+      { key: "body", label: "学習データの車体", render: (m) => (m.body_versions?.length ? h("span", { class: "row", style: { gap: "4px" } }, m.body_versions.map((b) => bodyBadge(b)), sm.body_current && !m.body_versions.includes(sm.body_current) ? h("span", { class: "health warn" }, "今と違う") : null) : "—"), nosort: true },
+      { key: "mae", label: "検証 MAE", num: true, render: (m) => (m.validation.steering_mae_deg !== undefined ? `±${fmt(m.validation.steering_mae_deg, 2)}°` : "—"), sort: (m) => m.validation.steering_mae_deg },
+      { key: "go", label: "", nosort: true, render: (m) => h("button", { type: "button", class: m.usable ? "small" : "small ghost", onclick: (e) => { e.stopPropagation(); launch("deploy_push", `push --model_dir models/${m.version}`); } }, "Pi へデプロイ…") },
+    ], models, { onRow: (m) => (location.hash = `#/models/${m.version}`), empty: "モデルがありません" })),
+    card("デプロイの履歴", "data/deployments.jsonl・新しい順", deps.length
+      ? h("ul", { class: "timeline" }, deps.map((d) => h("li", {}, h("div", {}, h("b", { class: "mono" }, d.version || "—"), ` ${ACTION[d.action] || d.action} `, healthBadge(d.ok ? "ok" : "error", d.ok ? "成功" : "失敗")), h("div", { class: "when" }, fmtDate(d.at, true)))))
+      : h("div", { class: "empty" }, "Control Center からのデプロイの記録はありません"))));
 }
 
 /* ------------------------------------------------------------------ views: jobs */
@@ -1066,8 +1418,10 @@ async function viewManual(root, _p, query) {
   // 同じサーバーの静的なファイル（src/gui/web/static/manual.html）なので、そのまま入れる
   const body = h("div", { class: "manual-body card" });
   body.innerHTML = state.manual;
+  // フェーズの印に、画面と同じアイコンを入れる
+  body.querySelectorAll(".ph-icon[data-phase]").forEach((el) => { const p = phaseById(el.dataset.phase); if (p) el.innerHTML = iconSvg(p.icon); });
   const toc = h("nav", { class: "manual-toc", "aria-label": "目次" });
-  const search = h("input", { type: "search", placeholder: "言葉で探す（例: 引数、配置、fps）", class: "manual-search" });
+  const search = h("input", { type: "search", placeholder: "言葉で探す（例: 引数、デプロイ、fps）", class: "manual-search" });
   toc.append(search);
   const list = h("ol");
   body.querySelectorAll("section[id]").forEach((sec) => {
@@ -1076,7 +1430,8 @@ async function viewManual(root, _p, query) {
     const subs = [...sec.querySelectorAll("h3[id], .tool[id]")];
     if (subs.length) {
       item.append(h("ol", {}, subs.map((el) => {
-        const label = el.matches(".tool") ? el.querySelector("h4").firstChild.textContent.trim() : el.textContent;
+        // フェーズの見出し（「学習 — 説明」）は、目次では名前だけにする
+        const label = el.matches(".tool") ? el.querySelector("h4").firstChild.textContent.trim() : el.textContent.split(" — ")[0].trim();
         return h("li", { class: el.matches(".tool") ? "tool-item" : "" }, h("a", { href: `#/manual?s=${el.id}` }, label));
       })));
     }
@@ -1161,11 +1516,13 @@ document.getElementById("estop").addEventListener("click", async () => {
 
 const ROUTES = {
   overview: ["概要", viewOverview],
+  body: ["車体", viewBody],
+  data: ["データ", viewData, viewSession],
   models: ["モデル", viewModels, viewModel],
   compare: ["比較・評価", viewCompare],
-  data: ["データ", viewData, viewSession],
-  lineage: ["来歴", viewLineage],
+  deploy: ["デプロイ", viewDeploy],
   runs: ["走行記録", viewRuns],
+  lineage: ["トレーサビリティ", viewLineage],
   tools: ["ツール", viewTools],
   jobs: ["ジョブ", viewJobs, viewJob],
   manual: ["操作マニュアル", viewManual],
@@ -1181,15 +1538,24 @@ async function render() {
   const [path, qs] = (location.hash.replace(/^#\/?/, "") || "overview").split("?");
   const [name, ...rest] = path.split("/").map(decodeURIComponent);
   const route = ROUTES[name] || ROUTES.overview;
-  document.querySelectorAll(".sidebar a[data-route]").forEach((a) => a.classList.toggle("active", a.dataset.route === (ROUTES[name] ? name : "overview")));
+  const routeName = ROUTES[name] ? name : "overview";
+  document.querySelectorAll(".sidebar a[data-route]").forEach((a) => a.classList.toggle("active", a.dataset.route === routeName));
   setTitle(route[0]);
+  setPagePhase(routeName);
   document.body.classList.remove("menu-open");
   const view = document.getElementById("view");
   const root = h("div");
   view.replaceChildren(h("div", { class: "loading" }, h("span", { class: "spinner" }), "読み込み中…"));
   try {
-    const fn = rest.length && route[2] ? route[2] : route[1];
+    const detail = rest.length && route[2];
+    const fn = detail ? route[2] : route[1];
     await fn(root, rest, new URLSearchParams(qs || ""));
+    // 一覧の画面には、開発の流れの中の位置と、そのフェーズのツールを上に出す
+    if (!detail) {
+      await loadWorkflows().catch(() => null);
+      const head = phaseHeader(routeName);
+      if (head) root.prepend(head);
+    }
     if (seq === renderSeq) view.replaceChildren(root);
   } catch (err) {
     if (seq === renderSeq) view.replaceChildren(h("div", { class: "alert error" }, healthBadge("error"), h("span", {}, `読み込めません: ${err.message}`)));
@@ -1205,6 +1571,12 @@ document.getElementById("theme-toggle").addEventListener("click", () => {
 });
 try { const t = localStorage.getItem("picarx-theme"); if (t) document.documentElement.dataset.theme = t; } catch { /* なし */ }
 
-render();
-pollRobot();
-pollJobs();
+(async () => {
+  try {
+    state.phases = await api("/phases");
+    buildNavFlow();
+  } catch { /* フェーズを読めなくても画面は出す（サーバーが止まっている時は各画面が理由を出す） */ }
+  render();
+  pollRobot();
+  pollJobs();
+})();

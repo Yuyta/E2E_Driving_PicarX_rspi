@@ -1,16 +1,19 @@
 """Unified desktop launcher for PiCar-X workflows."""
 
 import os
+import shlex
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QProcess
-from PySide6.QtGui import QFont
+from PySide6.QtCore import QByteArray, QProcess, QRectF, Qt
+from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -27,7 +30,16 @@ from PySide6.QtWidgets import (
 )
 
 from src.gui import theme
-from src.gui.workflows import WORKFLOWS, Workflow
+from src.gui.workflows import (
+    PATH_ARGS,
+    PHASES,
+    WORKFLOWS,
+    Phase,
+    Workflow,
+    join_path_args,
+    split_path_args,
+    workflows_in,
+)
 
 PYTHON_DIR = Path(__file__).resolve().parents[2]
 WEB_PORT = 8765
@@ -35,10 +47,88 @@ WEB_PORT = 8765
 __all__ = ["WORKFLOWS", "Workflow", "LauncherWindow"]
 
 
+def phase_pixmap(phase: Phase, size: int) -> QPixmap:
+    """フェーズの色の角丸の四角に、白い線のアイコンを描く（Control Center と同じ絵）"""
+    ratio = 2  # 高い解像度で描いて、拡大された画面でもにじまないようにする
+    pixmap = QPixmap(size * ratio, size * ratio)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor(phase.color))
+    painter.drawRoundedRect(
+        0, 0, size * ratio, size * ratio, size * ratio * 0.3, size * ratio * 0.3
+    )
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="white" '
+        f'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{phase.icon}</svg>'
+    )
+    inset = size * ratio * 0.2
+    QSvgRenderer(QByteArray(svg.encode("utf-8"))).render(
+        painter, QRectF(inset, inset, size * ratio - 2 * inset, size * ratio - 2 * inset)
+    )
+    painter.end()
+    pixmap.setDevicePixelRatio(ratio)
+    return pixmap
+
+
+class PhaseBadge(QLabel):
+    """フェーズのアイコン。色だけに頼らず、絵と名前でも見分けられるようにする"""
+
+    def __init__(self, phase: Phase, size: int = 26):
+        super().__init__()
+        self.setFixedSize(size, size)
+        self.setPixmap(phase_pixmap(phase, size))
+        self.setToolTip(f"{phase.title}: {phase.summary}")
+
+
+class PhaseFlow(QFrame):
+    """車体準備 → データ収集 → … → 実走行 → データ収集へ戻る、の流れ"""
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("phaseFlow")
+        row = QHBoxLayout(self)
+        row.setContentsMargins(12, 8, 12, 8)
+        row.setSpacing(6)
+        loop = [phase for phase in PHASES if phase.number is not None]
+        for i, phase in enumerate(loop):
+            if i:
+                arrow = QLabel("→")
+                arrow.setObjectName("muted")
+                row.addWidget(arrow)
+            row.addWidget(PhaseBadge(phase, 22))
+            name = QLabel(phase.title)
+            name.setObjectName("phaseName")
+            name.setToolTip(phase.summary)
+            row.addWidget(name)
+        back = QLabel("→ データ収集へ戻る")
+        back.setObjectName("muted")
+        row.addWidget(back)
+        row.addStretch(1)
+
+
+class PhaseHeader(QWidget):
+    def __init__(self, phase: Phase):
+        super().__init__()
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 12, 0, 0)
+        row.setSpacing(8)
+        row.addWidget(PhaseBadge(phase))
+        title = QLabel(phase.title)
+        title.setObjectName("sectionTitle")
+        row.addWidget(title)
+        summary = QLabel(phase.summary)
+        summary.setObjectName("muted")
+        row.addWidget(summary, 1)
+
+
 class WorkflowCard(QFrame):
-    def __init__(self, workflow: Workflow, launch):
+    def __init__(self, workflow: Workflow, launch, color: str = theme.BORDER):
         super().__init__()
         self.setObjectName("workflowCard")
+        # 左の色の帯で、どのフェーズのツールかが分かるようにする
+        self.setStyleSheet(f"#workflowCard {{ border-left: 4px solid {color}; }}")
         layout = QHBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(8)
@@ -56,17 +146,22 @@ class WorkflowCard(QFrame):
         text_layout.addWidget(title)
         text_layout.addWidget(description)
         layout.addLayout(text_layout, 1)
-        button.setFixedSize(132, 38)
+        button.setFixedSize(116, 36)
         layout.addWidget(button)
 
 
 class ArgumentsDialog(QDialog):
+    """起動の設定。フォルダやファイルの引数は、既定値の入った欄と「選ぶ…」にする"""
+
     def __init__(self, workflow: Workflow, parent=None):
         super().__init__(parent)
+        self.workflow = workflow
         self.setWindowTitle(f"{workflow.title} の起動設定")
-        self.setMinimumWidth(480)
+        self.setMinimumWidth(560)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("操作の例を選ぶか、下の引数を編集してください。"))
+        intro = QLabel(workflow.description)
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
         self.preset = QComboBox()
         self.preset.addItem("選択してください", None)
         for label, value in workflow.examples:
@@ -74,16 +169,20 @@ class ArgumentsDialog(QDialog):
         if workflow.examples:
             layout.addWidget(QLabel("操作の例"))
             layout.addWidget(self.preset)
-        form = QFormLayout()
-        self.arguments = QLineEdit(workflow.arguments)
-        self.arguments.setClearButtonEnabled(True)
-        form.addRow("実行引数", self.arguments)
-        layout.addLayout(form)
-        example_text = workflow.arguments or "追加の引数はありません。"
-        hint = QLabel(f"既定値・例: {example_text}")
-        hint.setWordWrap(True)
-        hint.setObjectName("muted")
-        layout.addWidget(hint)
+        self.form_box = QWidget()
+        self.form = QFormLayout(self.form_box)
+        self.form.setContentsMargins(0, 6, 0, 0)
+        layout.addWidget(self.form_box)
+        self.preview = QLabel()
+        self.preview.setWordWrap(True)
+        self.preview.setObjectName("muted")
+        self.preview.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.preview)
+        self.fields: list = []
+        self.rest = QLineEdit()
+        self.rest.setPlaceholderText("なし")
+        self.rest.textChanged.connect(self._update_preview)
+        self._fill(workflow.arguments)
         self.preset.currentIndexChanged.connect(self._apply_preset)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("起動")
@@ -92,10 +191,71 @@ class ArgumentsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def _fill(self, text: str):
+        try:
+            tokens = shlex.split(text)
+        except ValueError:
+            tokens = text.split()
+        rest, fields = split_path_args(tokens)
+        while self.form.rowCount():
+            self.form.removeRow(0)  # rest の欄も消えるので作り直す
+        self.rest = QLineEdit(shlex.join(rest))
+        self.rest.setPlaceholderText("なし")
+        self.rest.textChanged.connect(self._update_preview)
+        self.fields = []
+        for flag, value in fields:
+            spec = PATH_ARGS[flag]
+            edit = QLineEdit(value)
+            edit.textChanged.connect(self._update_preview)
+            pick = QPushButton("選ぶ…")
+            pick.clicked.connect(lambda _=False, e=edit, s=spec: self._pick(e, s))
+            row = QHBoxLayout()
+            row.addWidget(edit, 1)
+            row.addWidget(pick)
+            self.form.addRow(f"{spec.label}（{flag}）", row)
+            self.fields.append((flag, edit))
+        self.form.addRow("ほかの引数" if fields else "実行引数", self.rest)
+        self._update_preview()
+
+    def _pick(self, edit: QLineEdit, spec):
+        current = Path(edit.text().strip() or ".")
+        start = PYTHON_DIR / current
+        if spec.kind == "dir":
+            chosen = QFileDialog.getExistingDirectory(self, f"{spec.label}を選ぶ", str(start))
+        elif spec.kind == "file":
+            patterns = " ".join(f"*{ext}" for ext in spec.exts)
+            chosen, _ = QFileDialog.getOpenFileName(
+                self, f"{spec.label}を選ぶ", str(start.parent), f"{spec.label} ({patterns})"
+            )
+        else:
+            # これから作るもの。名前ごと決める（フォルダもファイルも、ツールが作る）
+            chosen, _ = QFileDialog.getSaveFileName(
+                self, f"{spec.label}を決める", str(start), options=QFileDialog.DontConfirmOverwrite
+            )
+        if chosen:
+            path = Path(chosen).resolve()
+            try:
+                edit.setText(path.relative_to(PYTHON_DIR.resolve()).as_posix())
+            except ValueError:
+                edit.setText(path.as_posix())
+
     def _apply_preset(self, index: int):
         value = self.preset.itemData(index)
         if value is not None:
-            self.arguments.setText(value)
+            self._fill(value)
+
+    def argument_list(self) -> list:
+        """起動する引数。ほかの引数の書き方が正しくなければ ValueError"""
+        return join_path_args(
+            shlex.split(self.rest.text()), [(flag, edit.text()) for flag, edit in self.fields]
+        )
+
+    def _update_preview(self, *_):
+        try:
+            args = shlex.join(self.argument_list())
+        except ValueError:
+            args = "（引数の書き方を確認してください）"
+        self.preview.setText(f"実行するコマンド: python -m {self.workflow.module} {args}")
 
 
 class LauncherWindow(QMainWindow):
@@ -117,35 +277,31 @@ class LauncherWindow(QMainWindow):
         header.setObjectName("header")
         web_button = QPushButton("Control Center を開く（ブラウザ）")
         web_button.setObjectName("primary")
-        web_button.setToolTip("モデルとデータの来歴、採否、比較、配置、ジョブの記録を管理する画面")
+        web_button.setToolTip(
+            "モデルとデータのトレーサビリティ、採否、比較、デプロイ、ジョブの記録を管理する画面"
+        )
         web_button.clicked.connect(self._open_web)
         header_row = QHBoxLayout()
         header_row.addWidget(header)
         header_row.addStretch(1)
         header_row.addWidget(web_button)
         layout.addLayout(header_row)
-        subtitle = QLabel("操作、データ、学習、評価をここから始められます")
-        subtitle.setObjectName("muted")
-        layout.addWidget(subtitle)
+        # 開発の流れ（MLOps のフェーズ）を1行で見せる。下の区分も同じ順番と色
+        layout.addWidget(PhaseFlow())
 
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(14)
-        grid.setVerticalSpacing(10)
-        for col in range(3):
-            grid.setColumnStretch(col, 1)
-        groups = list(dict.fromkeys(workflow.group for workflow in WORKFLOWS))
-        row = 0
-        for group in groups:
-            label = QLabel(group)
-            label.setObjectName("sectionTitle")
-            grid.addWidget(label, row, 0, 1, 3)
-            row += 1
-            entries = [workflow for workflow in WORKFLOWS if workflow.group == group]
-            for i, workflow in enumerate(entries):
-                grid.addWidget(WorkflowCard(workflow, self._launch), row + i // 3, i % 3)
-            row += (len(entries) + 2) // 3
+        self.grid = QGridLayout()
+        self.grid.setHorizontalSpacing(14)
+        self.grid.setVerticalSpacing(10)
+        # フェーズの見出しと、そのフェーズのツールのカード。幅に合わせて列の数を変えて並べ直す
+        self.sections = [
+            (PhaseHeader(phase), [WorkflowCard(w, self._launch, phase.color) for w in entries])
+            for phase in PHASES
+            if (entries := workflows_in(phase.id))
+        ]
+        self.columns = 0
+        self._arrange(3)
         content = QWidget()
-        content.setLayout(grid)
+        content.setLayout(self.grid)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
@@ -166,8 +322,10 @@ class LauncherWindow(QMainWindow):
             + f"""
             #header {{ font-size: 26px; font-weight: 700; }}
             #muted {{ color: {theme.MUTED}; }}
-            #sectionTitle {{ font-size: 16px; font-weight: 650; padding-top: 10px;
-                color: {theme.TEXT}; }}
+            #sectionTitle {{ font-size: 16px; font-weight: 650; color: {theme.TEXT}; }}
+            #phaseFlow {{ background: {theme.SURFACE}; border: 1px solid {theme.BORDER};
+                border-radius: 10px; }}
+            #phaseName {{ font-weight: 600; color: {theme.TEXT}; }}
             #workflowCard {{ background: {theme.SURFACE}; border: 1px solid {theme.BORDER};
                 border-radius: 10px; }}
             #workflowCard:hover {{ border-color: {theme.BORDER_STRONG}; }}
@@ -176,16 +334,37 @@ class LauncherWindow(QMainWindow):
             #movesBadge {{ color: {theme.DANGER}; font-size: 12px; font-weight: 600; }}
             QScrollArea, QScrollArea QWidget {{ background: transparent; }}
             QPushButton#launchButton {{ background-color: {theme.ACCENT}; color: #ffffff;
-                border: 0; border-radius: 7px; font-weight: 600; min-width: 132px;
-                max-width: 132px; min-height: 38px; max-height: 38px; }}
+                border: 0; border-radius: 7px; font-weight: 600; padding: 0 8px;
+                min-width: 100px; max-width: 100px; min-height: 36px; max-height: 36px; }}
             QPushButton#launchButton:hover {{ background-color: {theme.ACCENT_HOVER}; }}
             QPushButton#carButton {{ background-color: {theme.DANGER}; color: #ffffff;
-                border: 0; border-radius: 7px; font-weight: 600; min-width: 132px;
-                max-width: 132px; min-height: 38px; max-height: 38px; }}
+                border: 0; border-radius: 7px; font-weight: 600; padding: 0 8px;
+                min-width: 100px; max-width: 100px; min-height: 36px; max-height: 36px; }}
             QPushButton#carButton:hover {{ background-color: {theme.DANGER_HOVER}; }}
             QTextEdit {{ font-family: "Consolas", "{theme.FONT_FAMILY}"; font-size: 9pt; }}
             """
         )
+
+    def _arrange(self, columns: int):
+        if columns == self.columns:
+            return
+        self.columns = columns
+        while self.grid.count():  # 置き場所だけを外す（カードはそのまま使う）
+            self.grid.takeAt(0)
+        for col in range(3):
+            self.grid.setColumnStretch(col, 1 if col < columns else 0)
+        row = 0
+        for header, cards in self.sections:
+            self.grid.addWidget(header, row, 0, 1, columns)
+            row += 1
+            for i, card in enumerate(cards):
+                self.grid.addWidget(card, row + i // columns, i % columns)
+            row += (len(cards) + columns - 1) // columns
+
+    def resizeEvent(self, event):
+        # 狭い時は2列にして、カードが右へはみ出さないようにする
+        self._arrange(3 if event.size().width() >= 1000 else 2)
+        super().resizeEvent(event)
 
     def _launch(self, workflow: Workflow):
         if workflow.confirm and not workflow.moves_car:
@@ -214,9 +393,7 @@ class LauncherWindow(QMainWindow):
         if dialog.exec() != QDialog.Accepted:
             return
         try:
-            import shlex
-
-            parsed_arguments = shlex.split(dialog.arguments.text())
+            parsed_arguments = dialog.argument_list()
         except ValueError as error:
             QMessageBox.warning(self, "引数を確認してください", str(error))
             return
