@@ -130,7 +130,8 @@ function phaseCounts(c) {
     curate: c.sessions.filter((x) => x.annotation_hash || x.manifest_hash).length,
     train: c.models.length,
     evaluate: c.cv.length + c.models.filter((m) => m.stage !== "candidate").length,
-    deploy: (c.deployments || []).length + (c.summary.deployed.version ? 1 : 0),
+    // デプロイの記録がなくても、Pi の走行記録にモデルの版があれば、そのモデルは Pi に入っていた
+    deploy: (c.deployments || []).length + (c.summary.deployed.version ? 1 : 0) + (c.summary.last_pi_run?.model_version ? 1 : 0),
     operate: c.summary.runs,
   };
 }
@@ -658,7 +659,9 @@ function pipeline(c) {
     curate: [c.sessions.filter((x) => x.annotation_hash).length, "件のラベル", `マニフェスト ${c.sessions.filter((x) => x.manifest_hash).length} / ${c.sessions.length}`],
     train: [sm.models, "モデル", sm.latest ? `最新 ${sm.latest}` : "まだない"],
     evaluate: [cvCount, "件の交差検証", `有効なモデル ${sm.usable_models}`],
-    deploy: [sm.deployed.version || "—", "Pi で使用中", sm.deployed.at ? `${fmtDate(sm.deployed.at)} にデプロイ` : "デプロイの記録なし"],
+    deploy: sm.deployed.version
+      ? [sm.deployed.version, "Pi で使用中", sm.deployed.at ? `${fmtDate(sm.deployed.at)} にデプロイ` : ""]
+      : [sm.last_pi_run?.model_version || "—", "Pi で使用中", sm.last_pi_run ? "走行記録から" : "デプロイの記録なし"],
     operate: [sm.runs, "回の走行", `自律 ${fmt(c.runs.reduce((a, r) => a + r.autonomous_s, 0) / 60, 1)} 分`],
   };
   if (!state.phases.length) return null;
@@ -1288,6 +1291,11 @@ async function viewDeploy(root) {
       fact("Pi の最後の走行で使った版", sm.last_pi_run?.model_version, sm.last_pi_run ? `${fmtDate(sm.last_pi_run.started_at)} の走行` : "走行の記録なし"),
       fact("最新の有効なモデル", sm.latest_approved, sm.latest_approved ? "採用済みで来歴に誤りなし" : "「有効」にしたモデルがまだない"),
       h("div", { class: "fact" }, h("div", { class: "label" }, "今の車体"), h("div", { class: "value" }, sm.body_current ? h("a", { href: "#/body" }, sm.body_current) : h("span", { class: "muted" }, "—")), h("div", { class: "foot" }, "学習データの車体と同じかを下の表で確かめる")))),
+    // 記録の外（手作業など）でデプロイしたモデルで走っている時は、記録がないことをはっきり出す
+    !deps.length && sm.last_pi_run?.model_version
+      ? h("div", { class: "alert warn" }, healthBadge("warn", "記録なし"),
+        h("span", {}, `デプロイの記録がありません。Pi は ${sm.last_pi_run.model_version} で走っています（${fmtDate(sm.last_pi_run.started_at)} の走行記録から）。Control Center の外でデプロイしたと考えられます。次から上の「Pi へデプロイ」を使うと、いつ・どの版を入れたかが記録に残ります。`))
+      : null,
     alerts.length ? h("div", { class: "stack", style: { gap: "8px" } }, alerts.map((a) => h("div", { class: `alert ${a.level}` }, healthBadge(a.level), h("span", {}, a.text)))) : null,
     card("デプロイするモデル", "有効なモデルを上に並べています", table([
       { key: "version", label: "版", render: (m) => h("span", { class: "row", style: { gap: "6px" } }, h("b", { class: "mono" }, m.version), m.deployed ? h("span", { class: "badge outline" }, "Pi で使用中") : null), sort: (m) => m.version },
