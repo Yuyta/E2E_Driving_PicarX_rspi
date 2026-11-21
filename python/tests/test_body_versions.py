@@ -298,3 +298,7 @@ def test_manual_uses_the_same_phase_colors():
     )
     for phase in PHASES:
         assert f"--ph: {phase.color}" in manual, phase.id
+
+
+def test_every_phase_has_an_icon_for_both_guis():
+    assert all(p.icon.startswith("<") for p in PHASES)

@@ -4,8 +4,9 @@ import os
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QProcess, Qt
-from PySide6.QtGui import QFont
+from PySide6.QtCore import QByteArray, QProcess, QRectF, Qt
+from PySide6.QtGui import QColor, QFont, QPainter, QPixmap
+from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -35,25 +36,43 @@ WEB_PORT = 8765
 __all__ = ["WORKFLOWS", "Workflow", "LauncherWindow"]
 
 
-def phase_mark(phase: Phase) -> str:
-    return "共" if phase.number is None else str(phase.number)
+def phase_pixmap(phase: Phase, size: int) -> QPixmap:
+    """フェーズの色の角丸の四角に、白い線のアイコンを描く（Control Center と同じ絵）"""
+    ratio = 2  # 高い解像度で描いて、拡大された画面でもにじまないようにする
+    pixmap = QPixmap(size * ratio, size * ratio)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setPen(Qt.NoPen)
+    painter.setBrush(QColor(phase.color))
+    painter.drawRoundedRect(
+        0, 0, size * ratio, size * ratio, size * ratio * 0.3, size * ratio * 0.3
+    )
+    svg = (
+        '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="white" '
+        f'stroke-width="2" stroke-linecap="round" stroke-linejoin="round">{phase.icon}</svg>'
+    )
+    inset = size * ratio * 0.2
+    QSvgRenderer(QByteArray(svg.encode("utf-8"))).render(
+        painter, QRectF(inset, inset, size * ratio - 2 * inset, size * ratio - 2 * inset)
+    )
+    painter.end()
+    pixmap.setDevicePixelRatio(ratio)
+    return pixmap
 
 
 class PhaseBadge(QLabel):
-    """フェーズの番号の丸。色だけに頼らず、番号でも見分けられるようにする"""
+    """フェーズのアイコン。色だけに頼らず、絵と名前でも見分けられるようにする"""
 
-    def __init__(self, phase: Phase, size: int = 24):
-        super().__init__(phase_mark(phase))
+    def __init__(self, phase: Phase, size: int = 26):
+        super().__init__()
         self.setFixedSize(size, size)
-        self.setAlignment(Qt.AlignCenter)
-        self.setStyleSheet(
-            f"background: {phase.color}; color: white; border-radius: {size // 2}px;"
-            f"font-weight: 700; font-size: {9 if size < 24 else 10}pt;"
-        )
+        self.setPixmap(phase_pixmap(phase, size))
+        self.setToolTip(f"{phase.title}: {phase.summary}")
 
 
 class PhaseFlow(QFrame):
-    """0 準備 → 1 収集 → … → 6 運用 → 1 へ戻る、の流れ"""
+    """準備 → 収集 → … → 運用 → 収集へ戻る、の流れ"""
 
     def __init__(self):
         super().__init__()
@@ -67,12 +86,12 @@ class PhaseFlow(QFrame):
                 arrow = QLabel("→")
                 arrow.setObjectName("muted")
                 row.addWidget(arrow)
-            row.addWidget(PhaseBadge(phase, 20))
+            row.addWidget(PhaseBadge(phase, 22))
             name = QLabel(phase.title)
             name.setObjectName("phaseName")
             name.setToolTip(phase.summary)
             row.addWidget(name)
-        back = QLabel("→ 1 収集へ戻る")
+        back = QLabel("→ 収集へ戻る")
         back.setObjectName("muted")
         row.addWidget(back)
         row.addStretch(1)

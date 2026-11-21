@@ -136,7 +136,7 @@ class App:
 
     @staticmethod
     def phases():
-        return [asdict(phase) for phase in PHASES]
+        return [{**asdict(phase), "icon": phase.icon} for phase in PHASES]
 
     def start_job(self, body: Dict[str, Any]) -> Dict[str, Any]:
         workflow = WORKFLOWS_BY_ID.get(str(body.get("workflow")))

@@ -57,18 +57,18 @@
 
 <section id="flow">
   <h2>いつもの開発の流れ（MLOps のフェーズ）</h2>
-  <p>開発は 0〜6 の段階（フェーズ）を順に進み、6 の運用で集めた記録から 1 の収集へ戻る輪になっています。<em>画面とツールには、どのフェーズで使うかを番号と色で付けています</em>。サイドバーもこの順に並び、各画面の上の帯で今どのフェーズかと、そのフェーズで使うツールが分かります。</p>
+  <p>開発は準備から運用までの段階（フェーズ）を順に進み、運用で集めた記録から収集へ戻る輪になっています。<em>画面とツールには、どのフェーズで使うかをアイコンと色で付けています</em>。サイドバーはこの順に縦に並んだ流れになっていて、各画面の上の流れの図で今どのフェーズかと、そのフェーズで使うツールが分かります。図の線の上を流れる光は、記録がある区間を表します（記録がまだない段階の手前では止まります）。</p>
   <table class="phase-table">
     <thead><tr><th>フェーズ</th><th>やること</th><th>画面</th><th>主なツール</th></tr></thead>
     <tbody>
-      <tr><td><span class="ph-chip" style="--ph: #6f7a8c">0</span> 準備</td><td>車体の安全機能と動きを確かめる。装備や校正を変えたら車体の版を登録する</td><td><a href="#/manual?s=cc-body">車体</a></td><td><a href="#/manual?s=tool-m1_check">安全チェック</a>、<a href="#/manual?s=tool-body_add">車体の版を登録</a></td></tr>
-      <tr><td><span class="ph-chip" style="--ph: #2a78d6">1</span> 収集</td><td>走らせて走行データを記録する。1回 150 秒ほどで、セッションが <code>data/raw/&lt;日時&gt;</code> にできる</td><td><a href="#/manual?s=cc-data">データ</a></td><td><a href="#/manual?s=gui-collector">走行データ収集</a>、<a href="#/manual?s=tool-auto_collector">自動データ収集</a></td></tr>
-      <tr><td><span class="ph-chip" style="--ph: #13899a">2</span> 整備</td><td>記録の質を確かめ、おかしいフレームを除外し、マニフェストで封をする</td><td><a href="#/manual?s=cc-data">データ</a></td><td><a href="#/manual?s=tool-session_report">セッションの報告</a>、<a href="#/manual?s=gui-viewer">データ確認・ラベル</a>、<a href="#/manual?s=tool-manifest">マニフェスト</a></td></tr>
-      <tr><td><span class="ph-chip" style="--ph: #7b5fd6">3</span> 学習</td><td>モデルを作る。出力先は次の版（<code>models/v007</code> など）が自動で入る</td><td><a href="#/manual?s=cc-models">モデル</a></td><td><a href="#/manual?s=tool-train">モデル学習</a></td></tr>
-      <tr><td><span class="ph-chip" style="--ph: #c46f1a">4</span> 評価</td><td>交差検証で今の設定と比べ、モデル詳細の「採否を変える」で <span class="badge stage-approved">有効</span> か <span class="badge stage-rejected">却下</span> にする（理由も書く）</td><td><a href="#/manual?s=cc-compare">比較・評価</a></td><td><a href="#/manual?s=tool-cross_validate">交差検証</a>、<a href="#/manual?s=tool-compare_cv">交差検証の比較</a></td></tr>
-      <tr><td><span class="ph-chip" style="--ph: #2f9e5b">5</span> 配置</td><td>有効なモデルを Pi へ送り、使用中にする。走りが悪ければ戻す</td><td><a href="#/manual?s=cc-deploy">配置</a></td><td><a href="#/manual?s=tool-deploy_push">Pi へ配置</a>、<a href="#/manual?s=tool-deploy_rollback">Pi のモデルを戻す</a></td></tr>
-      <tr><td><span class="ph-chip" style="--ph: #c8467f">6</span> 運用</td><td>自律走行させ、走行の記録を取り込んで人の介入の回数を比べる。介入が多い場面のデータを集めに 1 へ戻る</td><td><a href="#/manual?s=cc-runs">走行記録</a></td><td><a href="#/manual?s=tool-pi_autopilot">Pi 自律走行</a>、<a href="#/manual?s=tool-deploy_pull_runs">走行記録の取り込み</a></td></tr>
-      <tr><td><span class="ph-chip" style="--ph: #898781">共</span> 横断</td><td>どのフェーズでも使う</td><td><a href="#/manual?s=cc-lineage">来歴</a>、<a href="#/manual?s=cc-tools">ツール・ジョブ</a></td><td><a href="#/manual?s=gui-app">会話・手動操作</a></td></tr>
+      <tr><td><span class="ph-icon" data-phase="prepare" style="--ph: #6f7a8c"></span> 準備</td><td>車体の安全機能と動きを確かめる。装備や校正を変えたら車体の版を登録する</td><td><a href="#/manual?s=cc-body">車体</a></td><td><a href="#/manual?s=tool-m1_check">安全チェック</a>、<a href="#/manual?s=tool-body_add">車体の版を登録</a></td></tr>
+      <tr><td><span class="ph-icon" data-phase="collect" style="--ph: #2a78d6"></span> 収集</td><td>走らせて走行データを記録する。1回 150 秒ほどで、セッションが <code>data/raw/&lt;日時&gt;</code> にできる</td><td><a href="#/manual?s=cc-data">データ</a></td><td><a href="#/manual?s=gui-collector">走行データ収集</a>、<a href="#/manual?s=tool-auto_collector">自動データ収集</a></td></tr>
+      <tr><td><span class="ph-icon" data-phase="curate" style="--ph: #13899a"></span> 整備</td><td>記録の質を確かめ、おかしいフレームを除外し、マニフェストで封をする</td><td><a href="#/manual?s=cc-data">データ</a></td><td><a href="#/manual?s=tool-session_report">セッションの報告</a>、<a href="#/manual?s=gui-viewer">データ確認・ラベル</a>、<a href="#/manual?s=tool-manifest">マニフェスト</a></td></tr>
+      <tr><td><span class="ph-icon" data-phase="train" style="--ph: #7b5fd6"></span> 学習</td><td>モデルを作る。出力先は次の版（<code>models/v007</code> など）が自動で入る</td><td><a href="#/manual?s=cc-models">モデル</a></td><td><a href="#/manual?s=tool-train">モデル学習</a></td></tr>
+      <tr><td><span class="ph-icon" data-phase="evaluate" style="--ph: #c46f1a"></span> 評価</td><td>交差検証で今の設定と比べ、モデル詳細の「採否を変える」で <span class="badge stage-approved">有効</span> か <span class="badge stage-rejected">却下</span> にする（理由も書く）</td><td><a href="#/manual?s=cc-compare">比較・評価</a></td><td><a href="#/manual?s=tool-cross_validate">交差検証</a>、<a href="#/manual?s=tool-compare_cv">交差検証の比較</a></td></tr>
+      <tr><td><span class="ph-icon" data-phase="deploy" style="--ph: #2f9e5b"></span> 配置</td><td>有効なモデルを Pi へ送り、使用中にする。走りが悪ければ戻す</td><td><a href="#/manual?s=cc-deploy">配置</a></td><td><a href="#/manual?s=tool-deploy_push">Pi へ配置</a>、<a href="#/manual?s=tool-deploy_rollback">Pi のモデルを戻す</a></td></tr>
+      <tr><td><span class="ph-icon" data-phase="operate" style="--ph: #c8467f"></span> 運用</td><td>自律走行させ、走行の記録を取り込んで人の介入の回数を比べる。介入が多い場面のデータを集めに 1 へ戻る</td><td><a href="#/manual?s=cc-runs">走行記録</a></td><td><a href="#/manual?s=tool-pi_autopilot">Pi 自律走行</a>、<a href="#/manual?s=tool-deploy_pull_runs">走行記録の取り込み</a></td></tr>
+      <tr><td><span class="ph-icon" data-phase="common" style="--ph: #898781"></span> 横断</td><td>どのフェーズでも使う</td><td><a href="#/manual?s=cc-lineage">来歴</a>、<a href="#/manual?s=cc-tools">ツール・ジョブ</a></td><td><a href="#/manual?s=gui-app">会話・手動操作</a></td></tr>
     </tbody>
   </table>
 </section>
@@ -76,10 +76,10 @@
 <section id="cc">
   <h2>Control Center の画面</h2>
 
-  <p>サイドバーは、上から「概要」「開発の流れ（フェーズ順の画面）」「横断」の順です。フェーズの画面の上には、0〜6 のどこにいるかの帯と、そのフェーズで使うツールのボタンが出ます。帯の番号を押すと、そのフェーズの画面へ移ります。</p>
+  <p>サイドバーは、上から「概要」「開発の流れ（フェーズ順の画面）」「横断」の順です。フェーズの画面の上には、流れの図（今のフェーズが色付きで光ります）と、そのフェーズで使うツールのボタンが出ます。図のアイコンを押すと、そのフェーズの画面へ移ります。</p>
 
   <h3 id="cc-overview">概要</h3>
-  <p>全体の状態を1枚で見ます。一番上の「開発の流れ」に、フェーズごとの今の状態（今の車体、セッション数、モデル数、Pi で使用中の版、走行の回数など）が並び、押すとその画面へ移ります。次に「モデルの状態」の4つを確かめます。</p>
+  <p>全体の状態を1枚で見ます。一番上の「開発の流れ」の図に、フェーズごとの今の状態（今の車体、セッション数、モデル数、Pi で使用中の版、走行の回数など）が並び、押すとその画面へ移ります。次に「モデルの状態」の4つを確かめます。</p>
   <table>
     <thead><tr><th>項目</th><th>意味</th></tr></thead>
     <tbody>
@@ -91,7 +91,7 @@
   </table>
   <p>「確認すること」には、来歴の誤り、採否を決めていないモデル、ラベルのないセッションなどが出ます。押すとその画面へ移ります。</p>
 
-  <h3 id="cc-body"><span class="ph-chip" style="--ph: #6f7a8c">0</span> 車体</h3>
+  <h3 id="cc-body"><span class="ph-icon" data-phase="prepare" style="--ph: #6f7a8c"></span> 車体</h3>
   <p>車体の版（走行データを集めた時の装備と校正）を見ます。版は <code>configs/body.toml</code> に残し、使い始めた日時の順に並びます。</p>
   <ul>
     <li><b>今の車体</b>: 今使っている版の装備、校正の値、その版で集めたデータの量</li>
@@ -132,14 +132,14 @@
   <h3 id="cc-lineage">来歴</h3>
   <p>走行データ → 手作業のラベル → モデル → 交差検証・Pi での走行 のつながりの図です。節を押すと、その元になったものと、そこから作られたものを強調します。実線は学習に使用、破線は検証に使用、点線は同じデータで評価、を表します。</p>
 
-  <h3 id="cc-deploy"><span class="ph-chip" style="--ph: #2f9e5b">5</span> 配置</h3>
+  <h3 id="cc-deploy"><span class="ph-icon" data-phase="deploy" style="--ph: #2f9e5b"></span> 配置</h3>
   <p>Pi で使用中の版、最後の走行で使った版、最新の有効なモデル、今の車体を並べます。「配置するモデル」の表は有効なモデルが上に並び、「Pi へ配置…」でそのモデルを入れた状態の起動の画面を開きます。学習データの車体が今の車体と違うモデルには「今と違う」の印が付きます。下には配置の履歴（<code>data/deployments.jsonl</code>）が出ます。</p>
 
   <h3 id="cc-runs">走行記録</h3>
   <p>Pi の自律走行の記録です。モデルごとに、10分あたりの人の介入の回数を比べます（少ないほどよい）。記録は「走行記録の取り込み」で Pi から持ってきます。</p>
 
   <h3 id="cc-tools">ツール・ジョブ</h3>
-  <p>「ツール」には、全部のツールがフェーズの順に並びます。上の番号を押すと、そのフェーズへ移ります。ツールを起動すると、「ジョブ」に出力と結果が残ります（<code>data/jobs</code>）。ジョブの画面では、出力がそのまま流れ、「同じ引数でもう一度…」で再実行できます。学習のジョブは、作ったモデルの「来歴」タブからたどれます。</p>
+  <p>「ツール」には、全部のツールがフェーズの順に並びます。上のフェーズの名前を押すと、そこへ移ります。ツールを起動すると、「ジョブ」に出力と結果が残ります（<code>data/jobs</code>）。ジョブの画面では、出力がそのまま流れ、「同じ引数でもう一度…」で再実行できます。学習のジョブは、作ったモデルの「来歴」タブからたどれます。</p>
   <p>起動の画面の「実行引数」は、ターミナルでの <code>python -m &lt;モジュール&gt;</code> の後ろと同じ書き方です。「操作の例」から選ぶと、よく使う引数が入ります。<code>models/vNNN</code> を含むツールでは、「モデル」から版を選べます。</p>
 </section>
 
@@ -214,7 +214,7 @@
   <h2>ツールと引数</h2>
   <p>引数は、起動の画面の「実行引数」に、スペースで区切って書きます。<code>--</code> で始まる名前の後ろに値を書きます（例: <code>--epochs 20</code>）。値のない引数（例: <code>--verify</code>）は、書くだけで有効になります。<code>--turn_intent</code> のような有り無しの設定は、<code>--no-turn_intent</code> で無効にできます。</p>
 
-  <h3 id="tools-prepare"><span class="ph-chip" style="--ph: #6f7a8c">0</span> 準備 — 車体を確かめ、車体の版（装備と校正）を記録する</h3>
+  <h3 id="tools-prepare"><span class="ph-icon" data-phase="prepare" style="--ph: #6f7a8c"></span> 準備 — 車体を確かめ、車体の版（装備と校正）を記録する</h3>
 
   <div class="tool" id="tool-m1_check">
     <h4>安全チェック <code>src.e2e.m1_check</code></h4>
@@ -275,7 +275,7 @@
     <div class="note">版を直接 <code>configs/body.toml</code> に書いても同じです。書いた後に既存の版の中身を変えると、その版を記録したセッションとモデルに「書き換えられた」の印が付きます。</div>
   </div>
 
-  <h3 id="tools-collect"><span class="ph-chip" style="--ph: #2a78d6">1</span> 収集 — 車体を走らせて走行データを記録する</h3>
+  <h3 id="tools-collect"><span class="ph-icon" data-phase="collect" style="--ph: #2a78d6"></span> 収集 — 車体を走らせて走行データを記録する</h3>
 
   <div class="tool" id="tool-auto_collector">
     <h4>自動データ収集 <code>src.e2e.auto_collector</code> <span class="badge moves">車体が動く</span></h4>
@@ -290,7 +290,7 @@
     </tbody></table>
   </div>
 
-  <h3 id="tools-curate"><span class="ph-chip" style="--ph: #13899a">2</span> 整備 — データを確かめ、ラベルを付け、変わっていないか検証する</h3>
+  <h3 id="tools-curate"><span class="ph-icon" data-phase="curate" style="--ph: #13899a"></span> 整備 — データを確かめ、ラベルを付け、変わっていないか検証する</h3>
 
   <div class="tool" id="tool-manifest">
     <h4>マニフェスト作成・検証 <code>src.e2e.dataset.manifest</code></h4>
@@ -324,7 +324,7 @@
     <p class="example">例: <code>--data_dir data/raw --model models/v006/model.onnx --output_dir data/processed/clean_v2 --threshold 0.4</code></p>
   </div>
 
-  <h3 id="tools-train"><span class="ph-chip" style="--ph: #7b5fd6">3</span> 学習 — 記録データからモデルを作る</h3>
+  <h3 id="tools-train"><span class="ph-icon" data-phase="train" style="--ph: #7b5fd6"></span> 学習 — 記録データからモデルを作る</h3>
 
   <div class="tool" id="tool-train">
     <h4>モデル学習 <code>src.e2e.training.train</code></h4>
@@ -345,7 +345,7 @@
     <div class="note">学習の検証の値は、モデルの選択にも使った値なので少し甘く出ます。設定を変えた効果は交差検証で確かめます。</div>
   </div>
 
-  <h3 id="tools-evaluate"><span class="ph-chip" style="--ph: #c46f1a">4</span> 評価 — モデルを比べ、使うかどうか（採否）を決める</h3>
+  <h3 id="tools-evaluate"><span class="ph-icon" data-phase="evaluate" style="--ph: #c46f1a"></span> 評価 — モデルを比べ、使うかどうか（採否）を決める</h3>
 
   <div class="tool" id="tool-cross_validate">
     <h4>交差検証 <code>src.e2e.training.cross_validate</code></h4>
@@ -391,7 +391,7 @@
     </tbody></table>
   </div>
 
-  <h3 id="tools-deploy"><span class="ph-chip" style="--ph: #2f9e5b">5</span> 配置 — モデルを Pi へ送り、使用中にする</h3>
+  <h3 id="tools-deploy"><span class="ph-icon" data-phase="deploy" style="--ph: #2f9e5b"></span> 配置 — モデルを Pi へ送り、使用中にする</h3>
   <div class="note warn"><b>Pi へ接続するツールの準備</b>: 接続先を、Control Center を起動する前に環境変数 <code>PICARX_SSH_HOST</code>（例: <code>pi@rspi</code>）で決めておくか、引数の先頭に <code>--host pi@rspi</code> を付けます。Control Center のジョブはパスワードを入力できないので、<em>SSH の鍵で、パスワードなしで接続できるようにしておきます</em>。</div>
 
   <div class="tool" id="tool-bundle">
@@ -426,7 +426,7 @@
     <p class="when"><b>使う場面</b>: Pi に入っている版と、使用中の版を確かめる。概要の「Pi で使用中」と「最後の走行の版」が違う時に使います。引数は <code>list</code> だけです。</p>
   </div>
 
-  <h3 id="tools-operate"><span class="ph-chip" style="--ph: #c8467f">6</span> 運用 — Pi で走らせ、走行と介入の記録を集める</h3>
+  <h3 id="tools-operate"><span class="ph-icon" data-phase="operate" style="--ph: #c8467f"></span> 運用 — Pi で走らせ、走行と介入の記録を集める</h3>
   <div class="note">「走行記録の取り込み」は Pi へ接続します。準備は<a href="#/manual?s=tools-deploy">配置</a>と同じです。</div>
 
   <div class="tool" id="tool-pi_autopilot">

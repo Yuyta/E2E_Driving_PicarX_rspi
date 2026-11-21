@@ -109,46 +109,108 @@ function bodyBadge(id, source, changed) {
 
 /* ------------------------------------------------------------------ MLOps phases */
 
-// フェーズの定義はサーバー（src/gui/workflows.py の PHASES）から読む。ランチャーと同じ番号と色
+// フェーズの定義（名前、色、アイコン、画面）はサーバー（src/gui/workflows.py の PHASES）から読む。
+// ランチャーと同じ色と絵を使う。番号は並び順にだけ使い、画面には出さない
 const phaseById = (id) => state.phases.find((p) => p.id === id);
 const loopPhases = () => state.phases.filter((p) => p.number !== null);
-const phaseMark = (p) => (p.number === null ? "共" : String(p.number));
 const routePhases = (route) => loopPhases().filter((p) => p.page === route);
-const phaseChip = (p, extra) => h("span", { class: `ph-chip ${extra || ""}`, style: { "--ph": p.color }, title: `${phaseMark(p)} ${p.title}: ${p.summary}` }, phaseMark(p));
-
-/** サイドバーの画面に、フェーズの番号と名前を付ける */
-function decorateNav() {
-  document.querySelectorAll("#nav a[data-phases]").forEach((a) => {
-    const ps = a.dataset.phases.split(" ").map(phaseById).filter(Boolean);
-    const page = a.querySelector(".nav-text").textContent;
-    a.style.setProperty("--ph", ps[0].color);
-    a.replaceChildren(
-      h("span", { class: "nav-chips" }, ps.map((p) => phaseChip(p))),
-      h("span", { class: "nav-text" }, h("span", {}, ps.map((p) => p.title).join("・")), h("small", {}, page)));
-  });
+const iconSvg = (markup) => `<svg viewBox="0 0 24 24" aria-hidden="true">${markup}</svg>`;
+function phaseIcon(p, extra) {
+  const el = h("span", { class: `ph-icon ${extra || ""}`, style: { "--ph": p.color }, title: `${p.title}: ${p.summary}` });
+  el.innerHTML = iconSvg(p.icon);
+  return el;
 }
 
-/** 画面の上に置く「今どのフェーズか」の帯と、そのフェーズで使うツール */
+/** フェーズごとに「流れているもの」の量。0 の段階へは粒を流さない */
+function phaseCounts(c) {
+  if (!c) return null;
+  return {
+    prepare: (c.bodies || []).length,
+    collect: c.summary.sessions,
+    curate: c.sessions.filter((x) => x.annotation_hash || x.manifest_hash).length,
+    train: c.models.length,
+    evaluate: c.cv.length + c.models.filter((m) => m.stage !== "candidate").length,
+    deploy: (c.deployments || []).length + (c.summary.deployed.version ? 1 : 0),
+    operate: c.summary.runs,
+  };
+}
+
+let flowSeq = 0;
+/** MLOps の流れの図。段階を線でつなぎ、記録のある区間に粒を流す。運用から収集へ戻る輪も描く
+ *  nodes: 各段階の下に出す中身（なければ名前だけの小さい図）。current: 強調する段階 */
+function flowDiagram({ counts, current = [], details, compact }) {
+  const ps = loopPhases();
+  const gid = `flow-grad-${++flowSeq}`;
+  const svg = s("svg", { class: "flow-track", "aria-hidden": "true" });
+  const nodes = ps.map((p) => {
+    const d = details?.[p.id];
+    return h("a", { class: `flow-node ${current.includes(p) ? "on" : ""} ${counts && !counts[p.id] ? "idle" : ""}`, href: `#/${p.page}`, style: { "--ph": p.color }, title: p.summary, "aria-current": current.includes(p) ? "step" : null },
+      phaseIcon(p, "orb"),
+      h("span", { class: "flow-name" }, p.title),
+      d ? [h("span", { class: "flow-value" }, d[0], h("small", {}, d[1])), h("span", { class: "flow-foot" }, d[2])] : null);
+  });
+  const row = h("div", { class: "flow-row", style: { gridTemplateColumns: `repeat(${ps.length}, minmax(0, 1fr))` } }, nodes);
+  const box = h("div", { class: `flow ${compact ? "compact" : ""}`, role: "img", "aria-label": `開発の流れ: ${ps.map((p) => p.title).join(" → ")} → ${ps[1]?.title || ""}へ戻る` }, svg, row);
+  // 置いた場所の実際の大きさで描く（縦横の伸び縮みで粒がつぶれないように）
+  const draw = () => {
+    const B = box.getBoundingClientRect();
+    if (!B.width) return;
+    const orbs = nodes.map((n) => n.querySelector(".orb").getBoundingClientRect());
+    const xs = orbs.map((o) => o.left + o.width / 2 - B.left);
+    const y = orbs[0].top + orbs[0].height / 2 - B.top;
+    const W = B.width, H = B.height, r = compact ? 8 : 14;
+    svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+    svg.setAttribute("width", W); svg.setAttribute("height", H);
+    const grad = s("linearGradient", { id: gid, gradientUnits: "userSpaceOnUse", x1: xs[0], x2: xs[xs.length - 1], y1: 0, y2: 0 },
+      ps.map((p, i) => s("stop", { offset: i / Math.max(1, ps.length - 1), "stop-color": p.color })));
+    const parts = [s("defs", {}, grad)];
+    const flowing = (i) => !counts || (counts[ps[i].id] > 0 && counts[ps[i + 1].id] > 0);
+    for (let i = 0; i < xs.length - 1; i++) {
+      const d = `M${xs[i]},${y} H${xs[i + 1]}`;
+      parts.push(s("path", { class: "flow-base", d }));
+      if (flowing(i)) parts.push(s("path", { class: "flow-dots", d, stroke: `url(#${gid})` }));
+    }
+    // 運用 → 収集 の輪（下を回って、収集の手前で本線に合流する）
+    if (xs.length > 2) {
+      const R = W - 4, L = (xs[0] + xs[1]) / 2, yb = H - 3;
+      const d = `M${xs[xs.length - 1]},${y} H${R - r} Q${R},${y} ${R},${y + r} V${yb - r} Q${R},${yb} ${R - r},${yb} H${L + r} Q${L},${yb} ${L},${yb - r} V${y + r} Q${L},${y} ${L + r},${y}`;
+      parts.push(s("path", { class: "flow-base loop", d }));
+      if (!counts || counts.operate > 0) parts.push(s("path", { class: "flow-dots loop", d, stroke: `url(#${gid})` }));
+    }
+    svg.replaceChildren(...parts);
+  };
+  let last = "";
+  new ResizeObserver(() => { const k = `${Math.round(box.clientWidth)}x${Math.round(box.clientHeight)}`; if (k !== last) { last = k; draw(); } }).observe(box);
+  return h("div", { class: "flow-scroll" }, box);
+}
+
+/** サイドバーの「開発の流れ」。フェーズを縦に並べ、線に沿って粒が流れる */
+function buildNavFlow() {
+  const holder = document.getElementById("nav-flow");
+  if (!holder || !state.phases.length) return;
+  const ps = loopPhases();
+  holder.style.setProperty("--flow-grad", `linear-gradient(to bottom, ${ps.map((p) => p.color).join(", ")})`);
+  holder.replaceChildren(...ps.map((p) => h("a", { href: `#/${p.page}`, "data-route": p.page, style: { "--ph": p.color }, title: p.summary },
+    phaseIcon(p), h("span", { class: "nav-text" }, h("span", {}, p.title), h("small", {}, ROUTES[p.page]?.[0] || "")))));
+}
+
+/** 画面の上に置く「今どのフェーズか」の流れの図と、そのフェーズで使うツール */
 function phaseHeader(route) {
   const mine = routePhases(route);
   if (!mine.length) return null;
-  const rail = h("ol", { class: "phase-rail", "aria-label": "開発の流れ" },
-    loopPhases().map((p) => h("li", {}, h("a", {
-      href: `#/${p.page}`, class: mine.includes(p) ? "on" : "", style: { "--ph": p.color }, title: p.summary,
-      "aria-current": mine.includes(p) ? "step" : null,
-    }, h("span", { class: "ph-chip" }, phaseMark(p)), h("span", { class: "name" }, p.title)))),
-    h("li", { class: "loop", title: "運用で集めた記録から、次の収集へ戻る" }, "↺"));
   const workflows = state.workflows || [];
   const blocks = mine.map((p) => h("div", { class: "phase-block", style: { "--ph": p.color } },
-    h("div", { class: "phase-title" }, phaseChip(p, "lg"), h("div", {}, h("b", {}, `${p.title}`), h("span", {}, p.summary))),
+    h("div", { class: "phase-title" }, phaseIcon(p, "solid"), h("div", {}, h("b", {}, p.title), h("span", {}, p.summary))),
     h("div", { class: "phase-tools" }, workflows.filter((w) => w.phase === p.id).map((w) =>
       h("button", { type: "button", class: `small ${w.moves_car ? "danger-ghost" : "ghost"}`, title: w.description, onclick: () => launch(w.id) },
         w.title, w.moves_car ? h("span", { class: "tiny-badge" }, "車体が動く") : null)))));
-  return h("section", { class: "phase-head" }, rail, h("div", { class: "phase-blocks" }, blocks));
+  return h("section", { class: "phase-head" },
+    flowDiagram({ counts: phaseCounts(state.catalog), current: mine, compact: true }),
+    h("div", { class: "phase-blocks" }, blocks));
 }
 function setPagePhase(route) {
   const el = document.getElementById("page-phase");
-  el.replaceChildren(...routePhases(route).map((p) => phaseChip(p)));
+  el.replaceChildren(...routePhases(route).map((p) => phaseIcon(p, "solid")));
 }
 
 /* ------------------------------------------------------------------ api */
@@ -407,7 +469,7 @@ async function launch(workflowId, presetArgs) {
     title: `${wf.title} を起動`,
     body: [
       h("div", { class: "row", style: { gap: "8px", flexWrap: "nowrap", alignItems: "flex-start" } },
-        phaseById(wf.phase) ? phaseChip(phaseById(wf.phase)) : null,
+        phaseById(wf.phase) ? phaseIcon(phaseById(wf.phase)) : null,
         h("span", { class: "ink-2" }, phaseById(wf.phase) ? h("b", {}, `${phaseById(wf.phase).title}: `) : null, wf.description)),
       h("div", { class: "row", style: { justifyContent: "space-between" } },
         h("span", { class: "mono muted" }, `python -m ${wf.module}`),
@@ -485,15 +547,10 @@ function pipeline(c) {
     deploy: [sm.deployed.version || "—", "Pi で使用中", sm.deployed.at ? `${fmtDate(sm.deployed.at)} に配置` : "配置の記録なし"],
     operate: [sm.runs, "回の走行", `自律 ${fmt(c.runs.reduce((a, r) => a + r.autonomous_s, 0) / 60, 1)} 分`],
   };
-  return h("section", { class: "card" },
-    h("div", { class: "card-head" }, h("h2", {}, "開発の流れ"), h("span", { class: "sub" }, "番号の順に進み、運用で集めた記録から次の収集へ戻ります。押すとその段階の画面を開きます")),
-    h("div", { class: "pipeline" }, loopPhases().map((p) => {
-      const [value, unit, foot] = values[p.id] || ["—", "", ""];
-      return h("a", { href: `#/${p.page}`, style: { "--ph": p.color }, title: p.summary },
-        h("span", { class: "step-head" }, phaseChip(p), h("b", {}, p.title)),
-        h("span", { class: "step-value" }, value, h("small", {}, unit)),
-        h("span", { class: "step-foot" }, foot));
-    })));
+  if (!state.phases.length) return null;
+  return h("section", { class: "card flow-card" },
+    h("div", { class: "card-head" }, h("h2", {}, "開発の流れ"), h("span", { class: "sub" }, "記録が流れている区間に光が流れます。運用で集めた記録は、下の輪を通って次の収集へ戻ります")),
+    flowDiagram({ counts: phaseCounts(c), details: values }));
 }
 
 async function viewOverview(root) {
@@ -1038,19 +1095,19 @@ async function viewRuns(root) {
 async function viewTools(root, _p, query) {
   const workflows = await loadWorkflows();
   if (!state.catalog) await loadCatalog();
-  const phases = state.phases.length ? state.phases : [{ id: null, number: null, title: "ツール", summary: "", color: "var(--muted)", page: "tools" }];
+  const phases = state.phases.length ? state.phases : [{ id: null, number: null, title: "ツール", summary: "", color: "var(--muted)", page: "tools", icon: "" }];
   const inPhase = (p) => workflows.filter((w) => (p.id ? w.phase === p.id : true));
   const used = phases.filter((p) => inPhase(p).length);
   root.append(
     h("p", { class: "lead" }, "既存のツールを、使う段階（フェーズ）の順に並べています。どれも別のプロセスで起動し、出力は「ジョブ」に残ります。車体が動くツールは安全の確認が必要です。"),
-    // フェーズへ飛ぶ目次。番号の順が作業の順
+    // フェーズへ飛ぶ目次。並びの順が作業の順
     h("nav", { class: "phase-jump", "aria-label": "フェーズへ移動" }, used.map((p) => h("a", {
       href: `#/tools?phase=${p.id}`, style: { "--ph": p.color },
       onclick: (e) => { e.preventDefault(); document.getElementById(`phase-${p.id}`)?.scrollIntoView({ behavior: "smooth", block: "start" }); },
-    }, phaseChip(p), p.title, h("small", {}, inPhase(p).length)))));
+    }, phaseIcon(p), p.title, h("small", {}, inPhase(p).length)))));
   for (const p of used) {
     root.append(h("section", { class: "tool-group", id: `phase-${p.id}`, style: { "--ph": p.color } },
-      h("header", {}, phaseChip(p, "lg"), h("h2", {}, p.title), h("span", { class: "sub" }, p.summary),
+      h("header", {}, phaseIcon(p, "solid"), h("h2", {}, p.title), h("span", { class: "sub" }, p.summary),
         p.number !== null ? h("a", { class: "small open-page", href: `#/${p.page}` }, `${ROUTES[p.page]?.[0] || ""}の画面へ →`) : null),
       h("div", { class: "tools" }, inPhase(p).map((w) => h("div", { class: "card tool" },
         h("div", { class: "title" }, w.title,
@@ -1208,6 +1265,8 @@ async function viewManual(root, _p, query) {
   // 同じサーバーの静的なファイル（src/gui/web/static/manual.html）なので、そのまま入れる
   const body = h("div", { class: "manual-body card" });
   body.innerHTML = state.manual;
+  // フェーズの印に、画面と同じアイコンを入れる
+  body.querySelectorAll(".ph-icon[data-phase]").forEach((el) => { const p = phaseById(el.dataset.phase); if (p) el.innerHTML = iconSvg(p.icon); });
   const toc = h("nav", { class: "manual-toc", "aria-label": "目次" });
   const search = h("input", { type: "search", placeholder: "言葉で探す（例: 引数、配置、fps）", class: "manual-search" });
   toc.append(search);
@@ -1218,7 +1277,7 @@ async function viewManual(root, _p, query) {
     const subs = [...sec.querySelectorAll("h3[id], .tool[id]")];
     if (subs.length) {
       item.append(h("ol", {}, subs.map((el) => {
-        // フェーズの見出し（「3 学習 — 説明」）は、目次では番号と名前だけにする
+        // フェーズの見出し（「学習 — 説明」）は、目次では名前だけにする
         const label = el.matches(".tool") ? el.querySelector("h4").firstChild.textContent.trim() : el.textContent.split(" — ")[0].trim();
         return h("li", { class: el.matches(".tool") ? "tool-item" : "" }, h("a", { href: `#/manual?s=${el.id}` }, label));
       })));
@@ -1362,7 +1421,7 @@ try { const t = localStorage.getItem("picarx-theme"); if (t) document.documentEl
 (async () => {
   try {
     state.phases = await api("/phases");
-    decorateNav();
+    buildNavFlow();
   } catch { /* フェーズを読めなくても画面は出す（サーバーが止まっている時は各画面が理由を出す） */ }
   render();
   pollRobot();

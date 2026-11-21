@@ -5,7 +5,7 @@
 ツールの中身は変えない。
 
 フェーズは「準備 → 収集 → 整備 → 学習 → 評価 → 配置 → 運用 → 次の収集」の輪。
-画面の色と番号はここで決めた値を、ランチャー（Qt）と Control Center（ブラウザ）の両方で使う。
+画面の色とアイコンはここで決めた値を、ランチャー（Qt）と Control Center（ブラウザ）の両方で使う。
 """
 
 from dataclasses import dataclass, field
@@ -22,6 +22,37 @@ class Phase:
     color: str
     # Control Center でこのフェーズの中身を見る画面（#/<page>）
     page: str
+
+    @property
+    def icon(self) -> str:
+        """24x24 の線のアイコン（SVG の中身）。ランチャーと Control Center で同じ絵を使う"""
+        return PHASE_ICONS[self.id]
+
+
+# 番号ではなく絵でフェーズを見分ける。stroke は呼ぶ側で currentColor などを指定する
+PHASE_ICONS = {
+    # 準備: レンチ（車体の点検と校正）
+    "prepare": '<path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3.5 17.5l3 3 5.8-5.8a4 4 0 0 0 5.4-5.4'
+    'l-2.6 2.6-2.3-.6-.6-2.3z"/>',
+    # 収集: カメラ（走行データの記録）
+    "collect": '<path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.5"/>',
+    # 整備: じょうご（確かめて、除いて、封をする）
+    "curate": '<path d="M3.5 5h17l-6.5 7.5V19l-4-2v-4.5z"/>',
+    # 学習: つながった節（モデル）
+    "train": '<circle cx="5" cy="6" r="2"/><circle cx="5" cy="18" r="2"/>'
+    '<circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/>'
+    '<path d="M6.6 7.3l3.8 3.4M6.6 16.7l3.8-3.4M14 12h3"/>',
+    # 評価: 計器（比べて採否を決める）
+    "evaluate": '<path d="M4 17a8 8 0 1 1 16 0"/><path d="M12 17l4.2-5.4"/>'
+    '<path d="M6.5 11.5l1 .6M12 7v1.2M17.5 11.5l-1 .6"/>',
+    # 配置: 上向きの矢印（Pi へ送る）
+    "deploy": '<path d="M12 15V4M7.5 8.5 12 4l4.5 4.5"/><path d="M5 14v5h14v-5"/>',
+    # 運用: ハンドル（走らせる）
+    "operate": '<circle cx="12" cy="12" r="8.5"/><circle cx="12" cy="12" r="2"/>'
+    '<path d="M3.6 11h6.4M14 11h6.4M12 14v6.4"/>',
+    # 横断: 重なった層
+    "common": '<path d="M12 3.5 20.5 8 12 12.5 3.5 8z"/><path d="M3.5 12.5 12 17l8.5-4.5"/>',
+}
 
 
 PHASES = (

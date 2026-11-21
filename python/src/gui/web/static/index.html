@@ -20,13 +20,15 @@
       <nav id="nav">
         <a href="#/overview" data-route="overview"><i data-icon="grid"></i>概要</a>
         <div class="nav-group">開発の流れ</div>
-        <!-- フェーズ順の画面（番号と色は app.js がフェーズの定義から付ける） -->
-        <a href="#/body" data-route="body" data-phases="prepare"><span class="nav-text">車体</span></a>
-        <a href="#/data" data-route="data" data-phases="collect curate"><span class="nav-text">データ</span></a>
-        <a href="#/models" data-route="models" data-phases="train"><span class="nav-text">モデル</span></a>
-        <a href="#/compare" data-route="compare" data-phases="evaluate"><span class="nav-text">比較・評価</span></a>
-        <a href="#/deploy" data-route="deploy" data-phases="deploy"><span class="nav-text">配置</span></a>
-        <a href="#/runs" data-route="runs" data-phases="operate"><span class="nav-text">走行記録</span></a>
+        <!-- フェーズ順の画面。app.js がフェーズの定義（アイコン・色）から作り直す。下は読めなかった時の表示 -->
+        <div id="nav-flow" class="nav-flow">
+          <a href="#/body" data-route="body"><span class="nav-text">車体</span></a>
+          <a href="#/data" data-route="data"><span class="nav-text">データ</span></a>
+          <a href="#/models" data-route="models"><span class="nav-text">モデル</span></a>
+          <a href="#/compare" data-route="compare"><span class="nav-text">比較・評価</span></a>
+          <a href="#/deploy" data-route="deploy"><span class="nav-text">配置</span></a>
+          <a href="#/runs" data-route="runs"><span class="nav-text">走行記録</span></a>
+        </div>
         <div class="nav-loop" aria-hidden="true">↺ 運用から次の収集へ</div>
         <div class="nav-group">横断</div>
         <a href="#/lineage" data-route="lineage"><i data-icon="flow"></i>来歴</a>
