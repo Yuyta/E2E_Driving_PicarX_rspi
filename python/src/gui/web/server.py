@@ -25,6 +25,7 @@ import sys
 import threading
 import time
 import webbrowser
+from dataclasses import asdict
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -33,7 +34,7 @@ from urllib.parse import parse_qs, urlparse
 
 from src.e2e.registry import lineage, stages
 from src.gui.web.jobs import JobManager
-from src.gui.workflows import WORKFLOWS, WORKFLOWS_BY_ID
+from src.gui.workflows import PHASES, WORKFLOWS, WORKFLOWS_BY_ID
 
 PYTHON_DIR = Path(__file__).resolve().parents[3]
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -123,7 +124,7 @@ class App:
                 "title": w.title,
                 "description": w.description,
                 "module": w.module,
-                "group": w.group,
+                "phase": w.phase,
                 "moves_car": w.moves_car,
                 "arguments": w.arguments,
                 "examples": [list(e) for e in w.examples],
@@ -132,6 +133,10 @@ class App:
             }
             for w in WORKFLOWS
         ]
+
+    @staticmethod
+    def phases():
+        return [asdict(phase) for phase in PHASES]
 
     def start_job(self, body: Dict[str, Any]) -> Dict[str, Any]:
         workflow = WORKFLOWS_BY_ID.get(str(body.get("workflow")))
@@ -311,6 +316,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, app.catalog(fresh="fresh" in query))
             if parts == ["workflows"]:
                 return self._json(200, app.workflows())
+            if parts == ["phases"]:
+                return self._json(200, app.phases())
             if parts == ["jobs"]:
                 return self._json(200, [j.public() for j in app.jobs.list()])
             if len(parts) == 3 and parts[0] == "jobs" and parts[2] == "log":

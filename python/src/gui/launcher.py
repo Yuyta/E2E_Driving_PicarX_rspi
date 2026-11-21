@@ -4,7 +4,7 @@ import os
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QProcess
+from PySide6.QtCore import QProcess, Qt
 from PySide6.QtGui import QFont
 from PySide6.QtWidgets import (
     QApplication,
@@ -27,7 +27,7 @@ from PySide6.QtWidgets import (
 )
 
 from src.gui import theme
-from src.gui.workflows import WORKFLOWS, Workflow
+from src.gui.workflows import PHASES, WORKFLOWS, Phase, Workflow, workflows_in
 
 PYTHON_DIR = Path(__file__).resolve().parents[2]
 WEB_PORT = 8765
@@ -35,10 +35,70 @@ WEB_PORT = 8765
 __all__ = ["WORKFLOWS", "Workflow", "LauncherWindow"]
 
 
+def phase_mark(phase: Phase) -> str:
+    return "共" if phase.number is None else str(phase.number)
+
+
+class PhaseBadge(QLabel):
+    """フェーズの番号の丸。色だけに頼らず、番号でも見分けられるようにする"""
+
+    def __init__(self, phase: Phase, size: int = 24):
+        super().__init__(phase_mark(phase))
+        self.setFixedSize(size, size)
+        self.setAlignment(Qt.AlignCenter)
+        self.setStyleSheet(
+            f"background: {phase.color}; color: white; border-radius: {size // 2}px;"
+            f"font-weight: 700; font-size: {9 if size < 24 else 10}pt;"
+        )
+
+
+class PhaseFlow(QFrame):
+    """0 準備 → 1 収集 → … → 6 運用 → 1 へ戻る、の流れ"""
+
+    def __init__(self):
+        super().__init__()
+        self.setObjectName("phaseFlow")
+        row = QHBoxLayout(self)
+        row.setContentsMargins(12, 8, 12, 8)
+        row.setSpacing(6)
+        loop = [phase for phase in PHASES if phase.number is not None]
+        for i, phase in enumerate(loop):
+            if i:
+                arrow = QLabel("→")
+                arrow.setObjectName("muted")
+                row.addWidget(arrow)
+            row.addWidget(PhaseBadge(phase, 20))
+            name = QLabel(phase.title)
+            name.setObjectName("phaseName")
+            name.setToolTip(phase.summary)
+            row.addWidget(name)
+        back = QLabel("→ 1 収集へ戻る")
+        back.setObjectName("muted")
+        row.addWidget(back)
+        row.addStretch(1)
+
+
+class PhaseHeader(QWidget):
+    def __init__(self, phase: Phase):
+        super().__init__()
+        row = QHBoxLayout(self)
+        row.setContentsMargins(0, 12, 0, 0)
+        row.setSpacing(8)
+        row.addWidget(PhaseBadge(phase))
+        title = QLabel(phase.title)
+        title.setObjectName("sectionTitle")
+        row.addWidget(title)
+        summary = QLabel(phase.summary)
+        summary.setObjectName("muted")
+        row.addWidget(summary, 1)
+
+
 class WorkflowCard(QFrame):
-    def __init__(self, workflow: Workflow, launch):
+    def __init__(self, workflow: Workflow, launch, color: str = theme.BORDER):
         super().__init__()
         self.setObjectName("workflowCard")
+        # 左の色の帯で、どのフェーズのツールかが分かるようにする
+        self.setStyleSheet(f"#workflowCard {{ border-left: 4px solid {color}; }}")
         layout = QHBoxLayout(self)
         layout.setContentsMargins(14, 12, 14, 12)
         layout.setSpacing(8)
@@ -56,7 +116,7 @@ class WorkflowCard(QFrame):
         text_layout.addWidget(title)
         text_layout.addWidget(description)
         layout.addLayout(text_layout, 1)
-        button.setFixedSize(132, 38)
+        button.setFixedSize(116, 36)
         layout.addWidget(button)
 
 
@@ -124,28 +184,22 @@ class LauncherWindow(QMainWindow):
         header_row.addStretch(1)
         header_row.addWidget(web_button)
         layout.addLayout(header_row)
-        subtitle = QLabel("操作、データ、学習、評価をここから始められます")
-        subtitle.setObjectName("muted")
-        layout.addWidget(subtitle)
+        # 開発の流れ（MLOps のフェーズ）を1行で見せる。下の区分も同じ順番と色
+        layout.addWidget(PhaseFlow())
 
-        grid = QGridLayout()
-        grid.setHorizontalSpacing(14)
-        grid.setVerticalSpacing(10)
-        for col in range(3):
-            grid.setColumnStretch(col, 1)
-        groups = list(dict.fromkeys(workflow.group for workflow in WORKFLOWS))
-        row = 0
-        for group in groups:
-            label = QLabel(group)
-            label.setObjectName("sectionTitle")
-            grid.addWidget(label, row, 0, 1, 3)
-            row += 1
-            entries = [workflow for workflow in WORKFLOWS if workflow.group == group]
-            for i, workflow in enumerate(entries):
-                grid.addWidget(WorkflowCard(workflow, self._launch), row + i // 3, i % 3)
-            row += (len(entries) + 2) // 3
+        self.grid = QGridLayout()
+        self.grid.setHorizontalSpacing(14)
+        self.grid.setVerticalSpacing(10)
+        # フェーズの見出しと、そのフェーズのツールのカード。幅に合わせて列の数を変えて並べ直す
+        self.sections = [
+            (PhaseHeader(phase), [WorkflowCard(w, self._launch, phase.color) for w in entries])
+            for phase in PHASES
+            if (entries := workflows_in(phase.id))
+        ]
+        self.columns = 0
+        self._arrange(3)
         content = QWidget()
-        content.setLayout(grid)
+        content.setLayout(self.grid)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
@@ -166,8 +220,10 @@ class LauncherWindow(QMainWindow):
             + f"""
             #header {{ font-size: 26px; font-weight: 700; }}
             #muted {{ color: {theme.MUTED}; }}
-            #sectionTitle {{ font-size: 16px; font-weight: 650; padding-top: 10px;
-                color: {theme.TEXT}; }}
+            #sectionTitle {{ font-size: 16px; font-weight: 650; color: {theme.TEXT}; }}
+            #phaseFlow {{ background: {theme.SURFACE}; border: 1px solid {theme.BORDER};
+                border-radius: 10px; }}
+            #phaseName {{ font-weight: 600; color: {theme.TEXT}; }}
             #workflowCard {{ background: {theme.SURFACE}; border: 1px solid {theme.BORDER};
                 border-radius: 10px; }}
             #workflowCard:hover {{ border-color: {theme.BORDER_STRONG}; }}
@@ -176,16 +232,37 @@ class LauncherWindow(QMainWindow):
             #movesBadge {{ color: {theme.DANGER}; font-size: 12px; font-weight: 600; }}
             QScrollArea, QScrollArea QWidget {{ background: transparent; }}
             QPushButton#launchButton {{ background-color: {theme.ACCENT}; color: #ffffff;
-                border: 0; border-radius: 7px; font-weight: 600; min-width: 132px;
-                max-width: 132px; min-height: 38px; max-height: 38px; }}
+                border: 0; border-radius: 7px; font-weight: 600; padding: 0 8px;
+                min-width: 100px; max-width: 100px; min-height: 36px; max-height: 36px; }}
             QPushButton#launchButton:hover {{ background-color: {theme.ACCENT_HOVER}; }}
             QPushButton#carButton {{ background-color: {theme.DANGER}; color: #ffffff;
-                border: 0; border-radius: 7px; font-weight: 600; min-width: 132px;
-                max-width: 132px; min-height: 38px; max-height: 38px; }}
+                border: 0; border-radius: 7px; font-weight: 600; padding: 0 8px;
+                min-width: 100px; max-width: 100px; min-height: 36px; max-height: 36px; }}
             QPushButton#carButton:hover {{ background-color: {theme.DANGER_HOVER}; }}
             QTextEdit {{ font-family: "Consolas", "{theme.FONT_FAMILY}"; font-size: 9pt; }}
             """
         )
+
+    def _arrange(self, columns: int):
+        if columns == self.columns:
+            return
+        self.columns = columns
+        while self.grid.count():  # 置き場所だけを外す（カードはそのまま使う）
+            self.grid.takeAt(0)
+        for col in range(3):
+            self.grid.setColumnStretch(col, 1 if col < columns else 0)
+        row = 0
+        for header, cards in self.sections:
+            self.grid.addWidget(header, row, 0, 1, columns)
+            row += 1
+            for i, card in enumerate(cards):
+                self.grid.addWidget(card, row + i // columns, i % columns)
+            row += (len(cards) + columns - 1) // columns
+
+    def resizeEvent(self, event):
+        # 狭い時は2列にして、カードが右へはみ出さないようにする
+        self._arrange(3 if event.size().width() >= 1000 else 2)
+        super().resizeEvent(event)
 
     def _launch(self, workflow: Workflow):
         if workflow.confirm and not workflow.moves_car:

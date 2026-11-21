@@ -8,6 +8,7 @@
 - ラベル → モデル: `data.annotations.hashes`（セッションごとのラベルの中身のハッシュ）
 - 交差検証 ↔ モデル: 学習データの中身のハッシュ（`data_fingerprint`）が同じもの
 - モデル → 走行: `run.json` の `model_version`（データのハッシュが違えば印を付ける）
+- 車体の版 → セッション・走行: セッションの `body.json`、なければ日時と `configs/body.toml`
 
 使い方（確認用の CLI）:
     uv run python -m src.e2e.registry.lineage --summary
@@ -23,10 +24,10 @@ from typing import Any, Dict, Iterable, List, Optional
 
 try:
     from ..dataset.manifest import load_manifest, verify_session
-    from . import stages
+    from . import body, stages
 except ImportError:
     from src.e2e.dataset.manifest import load_manifest, verify_session
-    from src.e2e.registry import stages
+    from src.e2e.registry import body, stages
 
 
 def _read_json(path: Path) -> Optional[Dict[str, Any]]:
@@ -149,6 +150,7 @@ def collect_sessions(data_dirs: Iterable[Path], annotations_dir: Optional[Path] 
                     "manifest_hash": manifest.get("hash") if manifest else None,
                     "manifest_created_at": manifest.get("created_at") if manifest else None,
                     "annotation_hash": _short_hash(annotation) if annotation else None,
+                    "body_recorded": body.read_session_record(path),
                 }
             )
     return sessions
@@ -236,6 +238,7 @@ def collect_models(models_dir: Path) -> List[Dict[str, Any]]:
                 "inference_ms_pc": meta.get("inference_ms_pc"),
                 "blocked_trained": bool((meta.get("blocked_output") or {}).get("trained")),
                 "code": meta.get("code") or {},
+                "body_record": meta.get("body") or {},
                 "environment": meta.get("environment") or {},
                 "history": meta.get("history") or [],
                 "preprocessing": meta.get("preprocessing") or {},
@@ -404,6 +407,7 @@ def collect_runs(runs_dir: Path) -> List[Dict[str, Any]]:
                 "model_commit": data.get("model_commit"),
                 "where": data.get("where"),
                 "started_at": _iso(data.get("started_at")),
+                "started_ts": data.get("started_at"),
                 "autonomous_s": float(data.get("autonomous_s") or 0.0),
                 "human_s": float(data.get("human_s") or 0.0),
                 "human": int(counts.get("human") or 0),
@@ -444,6 +448,80 @@ def collect_jobs(jobs_dir: Path) -> List[Dict[str, Any]]:
     return jobs
 
 
+# --------------------------------------------------------------------------- body
+
+
+def _load_bodies(body_file: Optional[Path]):
+    """車体の版。ファイルに誤りがあれば空にして、理由を画面に出す（来歴の画面は止めない）"""
+    if body_file is None:
+        return [], None
+    try:
+        return body.load_versions(body_file), None
+    except body.BodyError as exc:
+        return [], str(exc)
+
+
+def _attach_bodies(bodies, sessions, runs) -> None:
+    for session in sessions:
+        resolved = body.resolve(bodies, session.pop("body_recorded", None), session["session_id"])
+        session["body_version"] = resolved["id"]
+        session["body_source"] = resolved["source"]
+        session["body_changed"] = resolved["changed"]
+    for run in runs:
+        version = body.version_at(bodies, run.pop("started_ts", None))
+        run["body_version"] = version["id"] if version else None
+
+
+def body_checks(model, sessions_by_id, bodies, current_body) -> List[Dict[str, Any]]:
+    """学習データの車体の版の確認。版が1つも登録されていなければ何も言わない"""
+    record = model.get("body_record") or {}
+    recorded = record.get("sessions") or {}
+    per_session: Dict[str, Optional[str]] = {}
+    for session_id in model["train_sessions"] + model["val_sessions"]:
+        if recorded.get(session_id):
+            per_session[session_id] = recorded[session_id]
+        elif session_id in sessions_by_id:
+            per_session[session_id] = sessions_by_id[session_id].get("body_version")
+        else:
+            per_session[session_id] = None
+    counts: Dict[str, int] = {}
+    for version in per_session.values():
+        if version:
+            counts[version] = counts.get(version, 0) + 1
+    model["body_versions"] = sorted(counts)
+    model["body_source"] = "metadata" if recorded else "date"
+    if not bodies:
+        return []
+    checks = []
+
+    def add(level, message):
+        checks.append({"key": "body", "level": level, "message": message})
+
+    names = ", ".join(f"{v}（{n} セッション）" for v, n in sorted(counts.items()))
+    unknown = [s for s, v in per_session.items() if not v]
+    if len(counts) > 1:
+        add("warn", f"違う車体の版のデータを混ぜて学習した: {names}")
+    if unknown:
+        add("warn", f"車体の版が分からないセッション: {', '.join(unknown)}")
+    by_id = {v["id"]: v for v in bodies}
+    changed = [
+        v
+        for v, fp in (record.get("versions") or {}).items()
+        if v in by_id and fp and by_id[v]["fingerprint"] != fp
+    ]
+    if changed:
+        add("warn", f"学習の後に車体の版の中身が書き換えられた: {', '.join(changed)}")
+    if current_body and counts and current_body["id"] not in counts:
+        add(
+            "warn",
+            f"学習データの車体（{', '.join(sorted(counts))}）と今の車体（{current_body['id']}）"
+            "が違う。走らせる前に動きを確かめる",
+        )
+    elif len(counts) == 1 and not changed:
+        add("ok", f"車体の版 {names} のデータで学習")
+    return checks
+
+
 # --------------------------------------------------------------------------- catalog
 
 
@@ -455,6 +533,7 @@ def build_catalog(
     runs_dir: Path,
     deployments_file: Optional[Path] = None,
     jobs_dir: Optional[Path] = None,
+    body_file: Optional[Path] = None,
 ) -> Dict[str, Any]:
     """画面に出す全体像。モデル、データ、評価、配置、走行と、その間のつながり"""
     data_dirs = list(data_dirs)
@@ -463,6 +542,8 @@ def build_catalog(
     models = collect_models(models_dir)
     cv = collect_cv(cv_dir)
     runs = collect_runs(runs_dir)
+    bodies, body_error = _load_bodies(body_file)
+    _attach_bodies(bodies, sessions, runs)
     deployments = stages.load_deployments(deployments_file)
     deployed = stages.deployed_version(deployments)
     jobs = collect_jobs(jobs_dir) if jobs_dir else []
@@ -472,8 +553,10 @@ def build_catalog(
         if model["data_fingerprint"]:
             by_fp.setdefault(model["data_fingerprint"], []).append(model["version"])
 
+    current_body = body.current(bodies) if bodies else None
     for model in models:
         checks = model_checks(model, sessions_by_id)
+        checks += body_checks(model, sessions_by_id, bodies, current_body)
         model["checks"] = checks
         model["health"] = health(checks)
         model_runs = [r for r in runs if r["model_version"] == model["version"]]
@@ -491,6 +574,14 @@ def build_catalog(
                 if r["data_fingerprint"]
                 and model["data_fingerprint"]
                 and r["data_fingerprint"] != model["data_fingerprint"]
+            ),
+            # 学習データと違う車体の版で走った回数
+            "body_mismatch": sum(
+                1
+                for r in model_runs
+                if r["body_version"]
+                and model["body_versions"]
+                and r["body_version"] not in model["body_versions"]
             ),
         }
         model["cv"] = [
@@ -524,6 +615,15 @@ def build_catalog(
     pi_runs = sorted((r for r in runs if r["where"] == "pi"), key=lambda r: r["started_at"] or "")
     last_pi_run = pi_runs[-1] if pi_runs else None
 
+    body_list = body.public(bodies)
+    for entry in body_list:
+        mine = [s for s in sessions if s["body_version"] == entry["id"]]
+        entry["sessions"] = [s["session_id"] for s in mine]
+        entry["frames"] = sum(s["frames"] for s in mine)
+        entry["models"] = [m["version"] for m in models if entry["id"] in m["body_versions"]]
+        entry["runs"] = sum(1 for r in runs if r["body_version"] == entry["id"])
+        entry["current"] = bool(current_body and current_body["id"] == entry["id"])
+
     return {
         "generated_at": stages.now_iso(),
         "models": models,
@@ -531,7 +631,10 @@ def build_catalog(
         "cv": cv,
         "runs": runs,
         "deployments": deployments,
+        "bodies": body_list,
         "summary": {
+            "body_current": current_body["id"] if current_body else None,
+            "body_error": body_error,
             "models": len(models),
             "usable_models": len(approved),
             "sessions": len(sessions),
@@ -568,7 +671,14 @@ def lineage_graph(models, sessions, cv, runs) -> Dict[str, Any]:
         nodes.append({"id": node_id, "kind": kind, "label": label, "column": column, **extra})
 
     for s in sessions:
-        node(f"session:{s['session_id']}", "session", s["session_id"], 0, frames=s["frames"])
+        node(
+            f"session:{s['session_id']}",
+            "session",
+            s["session_id"],
+            0,
+            frames=s["frames"],
+            body=s.get("body_version"),
+        )
         if s.get("annotation_hash"):
             node(f"annotation:{s['session_id']}", "annotation", f"ラベル {s['session_id']}", 1)
             edges.append(
@@ -643,6 +753,7 @@ def default_catalog(base: Path = Path(".")) -> Dict[str, Any]:
         runs_dir=base / "data" / "runs",
         deployments_file=None,
         jobs_dir=base / "data" / "jobs",
+        body_file=base / "configs" / "body.toml",
     )
 
 

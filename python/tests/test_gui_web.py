@@ -234,3 +234,13 @@ def test_every_tool_has_a_manual_section(running):
         w.key for w in WORKFLOWS if f'id="{windows.get(w.key, "tool-" + w.key)}"' not in html
     ]
     assert missing == []
+
+
+def test_phases_and_workflows_share_the_phase_ids(running):
+    _, port, _ = running
+    status, body = request(port, "GET", "/api/phases")
+    assert status == 200
+    phases = {p["id"]: p for p in json.loads(body)}
+    assert phases["train"]["number"] == 3 and phases["train"]["page"] == "models"
+    status, body = request(port, "GET", "/api/workflows")
+    assert all(w["phase"] in phases for w in json.loads(body))

@@ -536,6 +536,8 @@ def train(data_dir, output_model_dir, params: Optional[Dict[str, Any]] = None) -
                 "unknown": sum(1 for s in dataset.samples if s["blocked"] is None),
             },
         },
+        # 学習データを集めた車体の版（configs/body.toml）
+        "body": provenance.body_record(dataset.source_session_dirs),
         "code": provenance.git_state(),
         "environment": provenance.environment(),
         "history": history,

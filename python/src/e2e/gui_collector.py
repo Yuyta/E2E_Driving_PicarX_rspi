@@ -36,6 +36,7 @@ from src.e2e.motion.monitor import (
     describe,
     record_motion_event,
 )
+from src.e2e.registry import body as body_versions
 from src.gui import theme
 from src.gui.theme import APP_STYLE
 from src.models import DRIVE_SPEED, MIN_MOVING_SPEED, DriveDirection, RobotStatus
@@ -157,6 +158,8 @@ class E2ECollectorWindow(QMainWindow):
         self.images_dir = self.session_dir / "images"
         self.labels_file = self.session_dir / "labels.jsonl"
         self.images_dir.mkdir(parents=True, exist_ok=True)
+        # どの車体（装備と校正）で集めたかを残す（configs/body.toml の今の版）
+        body_versions.record_session(self.session_dir)
 
         self._init_ui()
 

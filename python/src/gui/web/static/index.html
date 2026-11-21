@@ -19,13 +19,17 @@
       </div>
       <nav id="nav">
         <a href="#/overview" data-route="overview"><i data-icon="grid"></i>概要</a>
-        <div class="nav-group">MLOps</div>
-        <a href="#/models" data-route="models"><i data-icon="cube"></i>モデル</a>
-        <a href="#/compare" data-route="compare"><i data-icon="compare"></i>比較・評価</a>
-        <a href="#/data" data-route="data"><i data-icon="db"></i>データ</a>
+        <div class="nav-group">開発の流れ</div>
+        <!-- フェーズ順の画面（番号と色は app.js がフェーズの定義から付ける） -->
+        <a href="#/body" data-route="body" data-phases="prepare"><span class="nav-text">車体</span></a>
+        <a href="#/data" data-route="data" data-phases="collect curate"><span class="nav-text">データ</span></a>
+        <a href="#/models" data-route="models" data-phases="train"><span class="nav-text">モデル</span></a>
+        <a href="#/compare" data-route="compare" data-phases="evaluate"><span class="nav-text">比較・評価</span></a>
+        <a href="#/deploy" data-route="deploy" data-phases="deploy"><span class="nav-text">配置</span></a>
+        <a href="#/runs" data-route="runs" data-phases="operate"><span class="nav-text">走行記録</span></a>
+        <div class="nav-loop" aria-hidden="true">↺ 運用から次の収集へ</div>
+        <div class="nav-group">横断</div>
         <a href="#/lineage" data-route="lineage"><i data-icon="flow"></i>来歴</a>
-        <a href="#/runs" data-route="runs"><i data-icon="road"></i>走行記録</a>
-        <div class="nav-group">実行</div>
         <a href="#/tools" data-route="tools"><i data-icon="play"></i>ツール</a>
         <a href="#/jobs" data-route="jobs"><i data-icon="list"></i>ジョブ<span id="nav-running" class="nav-count" hidden></span></a>
       </nav>
@@ -37,6 +41,7 @@
     <div class="main">
       <header class="topbar">
         <button id="menu-toggle" class="ghost icon-only" type="button" aria-label="メニュー">☰</button>
+        <span id="page-phase" class="page-phase"></span>
         <h1 id="page-title">概要</h1>
         <div class="topbar-right">
           <span id="robot-pill" class="pill neutral" title="Pi の API サーバーへの接続"><span class="dot"></span>Pi 確認中…</span>

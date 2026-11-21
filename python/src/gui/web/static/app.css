@@ -92,6 +92,14 @@ h3 { font-size: 13px; margin: 0 0 8px; font-weight: 650; color: var(--ink-2); te
 #nav i { width: 16px; height: 16px; display: inline-grid; place-items: center; opacity: .85; }
 #nav i svg { width: 16px; height: 16px; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .nav-group { font-size: 11px; color: #6c7280; padding: 14px 10px 4px; letter-spacing: .08em; }
+#nav a[data-phases] { padding: 6px 10px; }
+#nav a[data-phases].active { box-shadow: inset 3px 0 0 var(--ph); }
+.nav-chips { display: inline-flex; gap: 2px; min-width: 44px; }
+.nav-chips .ph-chip { min-width: 19px; height: 19px; font-size: 11px; }
+.nav-text { display: flex; flex-direction: column; line-height: 1.25; min-width: 0; }
+.nav-text small { color: #8d93a0; font-size: 11px; }
+#nav a.active .nav-text small { color: #b9bec8; }
+.nav-loop { font-size: 11px; color: #6c7280; padding: 2px 10px 0 64px; }
 .nav-count { margin-left: auto; background: var(--accent); color: #fff; border-radius: 10px; font-size: 11px; padding: 0 7px; line-height: 18px; }
 .sidebar-foot { margin-top: auto; padding: 10px 0 4px; display: flex; flex-direction: column; gap: 8px; border-top: 1px solid #2a2e37; }
 .sidebar-foot .manual-link { color: var(--sidebar-ink); padding: 8px 10px; border-radius: 7px; display: flex; gap: 10px; align-items: center; font-size: 13.5px; }
@@ -150,12 +158,51 @@ h3 { font-size: 13px; margin: 0 0 8px; font-weight: 650; color: var(--ink-2); te
 .stat .value small { font-size: 14px; color: var(--muted); font-weight: 500; margin-left: 3px; }
 .stat .foot { color: var(--muted); font-size: 12px; }
 
-.pipeline { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 6px; }
-.pipeline a { display: flex; flex-direction: column; gap: 2px; padding: 10px 12px; border-radius: 8px; background: var(--surface-2); color: var(--ink); min-width: 0; }
-.pipeline a:hover { text-decoration: none; background: var(--accent-wash); }
-.pipeline b { font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-@media (max-width: 1100px) { .pipeline { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+/* ---------- MLOps phases（色は src/gui/workflows.py の PHASES から --ph で渡す） */
+.ph-chip { display: inline-grid; place-items: center; min-width: 20px; height: 20px; padding: 0 5px; border-radius: 10px; background: var(--ph, var(--muted)); color: #fff; font-size: 11.5px; font-weight: 700; line-height: 1; font-variant-numeric: tabular-nums; flex-shrink: 0; }
+.ph-chip.lg { min-width: 26px; height: 26px; border-radius: 13px; font-size: 13px; }
+
+.pipeline { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 8px; }
+.pipeline a { position: relative; display: flex; flex-direction: column; gap: 4px; padding: 12px 12px 10px; border-radius: 9px; background: var(--surface-2); color: var(--ink); min-width: 0; border-top: 3px solid var(--ph); transition: background .15s, transform .15s; }
+.pipeline a:hover { text-decoration: none; background: color-mix(in srgb, var(--ph) 10%, var(--surface)); transform: translateY(-1px); }
+.pipeline a:not(:last-child)::after { content: "›"; position: absolute; right: -7px; top: 50%; transform: translateY(-50%); color: var(--axis); font-size: 16px; z-index: 1; }
+.pipeline .step-head { display: flex; gap: 6px; align-items: center; font-size: 13px; }
+.pipeline .step-value { font-size: 20px; font-weight: 650; font-variant-numeric: tabular-nums; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.25; }
+.pipeline .step-value small { font-size: 12px; color: var(--muted); font-weight: 500; margin-left: 4px; }
+.pipeline .step-foot { font-size: 11.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 1100px) { .pipeline { grid-template-columns: repeat(4, minmax(0, 1fr)); } .pipeline a::after { display: none; } }
 @media (max-width: 560px) { .pipeline { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* 画面の上の「今どのフェーズか」 */
+.phase-head { background: var(--surface); border: 1px solid var(--ring); border-radius: var(--radius); box-shadow: var(--shadow); margin-bottom: 18px; overflow: hidden; }
+.phase-rail { list-style: none; margin: 0; padding: 10px 14px; display: flex; align-items: center; gap: 0; background: var(--surface-2); border-bottom: 1px solid var(--hair); overflow-x: auto; }
+.phase-rail li { display: flex; align-items: center; }
+.phase-rail li + li::before { content: ""; width: 18px; height: 2px; background: var(--axis); margin: 0 4px; flex-shrink: 0; }
+.phase-rail a { display: inline-flex; align-items: center; gap: 6px; padding: 3px 9px 3px 4px; border-radius: 999px; color: var(--ink-2); font-size: 12.5px; white-space: nowrap; }
+.phase-rail a .ph-chip { background: var(--surface); color: var(--ph); box-shadow: inset 0 0 0 1.5px var(--ph); }
+.phase-rail a:hover { text-decoration: none; color: var(--ink); background: var(--surface); }
+.phase-rail a.on { background: var(--ph); color: #fff; font-weight: 650; }
+.phase-rail a.on .ph-chip { background: #fff; color: var(--ph); box-shadow: none; }
+.phase-rail li.loop { color: var(--muted); font-size: 15px; padding-left: 2px; }
+.phase-blocks { display: flex; flex-direction: column; }
+.phase-block { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; padding: 12px 16px; border-left: 4px solid var(--ph); }
+.phase-block + .phase-block { border-top: 1px solid var(--hair); }
+.phase-title { display: flex; gap: 10px; align-items: center; min-width: 260px; flex: 1; }
+.phase-title b { font-size: 15px; margin-right: 8px; }
+.phase-title span:not(.ph-chip) { color: var(--ink-2); font-size: 13px; }
+.phase-tools { display: flex; gap: 6px; flex-wrap: wrap; }
+.tiny-badge { font-size: 10.5px; font-weight: 700; color: var(--bad-ink); background: var(--bad-wash); border-radius: 4px; padding: 0 4px; }
+button.danger-ghost { background: transparent; color: var(--bad-ink); border-color: color-mix(in srgb, var(--bad) 45%, transparent); }
+button.danger-ghost:hover { background: var(--bad-wash); }
+.page-phase { display: inline-flex; gap: 4px; }
+.page-phase:empty { display: none; }
+
+/* 車体の版 */
+.badge.body { border-color: color-mix(in srgb, #6f7a8c 45%, transparent); color: var(--ink-2); font-family: var(--mono); font-weight: 600; text-decoration: none; }
+.badge.body:hover { background: var(--surface-2); text-decoration: none; }
+.badge.body .est { font-family: var(--font); font-size: 10px; color: var(--muted); font-weight: 500; }
+.badge.body.changed { border-color: var(--warn); background: var(--warn-wash); color: var(--warn-ink); }
+.body-id { font-family: var(--mono); font-size: 22px; font-weight: 700; color: #fff; background: #6f7a8c; border-radius: 8px; padding: 0 10px; }
 
 /* key facts (使用中 / 最新 / 有効) */
 .facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0; }
@@ -299,10 +346,16 @@ ul.checks li { display: flex; gap: 8px; align-items: flex-start; font-size: 13px
 .frames figcaption { position: absolute; left: 0; right: 0; bottom: 0; font-size: 11px; color: #fff; background: linear-gradient(transparent, rgba(0, 0, 0, .65)); padding: 10px 6px 3px; font-family: var(--mono); }
 
 /* ---------- tools */
-.tool-group { margin-bottom: 22px; }
-.tool-group > h2 { margin-bottom: 10px; display: flex; gap: 8px; align-items: center; }
+.tool-group { margin-bottom: 26px; scroll-margin-top: 70px; }
+.tool-group > header { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; padding-bottom: 8px; border-bottom: 2px solid color-mix(in srgb, var(--ph) 35%, transparent); }
+.tool-group > header .sub { color: var(--ink-2); font-size: 13px; }
+.tool-group > header .open-page { margin-left: auto; }
 .tools { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
-.tool { display: flex; flex-direction: column; gap: 6px; }
+.tool { display: flex; flex-direction: column; gap: 6px; border-top: 3px solid var(--ph, var(--hair)); }
+.phase-jump { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 20px; position: sticky; top: 57px; z-index: 4; padding: 8px 0; background: color-mix(in srgb, var(--page) 92%, transparent); backdrop-filter: blur(6px); }
+.phase-jump a { display: inline-flex; gap: 6px; align-items: center; padding: 4px 10px 4px 4px; border-radius: 999px; border: 1px solid var(--hair); background: var(--surface); color: var(--ink); font-size: 13px; }
+.phase-jump a:hover { text-decoration: none; border-color: var(--ph); }
+.phase-jump small { color: var(--muted); font-size: 11.5px; }
 .tool .title { font-weight: 650; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .tool .desc { color: var(--ink-2); font-size: 13px; flex: 1; }
 .tool .module { font-family: var(--mono); font-size: 11.5px; color: var(--muted); }
@@ -368,7 +421,7 @@ ul.checks li { display: flex; gap: 8px; align-items: flex-start; font-size: 13px
 .manual table { margin: 8px 0 12px; }
 .manual td, .manual th { vertical-align: top; }
 .manual th { position: static; }
-.manual table.args td:first-child { white-space: nowrap; }
+.manual table.args td:first-child, .manual table.phase-table td:first-child { white-space: nowrap; }
 .manual .tool { border: 1px solid var(--hair); border-radius: 10px; padding: 14px 16px; margin: 12px 0; background: var(--surface); scroll-margin-top: 70px; }
 .manual .when { background: var(--accent-wash); border-radius: 7px; padding: 8px 12px; margin: 6px 0 10px; }
 .manual .example { color: var(--ink-2); font-size: 13px; }
