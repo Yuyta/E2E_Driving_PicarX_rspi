@@ -278,7 +278,7 @@ class LauncherWindow(QMainWindow):
         web_button = QPushButton("Control Center を開く（ブラウザ）")
         web_button.setObjectName("primary")
         web_button.setToolTip(
-            "モデルとデータの来歴、採否、比較、デプロイ、ジョブの記録を管理する画面"
+            "モデルとデータのトレーサビリティ、採否、比較、デプロイ、ジョブの記録を管理する画面"
         )
         web_button.clicked.connect(self._open_web)
         header_row = QHBoxLayout()

@@ -45,7 +45,7 @@
       <tr><td>モデルを Pi に入れて使う</td><td><a href="#/manual?s=tool-deploy_push">Pi へデプロイ</a>（失敗したら <a href="#/manual?s=tool-deploy_rollback">Pi のモデルを戻す</a>）</td><td>—</td></tr>
       <tr><td>Pi で自律走行させる</td><td><a href="#/manual?s=tool-pi_autopilot">Pi 自律走行</a></td><td class="moves-cell">動く</td></tr>
       <tr><td>走りの良し悪しをモデルごとに比べる</td><td><a href="#/manual?s=tool-deploy_pull_runs">走行記録の取り込み</a> → <a href="#/manual?s=cc-runs">走行記録</a> 画面</td><td>—</td></tr>
-      <tr><td>どのモデルがどのデータから作られたか見る</td><td><a href="#/manual?s=cc-lineage">来歴</a> 画面、モデル詳細の「来歴」タブ</td><td>—</td></tr>
+      <tr><td>どのモデルがどのデータから作られたか見る</td><td><a href="#/manual?s=cc-lineage">トレーサビリティ</a> 画面、モデル詳細の「トレーサビリティ」タブ</td><td>—</td></tr>
       <tr><td>車体の安全機能が働くか確かめる</td><td><a href="#/manual?s=tool-m1_check">安全チェック</a></td><td>一部動く</td></tr>
       <tr><td>動きの食い違いの検出を校正する</td><td><a href="#/manual?s=tool-m3_check">動きの計測</a></td><td>一部動く</td></tr>
       <tr><td>車輪が回り始める速度を測る</td><td><a href="#/manual?s=tool-speed_check">速度チェック</a></td><td class="moves-cell">動く</td></tr>
@@ -68,7 +68,7 @@
       <tr><td><span class="ph-icon" data-phase="evaluate" style="--ph: #c46f1a"></span> モデル評価</td><td>交差検証で今の設定と比べ、モデル詳細の「採否を変える」で <span class="badge stage-approved">有効</span> か <span class="badge stage-rejected">却下</span> にする（理由も書く）</td><td><a href="#/manual?s=cc-compare">比較・評価</a></td><td><a href="#/manual?s=tool-cross_validate">交差検証</a>、<a href="#/manual?s=tool-compare_cv">交差検証の比較</a></td></tr>
       <tr><td><span class="ph-icon" data-phase="deploy" style="--ph: #2f9e5b"></span> デプロイ</td><td>有効なモデルを Pi へ送り、使用中にする。走りが悪ければ戻す</td><td><a href="#/manual?s=cc-deploy">デプロイ</a></td><td><a href="#/manual?s=tool-deploy_push">Pi へデプロイ</a>、<a href="#/manual?s=tool-deploy_rollback">Pi のモデルを戻す</a></td></tr>
       <tr><td><span class="ph-icon" data-phase="operate" style="--ph: #c8467f"></span> 実走行</td><td>自律走行させ、走行の記録を取り込んで人の介入の回数を比べる。介入が多い場面のデータを集めに 1 へ戻る</td><td><a href="#/manual?s=cc-runs">走行記録</a></td><td><a href="#/manual?s=tool-pi_autopilot">Pi 自律走行</a>、<a href="#/manual?s=tool-deploy_pull_runs">走行記録の取り込み</a></td></tr>
-      <tr><td><span class="ph-icon" data-phase="common" style="--ph: #898781"></span> 共通</td><td>どのフェーズでも使う</td><td><a href="#/manual?s=cc-lineage">来歴</a>、<a href="#/manual?s=cc-tools">ツール・ジョブ</a></td><td><a href="#/manual?s=gui-app">会話・手動操作</a></td></tr>
+      <tr><td><span class="ph-icon" data-phase="common" style="--ph: #898781"></span> 共通</td><td>どのフェーズでも使う</td><td><a href="#/manual?s=cc-lineage">トレーサビリティ</a>、<a href="#/manual?s=cc-tools">ツール・ジョブ</a></td><td><a href="#/manual?s=gui-app">会話・手動操作</a></td></tr>
     </tbody>
   </table>
 </section>
@@ -86,10 +86,10 @@
       <tr><td>Pi で使用中（デプロイの記録）</td><td>Control Center か <code>src.e2e.deploy.pi</code> で最後に使用中にした版。記録の外で Pi を操作すると合わなくなります</td></tr>
       <tr><td>Pi の最後の走行で使った版</td><td>取り込んだ走行の記録（<code>data/runs</code>）のうち、最後の走行の版。上と違う時は「Pi のモデル一覧」で確かめます</td></tr>
       <tr><td>最新のモデル</td><td>作った時刻が一番新しい版</td></tr>
-      <tr><td>最新の有効なモデル</td><td>「有効」にしてあり、来歴の確認に誤りがない版のうち、一番新しいもの。<em>走らせるならこれ</em>です</td></tr>
+      <tr><td>最新の有効なモデル</td><td>「有効」にしてあり、トレーサビリティの確認に誤りがない版のうち、一番新しいもの。<em>走らせるならこれ</em>です</td></tr>
     </tbody>
   </table>
-  <p>「確認すること」には、来歴の誤り、採否を決めていないモデル、ラベルのないセッションなどが出ます。押すとその画面へ移ります。</p>
+  <p>「確認すること」には、トレーサビリティの誤り、採否を決めていないモデル、ラベルのないセッションなどが出ます。押すとその画面へ移ります。</p>
 
   <h3 id="cc-body"><span class="ph-icon" data-phase="prepare" style="--ph: #6f7a8c"></span> 車体</h3>
   <p>車体の版（走行データを集めた時の装備と校正）を見ます。版は <code>configs/body.toml</code> に残し、使い始めた日時の順に並びます。</p>
@@ -107,15 +107,15 @@
     <tbody>
       <tr><td><span class="badge stage-candidate">候補</span></td><td>学習しただけで、まだ判断していない（作った直後はこれ）</td></tr>
       <tr><td><span class="badge stage-approved">有効</span></td><td>走行に使ってよいと判断した。理由が必要です</td></tr>
-      <tr><td><span class="badge stage-rejected">却下</span></td><td>使わない（性能や来歴に問題がある）。理由が必要です</td></tr>
+      <tr><td><span class="badge stage-rejected">却下</span></td><td>使わない（性能やトレーサビリティに問題がある）。理由が必要です</td></tr>
       <tr><td><span class="badge stage-archived">廃止</span></td><td>以前は使っていたが、新しい版に替えた</td></tr>
     </tbody>
   </table>
-  <p>採否は <code>models/registry.json</code> に、前後の採否・時刻・理由付きで残ります。「来歴の確認」が <span class="health error">要対応</span> のモデルは、「有効」にしても有効なモデルとして扱いません。</p>
+  <p>採否は <code>models/registry.json</code> に、前後の採否・時刻・理由付きで残ります。「トレーサビリティの確認」が <span class="health error">要対応</span> のモデルは、「有効」にしても有効なモデルとして扱いません。</p>
   <p>モデル詳細のタブ:</p>
   <ul>
     <li><b>概要</b>: 確認の結果（ONNX があるか、どのコミットで学習したか、データが学習時のままか）、要点、採否の履歴</li>
-    <li><b>来歴</b>: どのセッションを学習・検証に使ったか、今のデータが学習時と同じか、コマンド・コード・パラメーター・ハッシュ</li>
+    <li><b>トレーサビリティ</b>: どのセッションを学習・検証に使ったか、今のデータが学習時と同じか、コマンド・コード・パラメーター・ハッシュ</li>
     <li><b>学習</b>: 損失の推移（線をなぞると値が出ます）と、保存した最良のエポック</li>
     <li><b>評価</b>: 向き別・意図別の誤差、同じデータの交差検証と、基準（常に直進、意図の平均）との比較</li>
     <li><b>走行・デプロイ</b>: Pi での走行の回数と介入、デプロイの履歴</li>
@@ -129,8 +129,8 @@
   <h3 id="cc-data">データ</h3>
   <p>データ収集とデータ整備の画面です。セッションごとの車体の版、フレーム数、時間、舵角の分布（左・直進・右）、マニフェスト、手作業のラベル、使ったモデルです。行を押すと、等間隔に抜き出した画像が見られます。ラベル（<code>labels.jsonl</code>）のないセッションは記録が途中で止まったもので、学習には使われません。</p>
 
-  <h3 id="cc-lineage">来歴</h3>
-  <p>走行データ → 手作業のラベル → モデル → 交差検証・Pi での走行 のつながりの図です。節を押すと、その元になったものと、そこから作られたものを強調します。実線は学習に使用、破線は検証に使用、点線は同じデータで評価、を表します。</p>
+  <h3 id="cc-lineage">トレーサビリティ</h3>
+  <p>どのモデルがどのデータから作られ、どう評価され、どこで走ったかをたどる画面です（来歴、lineage とも呼びます）。走行データ → 手作業のラベル → モデル → 交差検証・Pi での走行 のつながりを図で見せます。節を押すと、その元になったものと、そこから作られたものを強調します。実線は学習に使用、破線は検証に使用、点線は同じデータで評価、を表します。</p>
 
   <h3 id="cc-deploy"><span class="ph-icon" data-phase="deploy" style="--ph: #2f9e5b"></span> デプロイ</h3>
   <p>Pi で使用中の版、最後の走行で使った版、最新の有効なモデル、今の車体を並べます。「デプロイするモデル」の表は有効なモデルが上に並び、「Pi へデプロイ…」でそのモデルを入れた状態の起動の画面を開きます。学習データの車体が今の車体と違うモデルには「今と違う」の印が付きます。下にはデプロイの履歴（<code>data/deployments.jsonl</code>）が出ます。</p>
@@ -140,7 +140,7 @@
   <p>Pi の自律走行の記録です。モデルごとに、10分あたりの人の介入の回数を比べます（少ないほどよい）。記録は「走行記録の取り込み」で Pi から持ってきます。</p>
 
   <h3 id="cc-tools">ツール・ジョブ</h3>
-  <p>「ツール」には、全部のツールがフェーズの順に並びます。上のフェーズの名前を押すと、そこへ移ります。ツールを起動すると、「ジョブ」に出力と結果が残ります（<code>data/jobs</code>）。ジョブの画面では、出力がそのまま流れ、「同じ引数でもう一度…」で再実行できます。学習のジョブは、作ったモデルの「来歴」タブからたどれます。</p>
+  <p>「ツール」には、全部のツールがフェーズの順に並びます。上のフェーズの名前を押すと、そこへ移ります。ツールを起動すると、「ジョブ」に出力と結果が残ります（<code>data/jobs</code>）。ジョブの画面では、出力がそのまま流れ、「同じ引数でもう一度…」で再実行できます。学習のジョブは、作ったモデルの「トレーサビリティ」タブからたどれます。</p>
   <p>起動の画面では、フォルダやファイルを指す引数（設定ファイル、データのフォルダ、結果の保存先、モデルなど）が、既定値の入った欄になります。「選ぶ…」でプロジェクト（<code>python/</code>）の中から選べます。これから作る出力先（結果の保存先、出力先のフォルダ）は、置き場所のフォルダを開いて名前を決めます。それ以外の引数は「ほかの引数」に、ターミナルでの <code>python -m &lt;モジュール&gt;</code> の後ろと同じ書き方で書きます。下の「実行するコマンド」で、実際に動かすコマンドを確かめられます。「操作の例」から選ぶと、よく使う引数が入ります。<code>models/vNNN</code> を含むツールでは、「モデル」から版を選べます。</p>
 </section>
 
@@ -354,7 +354,7 @@
     <table class="args"><thead><tr><th>引数</th><th>意味</th><th>既定</th></tr></thead><tbody>
       <tr><td><code>--data_dir</code> <span class="req">必須</span></td><td>データ（学習と同じ書き方）</td><td>—</td></tr>
       <tr><td><code>--config</code></td><td>設定のファイル（普段は <code>configs/train.toml</code>）</td><td>なし</td></tr>
-      <tr><td><code>--output</code></td><td>結果の JSON。<em>何を変えたか分かる名前</em>にします（例: <code>data/cv/flip_on.json</code>）。比較と来歴に使います</td><td>なし（画面に出すだけ）</td></tr>
+      <tr><td><code>--output</code></td><td>結果の JSON。<em>何を変えたか分かる名前</em>にします（例: <code>data/cv/flip_on.json</code>）。比較とトレーサビリティに使います</td><td>なし（画面に出すだけ）</td></tr>
       <tr><td><code>--epochs</code> / <code>--seed</code></td><td>学習の回数 / 乱数の種</td><td>設定の値</td></tr>
       <tr><td><code>--blocked_loss_weight</code>、<code>--turn_intent</code>、<code>--blocked_stuck</code>、<code>--flip_augment</code></td><td>学習と同じ意味。試したい設定だけ変えます</td><td>設定の値</td></tr>
     </tbody></table>
@@ -472,7 +472,7 @@
       <tr><td>「トークンが違います」</td><td>サーバーを起動し直すと合言葉が変わります。ページを開き直します</td></tr>
       <tr><td>右上が「Pi 未接続」</td><td>Pi の電源、Wi-Fi、Pi の API サーバー（<code>./picar-x-rust</code>）を確かめます。車体を使わない作業（学習・評価・管理）はそのままできます</td></tr>
       <tr><td>Pi へのデプロイや取り込みのジョブが止まる・失敗する</td><td>SSH のパスワードを聞かれていると、ジョブでは入力できません。鍵で接続できるようにするか、ターミナルで実行します</td></tr>
-      <tr><td>モデルが「要対応」になる</td><td>学習の後にデータが変わったか、ONNX がありません。モデル詳細の「来歴の確認」で理由を見て、データを戻すか学習し直します</td></tr>
+      <tr><td>モデルが「要対応」になる</td><td>学習の後にデータが変わったか、ONNX がありません。モデル詳細の「トレーサビリティの確認」で理由を見て、データを戻すか学習し直します</td></tr>
       <tr><td>収集の fps が 10 未満</td><td>Wi-Fi が弱いか、Pi の負荷が高いです。Pi の近くで収集するか、ほかの処理を止めます</td></tr>
       <tr><td>Qt の画面の文字が重なる・はみ出す</td><td>ウィンドウを広げるか、列の境目を動かします。右の列は足りない時にスクロールします</td></tr>
     </tbody>
