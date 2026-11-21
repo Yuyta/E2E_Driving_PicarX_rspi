@@ -1,6 +1,7 @@
 """Unified desktop launcher for PiCar-X workflows."""
 
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
+    QFileDialog,
     QFormLayout,
     QFrame,
     QGridLayout,
@@ -28,7 +30,16 @@ from PySide6.QtWidgets import (
 )
 
 from src.gui import theme
-from src.gui.workflows import PHASES, WORKFLOWS, Phase, Workflow, workflows_in
+from src.gui.workflows import (
+    PATH_ARGS,
+    PHASES,
+    WORKFLOWS,
+    Phase,
+    Workflow,
+    join_path_args,
+    split_path_args,
+    workflows_in,
+)
 
 PYTHON_DIR = Path(__file__).resolve().parents[2]
 WEB_PORT = 8765
@@ -72,7 +83,7 @@ class PhaseBadge(QLabel):
 
 
 class PhaseFlow(QFrame):
-    """準備 → 収集 → … → 運用 → 収集へ戻る、の流れ"""
+    """車体準備 → データ収集 → … → 実走行 → データ収集へ戻る、の流れ"""
 
     def __init__(self):
         super().__init__()
@@ -91,7 +102,7 @@ class PhaseFlow(QFrame):
             name.setObjectName("phaseName")
             name.setToolTip(phase.summary)
             row.addWidget(name)
-        back = QLabel("→ 収集へ戻る")
+        back = QLabel("→ データ収集へ戻る")
         back.setObjectName("muted")
         row.addWidget(back)
         row.addStretch(1)
@@ -140,12 +151,17 @@ class WorkflowCard(QFrame):
 
 
 class ArgumentsDialog(QDialog):
+    """起動の設定。フォルダやファイルの引数は、既定値の入った欄と「選ぶ…」にする"""
+
     def __init__(self, workflow: Workflow, parent=None):
         super().__init__(parent)
+        self.workflow = workflow
         self.setWindowTitle(f"{workflow.title} の起動設定")
-        self.setMinimumWidth(480)
+        self.setMinimumWidth(560)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("操作の例を選ぶか、下の引数を編集してください。"))
+        intro = QLabel(workflow.description)
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
         self.preset = QComboBox()
         self.preset.addItem("選択してください", None)
         for label, value in workflow.examples:
@@ -153,16 +169,20 @@ class ArgumentsDialog(QDialog):
         if workflow.examples:
             layout.addWidget(QLabel("操作の例"))
             layout.addWidget(self.preset)
-        form = QFormLayout()
-        self.arguments = QLineEdit(workflow.arguments)
-        self.arguments.setClearButtonEnabled(True)
-        form.addRow("実行引数", self.arguments)
-        layout.addLayout(form)
-        example_text = workflow.arguments or "追加の引数はありません。"
-        hint = QLabel(f"既定値・例: {example_text}")
-        hint.setWordWrap(True)
-        hint.setObjectName("muted")
-        layout.addWidget(hint)
+        self.form_box = QWidget()
+        self.form = QFormLayout(self.form_box)
+        self.form.setContentsMargins(0, 6, 0, 0)
+        layout.addWidget(self.form_box)
+        self.preview = QLabel()
+        self.preview.setWordWrap(True)
+        self.preview.setObjectName("muted")
+        self.preview.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        layout.addWidget(self.preview)
+        self.fields: list = []
+        self.rest = QLineEdit()
+        self.rest.setPlaceholderText("なし")
+        self.rest.textChanged.connect(self._update_preview)
+        self._fill(workflow.arguments)
         self.preset.currentIndexChanged.connect(self._apply_preset)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         buttons.button(QDialogButtonBox.Ok).setText("起動")
@@ -171,10 +191,71 @@ class ArgumentsDialog(QDialog):
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
 
+    def _fill(self, text: str):
+        try:
+            tokens = shlex.split(text)
+        except ValueError:
+            tokens = text.split()
+        rest, fields = split_path_args(tokens)
+        while self.form.rowCount():
+            self.form.removeRow(0)  # rest の欄も消えるので作り直す
+        self.rest = QLineEdit(shlex.join(rest))
+        self.rest.setPlaceholderText("なし")
+        self.rest.textChanged.connect(self._update_preview)
+        self.fields = []
+        for flag, value in fields:
+            spec = PATH_ARGS[flag]
+            edit = QLineEdit(value)
+            edit.textChanged.connect(self._update_preview)
+            pick = QPushButton("選ぶ…")
+            pick.clicked.connect(lambda _=False, e=edit, s=spec: self._pick(e, s))
+            row = QHBoxLayout()
+            row.addWidget(edit, 1)
+            row.addWidget(pick)
+            self.form.addRow(f"{spec.label}（{flag}）", row)
+            self.fields.append((flag, edit))
+        self.form.addRow("ほかの引数" if fields else "実行引数", self.rest)
+        self._update_preview()
+
+    def _pick(self, edit: QLineEdit, spec):
+        current = Path(edit.text().strip() or ".")
+        start = PYTHON_DIR / current
+        if spec.kind == "dir":
+            chosen = QFileDialog.getExistingDirectory(self, f"{spec.label}を選ぶ", str(start))
+        elif spec.kind == "file":
+            patterns = " ".join(f"*{ext}" for ext in spec.exts)
+            chosen, _ = QFileDialog.getOpenFileName(
+                self, f"{spec.label}を選ぶ", str(start.parent), f"{spec.label} ({patterns})"
+            )
+        else:
+            # これから作るもの。名前ごと決める（フォルダもファイルも、ツールが作る）
+            chosen, _ = QFileDialog.getSaveFileName(
+                self, f"{spec.label}を決める", str(start), options=QFileDialog.DontConfirmOverwrite
+            )
+        if chosen:
+            path = Path(chosen).resolve()
+            try:
+                edit.setText(path.relative_to(PYTHON_DIR.resolve()).as_posix())
+            except ValueError:
+                edit.setText(path.as_posix())
+
     def _apply_preset(self, index: int):
         value = self.preset.itemData(index)
         if value is not None:
-            self.arguments.setText(value)
+            self._fill(value)
+
+    def argument_list(self) -> list:
+        """起動する引数。ほかの引数の書き方が正しくなければ ValueError"""
+        return join_path_args(
+            shlex.split(self.rest.text()), [(flag, edit.text()) for flag, edit in self.fields]
+        )
+
+    def _update_preview(self, *_):
+        try:
+            args = shlex.join(self.argument_list())
+        except ValueError:
+            args = "（引数の書き方を確認してください）"
+        self.preview.setText(f"実行するコマンド: python -m {self.workflow.module} {args}")
 
 
 class LauncherWindow(QMainWindow):
@@ -196,7 +277,9 @@ class LauncherWindow(QMainWindow):
         header.setObjectName("header")
         web_button = QPushButton("Control Center を開く（ブラウザ）")
         web_button.setObjectName("primary")
-        web_button.setToolTip("モデルとデータの来歴、採否、比較、配置、ジョブの記録を管理する画面")
+        web_button.setToolTip(
+            "モデルとデータの来歴、採否、比較、デプロイ、ジョブの記録を管理する画面"
+        )
         web_button.clicked.connect(self._open_web)
         header_row = QHBoxLayout()
         header_row.addWidget(header)
@@ -310,9 +393,7 @@ class LauncherWindow(QMainWindow):
         if dialog.exec() != QDialog.Accepted:
             return
         try:
-            import shlex
-
-            parsed_arguments = shlex.split(dialog.arguments.text())
+            parsed_arguments = dialog.argument_list()
         except ValueError as error:
             QMessageBox.warning(self, "引数を確認してください", str(error))
             return

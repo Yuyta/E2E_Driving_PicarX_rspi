@@ -244,3 +244,61 @@ def test_phases_and_workflows_share_the_phase_ids(running):
     assert phases["train"]["number"] == 3 and phases["train"]["page"] == "models"
     status, body = request(port, "GET", "/api/workflows")
     assert all(w["phase"] in phases for w in json.loads(body))
+
+
+# ---------------------------------------------------------------- folder and file arguments
+
+
+def test_browse_lists_only_inside_the_project(tmp_path):
+    (tmp_path / "data" / "raw" / "s1").mkdir(parents=True)
+    (tmp_path / "data" / "cv.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "data" / ".hidden").mkdir()
+    (tmp_path / "data" / "__pycache__").mkdir()
+    app = server.App(base=tmp_path, token="t", jobs=object(), robot=lambda: None)
+    listing = app.browse("data")
+    assert listing["path"] == "data" and listing["dirs"] == ["raw"]
+    assert [f["name"] for f in listing["files"]] == ["cv.json"]
+    # まだない出力先は、あるところまで上がって開く
+    assert app.browse("data/cv/new_cv.json")["path"] == "data"
+    assert app.browse("")["path"] == ""
+    with pytest.raises(PermissionError):
+        app.browse("..")
+    with pytest.raises(PermissionError):
+        app.browse("data/../../outside")
+
+
+def test_browse_and_path_args_over_http(running):
+    _, port, _ = running
+    status, body = request(port, "GET", "/api/path_args")
+    assert status == 200 and json.loads(body)["--data_dir"]["kind"] == "dir"
+    status, _ = request(port, "GET", "/api/browse?path=..")
+    assert status == 409
+    status, _ = request(port, "GET", "/api/browse?path=.", token=None)
+    assert status == 401
+
+
+def test_path_arguments_split_and_join_back():
+    from src.gui.workflows import PATH_ARGS, join_path_args, split_path_args
+
+    tokens = ["push", "--model_dir", "models/v006", "--output=dist/models", "--verify"]
+    rest, fields = split_path_args(tokens)
+    assert rest == ["push", "--verify"]
+    assert fields == [("--model_dir", "models/v006"), ("--output", "dist/models")]
+    assert join_path_args(rest, fields) == [
+        "push",
+        "--verify",
+        "--model_dir",
+        "models/v006",
+        "--output",
+        "dist/models",
+    ]
+    # 既定の引数にあるフォルダやファイルの引数は、すべて欄になる
+    for workflow in WORKFLOWS:
+        _, found = split_path_args(workflow.arguments.split())
+        flags = [
+            t
+            for t in workflow.arguments.split()
+            if t.startswith("--") and "/" in workflow.arguments
+        ]
+        assert all(f in PATH_ARGS for f, _ in found)
+        assert not any(t in PATH_ARGS for t in flags) or found

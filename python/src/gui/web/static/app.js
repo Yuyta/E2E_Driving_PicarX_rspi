@@ -136,7 +136,7 @@ function phaseCounts(c) {
 }
 
 let flowSeq = 0;
-/** MLOps の流れの図。段階を線でつなぎ、記録のある区間に粒を流す。運用から収集へ戻る輪も描く
+/** MLOps の流れの図。段階を線でつなぎ、記録のある区間に粒を流す。実走行からデータ収集へ戻る輪も描く
  *  nodes: 各段階の下に出す中身（なければ名前だけの小さい図）。current: 強調する段階 */
 function flowDiagram({ counts, current = [], details, compact }) {
   const ps = loopPhases();
@@ -170,7 +170,7 @@ function flowDiagram({ counts, current = [], details, compact }) {
       parts.push(s("path", { class: "flow-base", d }));
       if (flowing(i)) parts.push(s("path", { class: "flow-dots", d, stroke: `url(#${gid})` }));
     }
-    // 運用 → 収集 の輪（下を回って、収集の手前で本線に合流する）
+    // 実走行 → データ収集 の輪（下を回って、データ収集の手前で本線に合流する）
     if (xs.length > 2) {
       const R = W - 4, L = (xs[0] + xs[1]) / 2, yb = H - 3;
       const d = `M${xs[xs.length - 1]},${y} H${R - r} Q${R},${y} ${R},${y + r} V${yb - r} Q${R},${yb} ${R - r},${yb} H${L + r} Q${L},${yb} ${L},${yb - r} V${y + r} Q${L},${y} ${L + r},${y}`;
@@ -191,7 +191,9 @@ function buildNavFlow() {
   const ps = loopPhases();
   holder.style.setProperty("--flow-grad", `linear-gradient(to bottom, ${ps.map((p) => p.color).join(", ")})`);
   holder.replaceChildren(...ps.map((p) => h("a", { href: `#/${p.page}`, "data-route": p.page, style: { "--ph": p.color }, title: p.summary },
-    phaseIcon(p), h("span", { class: "nav-text" }, h("span", {}, p.title), h("small", {}, ROUTES[p.page]?.[0] || "")))));
+    phaseIcon(p), h("span", { class: "nav-text" }, h("span", {}, p.title),
+      // 画面の名前がフェーズの名前と同じ時（デプロイ）は繰り返さない
+      ROUTES[p.page]?.[0] && ROUTES[p.page][0] !== p.title ? h("small", {}, ROUTES[p.page][0]) : null))));
 }
 
 /** 画面の上に置く「今どのフェーズか」の流れの図と、そのフェーズで使うツール */
@@ -439,44 +441,156 @@ function nextVersion() {
   return `v${String((nums.length ? Math.max(...nums) : 0) + 1).padStart(3, "0")}`;
 }
 
+/* 引数の文字列 ⇔ フォーム。フォルダやファイルの引数（src/gui/workflows.py の PATH_ARGS）は欄と「選ぶ…」にする */
+function tokenize(text) {
+  const out = [];
+  const re = /"((?:[^"\\]|\\.)*)"|'([^']*)'|(\S+)/g;
+  let m;
+  while ((m = re.exec(text))) out.push(m[1] !== undefined ? m[1].replace(/\\(.)/g, "$1") : m[2] ?? m[3]);
+  return out;
+}
+const quoteArg = (s) => (s === "" || /[\s"'\\]/.test(s) ? `"${s.replace(/(["\\])/g, "\\$1")}"` : s);
+function parseArgs(text, specs) {
+  const toks = tokenize(text);
+  const fields = [], rest = [];
+  for (let i = 0; i < toks.length; i++) {
+    const [flag, inline] = toks[i].split(/=(.*)/s);
+    if (specs[flag]) {
+      const value = inline ?? (toks[i + 1] !== undefined && !toks[i + 1].startsWith("--") ? toks[++i] : "");
+      fields.push({ flag, value });
+    } else rest.push(toks[i]);
+  }
+  return { fields, rest: rest.map(quoteArg).join(" ") };
+}
+// 位置で決まる引数（push など）が先に来るよう、ほかの引数を前に置く
+const composeArgs = (rest, fields) => [rest.trim(), ...fields.filter((f) => f.value.trim()).map((f) => `${f.flag} ${quoteArg(f.value.trim())}`)].filter(Boolean).join(" ");
+async function loadPathArgs() {
+  if (!state.pathArgs) state.pathArgs = await api("/path_args").catch(() => ({}));
+  return state.pathArgs;
+}
+
+/** プロジェクト（python/）の中のフォルダやファイルを選ぶ。選んだ相対パスを返す（やめたら null） */
+function pickPath(spec, current) {
+  return new Promise((resolve) => {
+    const isNew = spec.kind === "new";
+    const parts = String(current || "").split("/").filter(Boolean);
+    let dir = spec.kind === "dir" ? parts.join("/") : parts.slice(0, -1).join("/");
+    const name = isNew ? h("input", { type: "text", class: "mono", value: parts[parts.length - 1] || "", spellcheck: false }) : null;
+    const crumbs = h("div", { class: "picker-crumbs" });
+    const list = h("div", { class: "picker-list", role: "listbox" });
+    const here = h("span", { class: "mono small muted" });
+    const join = (...xs) => xs.filter(Boolean).join("/");
+    const fileOk = (f) => !spec.exts?.length || spec.exts.some((x) => f.name.toLowerCase().endsWith(x));
+    let back;
+    const onKey = (e) => { if (e.key === "Escape") { e.stopImmediatePropagation(); finish(null); } };
+    function finish(value) { back.remove(); document.removeEventListener("keydown", onKey, true); resolve(value); }
+    const row = (icon, label, onclick, extra) => h("div", { class: "picker-row", role: "option", tabindex: 0, onclick, onkeydown: (e) => { if (e.key === "Enter") onclick(); } },
+      h("span", { class: "picker-icon" }, icon), h("span", { class: "picker-name" }, label), extra || null);
+    const showHere = () => { here.textContent = isNew ? join(dir, name.value) || "—" : spec.kind === "dir" ? dir || "python（一番上）" : ""; };
+    async function open(path) {
+      list.replaceChildren(h("div", { class: "loading" }, h("span", { class: "spinner" })));
+      let res;
+      try { res = await api(`/browse?path=${encodeURIComponent(path)}`); } catch (err) { list.replaceChildren(h("div", { class: "alert error" }, err.message)); return; }
+      dir = res.path;
+      const segs = dir ? dir.split("/") : [];
+      crumbs.replaceChildren(h("a", { href: "#", onclick: (e) => { e.preventDefault(); open(""); } }, "python"),
+        ...segs.flatMap((sg, i) => [h("span", { class: "muted" }, " / "), h("a", { href: "#", onclick: (e) => { e.preventDefault(); open(segs.slice(0, i + 1).join("/")); } }, sg)]));
+      showHere();
+      const files = spec.kind === "dir" ? [] : res.files.filter(fileOk);
+      list.replaceChildren(
+        dir ? row("↰", "1つ上へ", () => open(segs.slice(0, -1).join("/"))) : "",
+        ...res.dirs.map((d) => row("📁", d, () => open(join(dir, d)),
+          spec.kind === "dir" ? h("button", { type: "button", class: "small ghost", onclick: (e) => { e.stopPropagation(); finish(join(dir, d)); } }, "選ぶ") : null)),
+        ...files.map((f) => row("📄", f.name, () => { if (isNew) { name.value = f.name; showHere(); } else finish(join(dir, f.name)); },
+          h("span", { class: "muted small" }, f.size >= 1048576 ? `${fmt(f.size / 1048576, 1)} MB` : `${fmt(f.size / 1024, 1)} KB`))),
+        !res.dirs.length && !files.length ? h("div", { class: "empty small" }, spec.kind === "file" ? `${spec.exts.join(" / ")} のファイルがありません` : "フォルダがありません") : "",
+        res.truncated ? h("div", { class: "muted small" }, "多いので先頭だけを出しています") : "");
+    }
+    if (name) name.addEventListener("input", showHere);
+    const hint = spec.kind === "dir" ? "フォルダを開いて「このフォルダを選ぶ」か、行の「選ぶ」を押します"
+      : spec.kind === "file" ? `${spec.exts.join(" / ")} のファイルを押して選びます`
+      : "置き場所のフォルダを開き、名前を決めて「ここに作る」を押します（まだないフォルダやファイルは、ツールが作ります）";
+    back = h("div", { class: "modal-back picker-back", onclick: (e) => { if (e.target === back) finish(null); } },
+      h("div", { class: "modal picker", role: "dialog", "aria-modal": "true", "aria-label": `${spec.label}を選ぶ` },
+        h("header", {}, h("h2", {}, `${spec.label}を選ぶ`)),
+        h("div", { class: "body" }, h("div", { class: "muted small" }, hint), crumbs, list,
+          name ? h("label", { class: "field" }, h("span", {}, "名前"), name) : null),
+        h("footer", {}, here, h("span", { style: { flex: 1 } }),
+          h("button", { type: "button", class: "ghost", onclick: () => finish(null) }, "キャンセル"),
+          spec.kind === "dir" ? h("button", { type: "button", onclick: () => finish(dir) }, "このフォルダを選ぶ") : null,
+          isNew ? h("button", { type: "button", onclick: () => { if (!name.value.trim()) return toast("名前を入れてください", "error"); finish(join(dir, name.value.trim())); } }, "ここに作る") : null)));
+    document.body.append(back);
+    document.addEventListener("keydown", onKey, true);
+    open(dir);
+  });
+}
+
 async function launch(workflowId, presetArgs) {
   const workflows = await loadWorkflows();
+  const specs = await loadPathArgs();
   const wf = workflows.find((w) => w.id === workflowId);
   if (!wf) return toast("ツールが見つかりません", "error");
   let initial = presetArgs ?? wf.arguments;
   if (wf.id === "train" && presetArgs === undefined) initial = initial.replace(/models\/v\d+/, `models/${nextVersion()}`);
-  const args = h("input", { type: "text", class: "mono", value: initial, spellcheck: false, style: { width: "100%" } });
+  const models = state.catalog?.models || [];
+  const approved = models.filter((m) => m.usable).map((m) => m.version);
+  // フォームの中身。fields はフォルダやファイルの引数、rest はそれ以外の引数
+  let fields = [];
+  const rest = h("input", { type: "text", class: "mono", spellcheck: false, style: { width: "100%" }, placeholder: "なし" });
+  const formBox = h("div", { class: "stack", style: { gap: "10px" } });
+  const preview = h("code", { class: "cmd-preview" });
+  const warnBox = h("div", { class: "warn-box small", hidden: true }, "このモデルは「有効」になっていません。モデルの画面で採否を判断してからデプロイすることを勧めます。");
+  const current = () => composeArgs(rest.value, fields);
+  const refresh = () => {
+    preview.textContent = `python -m ${wf.module} ${current()}`;
+    const m = /models\/([A-Za-z0-9_.-]+)/.exec(current());
+    warnBox.hidden = !(wf.id === "deploy_push" && m && !approved.includes(m[1]));
+  };
+  rest.addEventListener("input", refresh);
+  const fill = (text) => {
+    const parsed = parseArgs(text, specs);
+    fields = parsed.fields;
+    rest.value = parsed.rest;
+    formBox.replaceChildren(...fields.map((f) => {
+      const spec = specs[f.flag];
+      const input = h("input", { type: "text", class: "mono", value: f.value, spellcheck: false, oninput: (e) => { f.value = e.target.value; refresh(); } });
+      f.input = input;
+      return h("div", { class: "field" },
+        h("span", {}, spec.label, h("code", { class: "flag" }, f.flag)),
+        h("div", { class: "path-row" }, input, h("button", { type: "button", class: "ghost", onclick: async () => {
+          const picked = await pickPath(spec, input.value);
+          if (picked !== null) { input.value = f.value = picked; refresh(); }
+        } }, "選ぶ…")));
+    }), h("label", { class: "field" }, h("span", {}, fields.length ? "ほかの引数" : "実行引数"), rest));
+    refresh();
+  };
+  fill(initial);
   const preset = wf.examples.length
-    ? h("select", { onchange: (e) => { if (e.target.value) args.value = e.target.value; } },
+    ? h("select", { onchange: (e) => { if (e.target.value) fill(e.target.value); } },
       h("option", { value: "" }, "例から選ぶ…"), wf.examples.map(([label, value]) => h("option", { value }, label)))
     : null;
-  const models = state.catalog?.models || [];
+  // モデルのフォルダを含むツールは、版の一覧からも選べる（欄の models/<版> を置き換える）
+  const swapModel = (text, v) => text.replace(/models\/[A-Za-z0-9_.-]+/, `models/${v}`);
   const modelPick = /models\/v\d+/.test(initial) && wf.id !== "train" && models.length
-    ? h("select", { onchange: (e) => { args.value = args.value.replace(/models\/[A-Za-z0-9_.-]+/, `models/${e.target.value}`); } },
-      models.map((m) => h("option", { value: m.version, selected: initial.includes(`models/${m.version}`) }, `${m.version}（${STAGES[m.stage]}）`)))
+    ? h("select", { onchange: (e) => {
+      for (const f of fields) if (/models\/[A-Za-z0-9_.-]+/.test(f.value)) { f.value = swapModel(f.value, e.target.value); f.input.value = f.value; }
+      rest.value = swapModel(rest.value, e.target.value);
+      refresh();
+    } }, models.map((m) => h("option", { value: m.version, selected: initial.includes(`models/${m.version}`) }, `${m.version}（${STAGES[m.stage]}）`)))
     : null;
   const carCheck = wf.moves_car ? h("input", { type: "checkbox" }) : null;
   const confirmCheck = wf.confirm ? h("input", { type: "checkbox" }) : null;
-  const approved = models.filter((m) => m.usable).map((m) => m.version);
-  const deployWarn = () => {
-    const m = /models\/([A-Za-z0-9_.-]+)/.exec(args.value);
-    return wf.id === "deploy_push" && m && !approved.includes(m[1]);
-  };
-  const warnBox = h("div", { class: "warn-box small", hidden: !deployWarn() }, "このモデルは「有効」になっていません。モデルの画面で採否を判断してから配置することを勧めます。");
-  args.addEventListener("input", () => (warnBox.hidden = !deployWarn()));
-  if (modelPick) modelPick.addEventListener("change", () => (warnBox.hidden = !deployWarn()));
   modal({
     title: `${wf.title} を起動`,
     body: [
       h("div", { class: "row", style: { gap: "8px", flexWrap: "nowrap", alignItems: "flex-start" } },
         phaseById(wf.phase) ? phaseIcon(phaseById(wf.phase)) : null,
-        h("span", { class: "ink-2" }, phaseById(wf.phase) ? h("b", {}, `${phaseById(wf.phase).title}: `) : null, wf.description)),
-      h("div", { class: "row", style: { justifyContent: "space-between" } },
-        h("span", { class: "mono muted" }, `python -m ${wf.module}`),
-        h("a", { href: manualHref(wf.id), onclick: () => document.getElementById("modal-root").replaceChildren() }, "使い方と引数の説明 →")),
+        h("span", { class: "ink-2" }, phaseById(wf.phase) ? h("b", {}, `${phaseById(wf.phase).title}: `) : null, wf.description,
+          " ", h("a", { href: manualHref(wf.id), onclick: () => document.getElementById("modal-root").replaceChildren() }, "使い方 →"))),
       modelPick ? h("label", { class: "field" }, h("span", {}, "モデル"), modelPick) : null,
       preset ? h("label", { class: "field" }, h("span", {}, "操作の例"), preset) : null,
-      h("label", { class: "field" }, h("span", {}, "実行引数"), args),
+      formBox,
+      h("div", { class: "field" }, h("span", {}, "実行するコマンド"), preview),
       warnBox,
       wf.kind === "window" ? h("div", { class: "muted small" }, "別の画面（ウィンドウ）が開きます。") : null,
       confirmCheck ? h("label", { class: "check warn-box" }, confirmCheck, h("span", {}, wf.confirm)) : null,
@@ -492,7 +606,7 @@ async function launch(workflowId, presetArgs) {
           if (confirmCheck && !confirmCheck.checked) return toast("確認にチェックを入れてください", "error");
           e.target.disabled = true;
           try {
-            const job = await api("/jobs", { method: "POST", body: { workflow: wf.id, args: args.value, confirm_moves_car: !!carCheck?.checked, confirmed: !!confirmCheck?.checked } });
+            const job = await api("/jobs", { method: "POST", body: { workflow: wf.id, args: current(), confirm_moves_car: !!carCheck?.checked, confirmed: !!confirmCheck?.checked } });
             close();
             toast(`${wf.title} を起動しました`);
             location.hash = `#/jobs/${job.id}`;
@@ -520,7 +634,7 @@ function collectAlerts(c) {
   for (const m of c.models) {
     for (const ch of m.checks) if (ch.level !== "ok") alerts.push({ level: ch.level, text: `${m.version}: ${ch.message}`, href: `#/models/${m.version}` });
     if (m.stage === "candidate") alerts.push({ level: "info", text: `${m.version} は採否が未判断です（候補）`, href: `#/models/${m.version}` });
-    if (m.field.body_mismatch) alerts.push({ level: "warn", text: `${m.version}: 学習データと違う車体の版で走った走行が ${m.field.body_mismatch} 件`, href: `#/models/${m.version}?tab=走行・配置` });
+    if (m.field.body_mismatch) alerts.push({ level: "warn", text: `${m.version}: 学習データと違う車体の版で走った走行が ${m.field.body_mismatch} 件`, href: `#/models/${m.version}?tab=走行・デプロイ` });
     if (m.field.fingerprint_mismatch) alerts.push({ level: "error", text: `${m.version}: 走行の記録と学習データのハッシュが違う走行が ${m.field.fingerprint_mismatch} 件`, href: `#/models/${m.version}` });
   }
   const inc = c.summary.incomplete_sessions || [];
@@ -529,7 +643,7 @@ function collectAlerts(c) {
   const dep = c.summary.deployed, run = c.summary.last_pi_run;
   if (c.summary.body_error) alerts.push({ level: "error", text: `車体の版（configs/body.toml）を読めません: ${c.summary.body_error}`, href: "#/body" });
   else if (!(c.bodies || []).length) alerts.push({ level: "info", text: "車体の版がまだ登録されていません。どの車体で集めたデータかを残すため、車体の画面から登録してください", href: "#/body" });
-  if (dep.version && run && run.model_version !== dep.version) alerts.push({ level: "warn", text: `配置の記録（${dep.version}）と Pi の最後の走行の版（${run.model_version}）が違います。Pi のモデル一覧で確かめてください`, href: "#/deploy" });
+  if (dep.version && run && run.model_version !== dep.version) alerts.push({ level: "warn", text: `デプロイの記録（${dep.version}）と Pi の最後の走行の版（${run.model_version}）が違います。Pi のモデル一覧で確かめてください`, href: "#/deploy" });
   if (dep.version && !c.models.find((m) => m.version === dep.version)?.usable) alerts.push({ level: "warn", text: `Pi で使用中の ${dep.version} は「有効」ではありません`, href: `#/models/${dep.version}` });
   return alerts;
 }
@@ -544,12 +658,12 @@ function pipeline(c) {
     curate: [c.sessions.filter((x) => x.annotation_hash).length, "件のラベル", `マニフェスト ${c.sessions.filter((x) => x.manifest_hash).length} / ${c.sessions.length}`],
     train: [sm.models, "モデル", sm.latest ? `最新 ${sm.latest}` : "まだない"],
     evaluate: [cvCount, "件の交差検証", `有効なモデル ${sm.usable_models}`],
-    deploy: [sm.deployed.version || "—", "Pi で使用中", sm.deployed.at ? `${fmtDate(sm.deployed.at)} に配置` : "配置の記録なし"],
+    deploy: [sm.deployed.version || "—", "Pi で使用中", sm.deployed.at ? `${fmtDate(sm.deployed.at)} にデプロイ` : "デプロイの記録なし"],
     operate: [sm.runs, "回の走行", `自律 ${fmt(c.runs.reduce((a, r) => a + r.autonomous_s, 0) / 60, 1)} 分`],
   };
   if (!state.phases.length) return null;
   return h("section", { class: "card flow-card" },
-    h("div", { class: "card-head" }, h("h2", {}, "開発の流れ"), h("span", { class: "sub" }, "記録が流れている区間に光が流れます。運用で集めた記録は、下の輪を通って次の収集へ戻ります")),
+    h("div", { class: "card-head" }, h("h2", {}, "開発の流れ"), h("span", { class: "sub" }, "光の流れている区間に記録があります。実走行の記録は下の輪からデータ収集へ戻ります")),
     flowDiagram({ counts: phaseCounts(c), details: values }));
 }
 
@@ -560,14 +674,14 @@ async function viewOverview(root) {
   const facts = h("section", { class: "card" },
     h("div", { class: "card-head" }, h("h2", {}, "モデルの状態"), h("span", { class: "sub" }, "どれが最新か・有効か・Pi で使われているか")),
     h("div", { class: "facts" },
-      fact("Pi で使用中（配置の記録）", sm.deployed.version, sm.deployed.at ? `${fmtDate(sm.deployed.at)} に配置` : "Control Center からの配置の記録なし"),
+      fact("Pi で使用中（デプロイの記録）", sm.deployed.version, sm.deployed.at ? `${fmtDate(sm.deployed.at)} にデプロイ` : "Control Center からのデプロイの記録なし"),
       fact("Pi の最後の走行で使った版", sm.last_pi_run?.model_version, sm.last_pi_run ? `${fmtDate(sm.last_pi_run.started_at)} の走行` : "走行の記録なし"),
       fact("最新のモデル", sm.latest, latest ? `${fmtDate(latest.created_at)} 作成・${STAGES[latest.stage]}` : ""),
       fact("最新の有効なモデル", sm.latest_approved, sm.latest_approved ? "採用済みで来歴に誤りなし" : "「有効」にしたモデルがまだない")));
   const alerts = collectAlerts(c);
   const jobs = await api("/jobs");
   root.append(
-    h("p", { class: "lead" }, "走行データからモデルを作り、評価し、Pi へ配置して走らせるまでを一つの画面で管理します。各モデルがどのデータとコードから作られたかを記録からたどれます。"),
+    h("p", { class: "lead" }, "走行データからモデルを作り、評価し、Pi へデプロイして走らせるまでを一つの画面で管理します。各モデルがどのデータとコードから作られたかを記録からたどれます。"),
     h("div", { class: "stack" },
       pipeline(c),
       facts,
@@ -639,13 +753,13 @@ async function viewModel(root, [version]) {
         h("button", { type: "button", class: "ghost", onclick: () => stageDialog(m) }, "採否を変える"),
         h("button", { type: "button", class: "ghost", onclick: () => verifyDialog(m) }, "データを検証"),
         h("button", { type: "button", class: "ghost", onclick: () => launch("bundle", `--model_dir models/${m.version} --output dist/models`) }, "バンドル作成"),
-        h("button", { type: "button", onclick: () => launch("deploy_push", `push --model_dir models/${m.version}`) }, "Pi へ配置…"))));
+        h("button", { type: "button", onclick: () => launch("deploy_push", `push --model_dir models/${m.version}`) }, "Pi へデプロイ…"))));
   const tabs = [
     ["概要", () => modelSummary(m, c)],
     ["来歴", () => modelLineage(m, c)],
     ["学習", () => modelTraining(m)],
     ["評価", () => modelEval(m, c)],
-    ["走行・配置", () => modelField(m, c)],
+    ["走行・デプロイ", () => modelField(m, c)],
     ["環境", () => modelEnv(m)],
   ];
   root.append(h("div", { class: "stack" }, head, tabbed(tabs, new URLSearchParams(location.hash.split("?")[1] || "").get("tab"))));
@@ -787,9 +901,9 @@ function modelField(m, c) {
       stat("自律の時間", fmt(m.field.autonomous_min, 1), "分"),
       stat("人の介入", m.field.human, "回", `${fmt(m.field.human_per_10min, 1)} 回/10分`),
       stat("安全の介入", m.field.safety, "回", "障害物・段差・引っかかり")),
-    card("配置の履歴", "data/deployments.jsonl", m.deployments.length
-      ? h("ul", { class: "timeline" }, [...m.deployments].reverse().map((d) => h("li", {}, h("div", {}, `${{ push: "配置して使用中に", install: "配置のみ", rollback: "戻した" }[d.action] || d.action} `, healthBadge(d.ok ? "ok" : "error", d.ok ? "成功" : "失敗")), h("div", { class: "when" }, fmtDate(d.at, true)))))
-      : h("div", { class: "empty" }, "Control Center からの配置の記録はありません")),
+    card("デプロイの履歴", "data/deployments.jsonl", m.deployments.length
+      ? h("ul", { class: "timeline" }, [...m.deployments].reverse().map((d) => h("li", {}, h("div", {}, `${{ push: "デプロイして使用中に", install: "デプロイのみ", rollback: "戻した" }[d.action] || d.action} `, healthBadge(d.ok ? "ok" : "error", d.ok ? "成功" : "失敗")), h("div", { class: "when" }, fmtDate(d.at, true)))))
+      : h("div", { class: "empty" }, "Control Center からのデプロイの記録はありません")),
     card("このモデルの走行", "", runsTable(runs.reverse())));
 }
 
@@ -1076,7 +1190,7 @@ function runsTable(runs) {
     { key: "safety", label: "安全の介入", num: true },
     { key: "rate", label: "人/10分", num: true, render: (r) => (r.autonomous_s > 0 ? fmt((r.human * 600) / r.autonomous_s, 1) : "—"), sort: (r) => (r.autonomous_s > 0 ? r.human / r.autonomous_s : null) },
     { key: "end_reason", label: "終わった理由", render: (r) => r.end_reason || (r.ended ? "—" : "途中") },
-  ], runs, { empty: "走行の記録はありません（運用の「走行記録の取り込み」で Pi から持ってくる）" });
+  ], runs, { empty: "走行の記録はありません（実走行の「走行記録の取り込み」で Pi から持ってくる）" });
 }
 
 async function viewRuns(root) {
@@ -1158,34 +1272,34 @@ async function viewBody(root) {
     ], bodies, { empty: "車体の版がまだありません" }))));
 }
 
-/* ------------------------------------------------------------------ views: deploy (5 配置) */
+/* ------------------------------------------------------------------ views: deploy (5 デプロイ) */
 
 async function viewDeploy(root) {
   const c = await loadCatalog();
   const sm = c.summary;
   const deps = [...(c.deployments || [])].reverse();
-  const ACTION = { push: "配置して使用中に", install: "配置のみ", rollback: "戻した" };
+  const ACTION = { push: "デプロイして使用中に", install: "デプロイのみ", rollback: "戻した" };
   const alerts = collectAlerts(c).filter((a) => a.href === "#/deploy" || /Pi で使用中/.test(a.text));
   const models = [...c.models].sort((a, b) => Number(b.usable) - Number(a.usable) || String(b.version).localeCompare(String(a.version)));
   root.append(h("div", { class: "stack" },
     h("p", { class: "lead" }, "使うと決めた（有効な）モデルを Pi へ送り、使用中にします。Pi は送られたモデルのハッシュを確かめてから切り替え、問題があれば1つ前の版へ戻せます。"),
     h("section", { class: "card" }, h("div", { class: "facts" },
-      fact("Pi で使用中（配置の記録）", sm.deployed.version, sm.deployed.at ? `${fmtDate(sm.deployed.at)} に配置` : "Control Center からの配置の記録なし"),
+      fact("Pi で使用中（デプロイの記録）", sm.deployed.version, sm.deployed.at ? `${fmtDate(sm.deployed.at)} にデプロイ` : "Control Center からのデプロイの記録なし"),
       fact("Pi の最後の走行で使った版", sm.last_pi_run?.model_version, sm.last_pi_run ? `${fmtDate(sm.last_pi_run.started_at)} の走行` : "走行の記録なし"),
       fact("最新の有効なモデル", sm.latest_approved, sm.latest_approved ? "採用済みで来歴に誤りなし" : "「有効」にしたモデルがまだない"),
       h("div", { class: "fact" }, h("div", { class: "label" }, "今の車体"), h("div", { class: "value" }, sm.body_current ? h("a", { href: "#/body" }, sm.body_current) : h("span", { class: "muted" }, "—")), h("div", { class: "foot" }, "学習データの車体と同じかを下の表で確かめる")))),
     alerts.length ? h("div", { class: "stack", style: { gap: "8px" } }, alerts.map((a) => h("div", { class: `alert ${a.level}` }, healthBadge(a.level), h("span", {}, a.text)))) : null,
-    card("配置するモデル", "有効なモデルを上に並べています", table([
+    card("デプロイするモデル", "有効なモデルを上に並べています", table([
       { key: "version", label: "版", render: (m) => h("span", { class: "row", style: { gap: "6px" } }, h("b", { class: "mono" }, m.version), m.deployed ? h("span", { class: "badge outline" }, "Pi で使用中") : null), sort: (m) => m.version },
       { key: "stage", label: "採否", render: (m) => stageBadge(m.stage) },
       { key: "health", label: "来歴の確認", render: (m) => healthBadge(m.health), sort: (m) => ({ error: 0, warn: 1, ok: 2 })[m.health] },
       { key: "body", label: "学習データの車体", render: (m) => (m.body_versions?.length ? h("span", { class: "row", style: { gap: "4px" } }, m.body_versions.map((b) => bodyBadge(b)), sm.body_current && !m.body_versions.includes(sm.body_current) ? h("span", { class: "health warn" }, "今と違う") : null) : "—"), nosort: true },
       { key: "mae", label: "検証 MAE", num: true, render: (m) => (m.validation.steering_mae_deg !== undefined ? `±${fmt(m.validation.steering_mae_deg, 2)}°` : "—"), sort: (m) => m.validation.steering_mae_deg },
-      { key: "go", label: "", nosort: true, render: (m) => h("button", { type: "button", class: m.usable ? "small" : "small ghost", onclick: (e) => { e.stopPropagation(); launch("deploy_push", `push --model_dir models/${m.version}`); } }, "Pi へ配置…") },
+      { key: "go", label: "", nosort: true, render: (m) => h("button", { type: "button", class: m.usable ? "small" : "small ghost", onclick: (e) => { e.stopPropagation(); launch("deploy_push", `push --model_dir models/${m.version}`); } }, "Pi へデプロイ…") },
     ], models, { onRow: (m) => (location.hash = `#/models/${m.version}`), empty: "モデルがありません" })),
-    card("配置の履歴", "data/deployments.jsonl・新しい順", deps.length
+    card("デプロイの履歴", "data/deployments.jsonl・新しい順", deps.length
       ? h("ul", { class: "timeline" }, deps.map((d) => h("li", {}, h("div", {}, h("b", { class: "mono" }, d.version || "—"), ` ${ACTION[d.action] || d.action} `, healthBadge(d.ok ? "ok" : "error", d.ok ? "成功" : "失敗")), h("div", { class: "when" }, fmtDate(d.at, true)))))
-      : h("div", { class: "empty" }, "Control Center からの配置の記録はありません"))));
+      : h("div", { class: "empty" }, "Control Center からのデプロイの記録はありません"))));
 }
 
 /* ------------------------------------------------------------------ views: jobs */
@@ -1268,7 +1382,7 @@ async function viewManual(root, _p, query) {
   // フェーズの印に、画面と同じアイコンを入れる
   body.querySelectorAll(".ph-icon[data-phase]").forEach((el) => { const p = phaseById(el.dataset.phase); if (p) el.innerHTML = iconSvg(p.icon); });
   const toc = h("nav", { class: "manual-toc", "aria-label": "目次" });
-  const search = h("input", { type: "search", placeholder: "言葉で探す（例: 引数、配置、fps）", class: "manual-search" });
+  const search = h("input", { type: "search", placeholder: "言葉で探す（例: 引数、デプロイ、fps）", class: "manual-search" });
   toc.append(search);
   const list = h("ol");
   body.querySelectorAll("section[id]").forEach((sec) => {
@@ -1367,7 +1481,7 @@ const ROUTES = {
   data: ["データ", viewData, viewSession],
   models: ["モデル", viewModels, viewModel],
   compare: ["比較・評価", viewCompare],
-  deploy: ["配置", viewDeploy],
+  deploy: ["デプロイ", viewDeploy],
   runs: ["走行記録", viewRuns],
   lineage: ["来歴", viewLineage],
   tools: ["ツール", viewTools],

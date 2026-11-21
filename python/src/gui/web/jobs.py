@@ -106,7 +106,10 @@ class JobManager:
     def _save(self, job: Job) -> None:
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
         path = self.jobs_dir / f"{job.id}.json"
-        path.write_text(json.dumps(job.public(), indent=2, ensure_ascii=False), encoding="utf-8")
+        # 書きかけを読まれないよう、別のファイルに書いてから置き換える
+        tmp = path.with_suffix(f".{threading.get_ident()}.tmp")
+        tmp.write_text(json.dumps(job.public(), indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
 
     # ------------------------------------------------------------------ run
 
