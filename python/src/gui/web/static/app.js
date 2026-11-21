@@ -1088,6 +1088,9 @@ async function viewSession(root, [sid]) {
 
 const KIND_LABEL = { session: "走行データ", annotation: "手作業のラベル", model: "モデル", cv: "交差検証", field: "Pi での走行" };
 const COLUMN_TITLES = ["走行データ", "手作業のラベル", "モデル", "評価・走行"];
+// 節の種類ごとの色（開発の流れのフェーズと同じ色）
+const KIND_PHASE = { session: "collect", annotation: "curate", model: "train", cv: "evaluate", field: "operate" };
+const kindColor = (kind) => phaseById(KIND_PHASE[kind])?.color || "var(--axis)";
 async function viewLineage(root, _p, query) {
   const c = await loadCatalog();
   const { nodes, edges } = c.graph;
@@ -1109,25 +1112,52 @@ async function viewLineage(root, _p, query) {
   const W = 20 + cols.length * (NW + CG) - CG + 20;
   const H = TOP + most * (NH + GAP) + 10;
   const svg = s("svg", { width: W, height: H, viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": "データとモデルのトレーサビリティの図" });
-  cols.forEach((col, ci) => svg.append(s("text", { class: "lin-col-title", x: 20 + ci * (NW + CG), y: 22 }, COLUMN_TITLES[col])));
-  const edgeEls = edges.map((e) => {
+  const COLUMN_KIND = ["session", "annotation", "model", "cv"];
+  cols.forEach((col, ci) => svg.append(
+    s("circle", { cx: 24 + ci * (NW + CG), cy: 18, r: 4, fill: kindColor(COLUMN_KIND[col]) }),
+    s("text", { class: "lin-col-title", x: 34 + ci * (NW + CG), y: 22 }, COLUMN_TITLES[col])));
+  // つながりだけに線を引き、元から先へ光の粒を流す（色は元の種類の色から先の種類の色へ）
+  const kindOf = Object.fromEntries(nodes.map((n) => [n.id, n.kind]));
+  const defs = s("defs");
+  svg.append(defs);
+  const edgeEls = edges.map((e, i) => {
     const a = pos[e.from], b = pos[e.to];
     if (!a || !b) return null;
-    const x1 = a.x + NW, y1 = a.y + NH / 2, x2 = b.x, y2 = b.y + NH / 2, mx = (x1 + x2) / 2;
-    const el = s("path", { class: `lin-edge ${e.kind}`, d: `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}` });
+    const x1 = a.x + NW, y1 = a.y + NH / 2, x2 = b.x, y2 = b.y + NH / 2;
+    // 列を飛ばすつながり（走行データ → モデル）は、間の列を自分の行のまま横切り、最後の隙間で曲がる。
+    // 間の列の節（ほかのセッションのラベル）の後ろを通って、つながっているように見えないようにする
+    const xa = b.x - CG > x1 + 1 ? b.x - CG : x1;
+    // 間の列の、同じ行に節がある時（そのセッションのラベル）は、節のすぐ下の隙間を通る
+    const blocked = xa > x1 && Object.entries(pos).some(([id, q]) => q.x > a.x && q.x < b.x && Math.abs(q.y - a.y) < NH && id !== e.from && id !== e.to);
+    const yr = blocked ? a.y + NH + GAP / 2 : y1;
+    const mx = (xa + x2) / 2;
+    const d = blocked
+      ? `M${x1},${y1} C${x1 + 24},${y1} ${x1 + 24},${yr} ${x1 + 48},${yr} H${xa} C${mx},${yr} ${mx},${y2} ${x2},${y2}`
+      : `M${x1},${y1} H${xa} C${mx},${y1} ${mx},${y2} ${x2},${y2}`;
+    const gid = `lin-grad-${i}`;
+    defs.append(s("linearGradient", { id: gid, gradientUnits: "userSpaceOnUse", x1, x2, y1: 0, y2: 0 },
+      s("stop", { offset: 0, "stop-color": kindColor(kindOf[e.from]) }),
+      s("stop", { offset: 1, "stop-color": kindColor(kindOf[e.to]) })));
+    const el = s("g", { class: `lin-link ${e.kind}` },
+      s("path", { class: `lin-edge ${e.kind}`, d }),
+      s("path", { class: "lin-flow", d, stroke: `url(#${gid})` }));
     el.dataset.from = e.from; el.dataset.to = e.to;
     svg.append(el);
     return el;
   }).filter(Boolean);
+  const linked = new Set(edgeEls.flatMap((el) => [el.dataset.from, el.dataset.to]));
   const STAGE_COLOR = { approved: "var(--good)", rejected: "var(--bad)", candidate: "var(--muted)", archived: "var(--axis)" };
   const nodeEls = {};
   nodes.forEach((n) => {
     const p = pos[n.id];
-    const sub = n.kind === "session" ? (n.missing ? "この PC にない" : `${fmtInt(n.frames)} フレーム${n.body ? `・車体 ${n.body}` : ""}`)
+    const lone = !linked.has(n.id);
+    const sub = lone && n.kind === "session" ? `${fmtInt(n.frames)} フレーム・まだ使われていない`
+      : n.kind === "session" ? (n.missing ? "この PC にない" : `${fmtInt(n.frames)} フレーム${n.body ? `・車体 ${n.body}` : ""}`)
       : n.kind === "model" ? `${STAGES[n.stage]}・${HEALTH_TEXT[n.health]}`
       : n.kind === "field" ? `${n.runs} 回・${n.autonomous_min} 分・人の介入 ${n.human}` : KIND_LABEL[n.kind];
-    const g = s("g", { class: `lin-node ${n.kind} ${n.missing ? "missing" : ""}`, transform: `translate(${p.x},${p.y})`, tabindex: 0 },
+    const g = s("g", { class: `lin-node ${n.kind} ${n.missing ? "missing" : ""} ${lone ? "lone" : ""}`, transform: `translate(${p.x},${p.y})`, tabindex: 0, style: `--kind:${kindColor(n.kind)}` },
       s("rect", { width: NW, height: NH, rx: 7 }),
+      n.kind !== "model" ? s("rect", { class: "kind-bar", width: 3, height: NH - 14, x: 4, y: 7, rx: 1.5 }) : null,
       n.kind === "model" ? s("rect", { class: "stripe", width: 4, height: NH - 12, x: 6, y: 6, rx: 2, style: `fill:${STAGE_COLOR[n.stage]};stroke:none` }) : null,
       s("text", { class: "t", x: n.kind === "model" ? 16 : 10, y: 17 }, n.kind === "annotation" ? n.label.replace("ラベル ", "") : n.kind === "field" ? "Pi での走行" : n.label),
       s("text", { class: "k", x: n.kind === "model" ? 16 : 10, y: 32 }, sub));
@@ -1163,12 +1193,13 @@ async function viewLineage(root, _p, query) {
     svg.classList.remove("dim");
     Object.values(nodeEls).forEach((el) => el.classList.remove("hi"));
     edgeEls.forEach((el) => el.classList.remove("hi"));
-    panel.replaceChildren(h("div", { class: "muted small" }, "節を押すと、その元になったデータと、そこから作られたもの（モデル・評価・走行）を強調します。"));
+    panel.replaceChildren(h("div", { class: "muted small" }, "線はつながっているところだけに引き、光の粒が元から作られたものへ流れます。節を押すと、その節につながる流れだけを強調します。どこにもつながっていない節は薄く表示します。"));
   }
   clear();
   root.append(h("div", { class: "stack" },
     h("p", { class: "lead" }, "どのモデルがどのデータから作られ、どう評価され、どこで走ったかをたどれます（走行データ → 手作業のラベル → モデル → 交差検証・Pi での走行）。記録（metadata.json のセッション、データのハッシュ、run.json の版）だけから作っています。"),
     h("div", { class: "legend" },
+      h("span", {}, s("svg", { width: 34, height: 8 }, s("line", { class: "legend-flow", x1: 2, x2: 32, y1: 4, y2: 4 })), "流れの向き（元 → 作られたもの）"),
       h("span", {}, s("svg", { width: 28, height: 8 }, s("line", { x1: 0, x2: 28, y1: 4, y2: 4, stroke: "var(--axis)", "stroke-width": 2 })), "学習に使用"),
       h("span", {}, s("svg", { width: 28, height: 8 }, s("line", { x1: 0, x2: 28, y1: 4, y2: 4, stroke: "var(--axis)", "stroke-width": 2, "stroke-dasharray": "5 4" })), "検証に使用"),
       h("span", {}, s("svg", { width: 28, height: 8 }, s("line", { x1: 0, x2: 28, y1: 4, y2: 4, stroke: "var(--axis)", "stroke-width": 2, "stroke-dasharray": "2 4" })), "同じデータで評価"),

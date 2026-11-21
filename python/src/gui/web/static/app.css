@@ -352,19 +352,30 @@ ul.checks li { display: flex; gap: 8px; align-items: flex-start; font-size: 13px
 .lineage-wrap { overflow: auto; border: 1px solid var(--hair); border-radius: var(--radius); background: var(--surface); max-height: calc(100vh - 210px); }
 .lineage-wrap svg { display: block; }
 .lin-col-title { fill: var(--muted); font-size: 11.5px; letter-spacing: .06em; }
-.lin-edge { fill: none; stroke: var(--axis); stroke-width: 1.5; transition: opacity .15s; }
+.lin-link { transition: opacity .15s; }
+.lin-edge { fill: none; stroke: var(--hair); stroke-width: 1.5; }
 .lin-edge.val { stroke-dasharray: 5 4; }
 .lin-edge.same_data { stroke-dasharray: 2 4; }
-.lin-edge.hi { stroke: var(--accent); stroke-width: 2.2; }
+.lin-flow { fill: none; stroke-width: 2.6; stroke-linecap: round; stroke-dasharray: 0 15; animation: flow-run 1.3s linear infinite; opacity: .8; }
+.lin-link.val .lin-flow { stroke-dasharray: 0 22; }
+.lin-link.same_data .lin-flow { stroke-width: 2; stroke-dasharray: 0 10; }
+.lin-link.hi .lin-edge { stroke: color-mix(in srgb, var(--accent) 35%, var(--hair)); stroke-width: 2; }
+.lin-link.hi .lin-flow { stroke-width: 3.4; opacity: 1; animation-duration: .75s; }
 .lin-node { cursor: pointer; transition: opacity .15s; }
 .lin-node rect { fill: var(--surface); stroke: var(--hair); stroke-width: 1; }
-.lin-node.model rect { stroke: var(--accent); stroke-width: 1.5; }
-.lin-node.missing rect { stroke-dasharray: 4 3; }
+.lin-node rect.kind-bar { fill: var(--kind); stroke: none; }
+.lin-node.model rect:first-child { stroke: color-mix(in srgb, var(--kind) 70%, transparent); stroke-width: 1.5; }
+.lin-node.missing rect:first-child { stroke-dasharray: 4 3; }
+.lin-node.lone { opacity: .5; }
+.lin-node.lone rect:first-child { stroke-dasharray: 3 3; fill: transparent; }
 .lin-node .k { fill: var(--muted); font-size: 10.5px; }
 .lin-node .t { fill: var(--ink); font-size: 12.5px; font-family: var(--mono); }
 .lin-node .stripe { stroke: none; }
-.lin-node.hi rect { stroke: var(--accent); stroke-width: 2.2; fill: var(--accent-wash); }
-.dim .lin-node:not(.hi), .dim .lin-edge:not(.hi) { opacity: .18; }
+.lin-node.hi rect:first-child { stroke: var(--kind); stroke-width: 2.2; fill: color-mix(in srgb, var(--kind) 10%, var(--surface)); }
+.dim .lin-node:not(.hi), .dim .lin-link:not(.hi) { opacity: .12; }
+.legend-flow { stroke: var(--accent); stroke-width: 3; stroke-linecap: round; stroke-dasharray: 0 9; animation: flow-run-legend 1s linear infinite; }
+@keyframes flow-run-legend { to { stroke-dashoffset: -9; } }
+@media (prefers-reduced-motion: reduce) { .lin-flow, .legend-flow { animation: none; } }
 
 /* ---------- frames */
 .frames { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
