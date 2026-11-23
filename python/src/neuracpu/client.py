@@ -43,6 +43,62 @@ class SearchResult:
     error: str = ""
 
 
+MODELFILE = PROJECT_ROOT / "python" / "data" / "neuracpu" / "Modelfile"
+
+
+def ensure_ollama_model(
+    name: Optional[str] = None, gguf: Optional[Path] = None, run=subprocess.run
+) -> bool:
+    """会話に使うモデルが Ollama になければ、NeuraCPU の GGUF から登録する。
+
+    ダウンロードはしない（NeuraCPU のフォルダにある GGUF を Ollama の保存先へ写す）。
+    登録できた、またはすでにあれば True。
+    """
+    name = name or settings.neuracpu_model
+    try:
+        tags = httpx.get(f"{settings.ollama_base_url}/api/tags", timeout=5).json()
+    except (httpx.HTTPError, ValueError):
+        return False
+    names = {m.get("name", "") for m in tags.get("models", [])}
+    if name in names or f"{name}:latest" in names:
+        return True
+    gguf = Path(gguf or Path(settings.neuracpu_root) / settings.neuracpu_gguf)
+    if not gguf.exists():
+        return False
+    MODELFILE.parent.mkdir(parents=True, exist_ok=True)
+    MODELFILE.write_text(f"FROM {gguf.as_posix()}\n", encoding="utf-8")
+    flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+    result = run(
+        ["ollama", "create", name, "-f", str(MODELFILE)],
+        capture_output=True,
+        timeout=600,
+        creationflags=flags,
+    )
+    return result.returncode == 0
+
+
+def preload_models() -> None:
+    """判断と知識の2つのモデルを、会話の前にメモリへ読み込んでおく（初回の数秒の待ちを避ける）。
+
+    Agent と同じ設定で読み込む。スレッド数などが違うと、Ollama は読み込み直してしまう。
+    """
+    from src.llm_factory import OLLAMA_KEEP_ALIVE, OLLAMA_NUM_CTX, OLLAMA_NUM_THREAD
+
+    for model in dict.fromkeys((settings.neuracpu_model, settings.neuracpu_knowledge_model)):
+        try:
+            httpx.post(
+                f"{settings.ollama_base_url}/api/generate",
+                json={
+                    "model": model,
+                    "keep_alive": OLLAMA_KEEP_ALIVE,
+                    "options": {"num_ctx": OLLAMA_NUM_CTX, "num_thread": OLLAMA_NUM_THREAD},
+                },
+                timeout=120,
+            )
+        except httpx.HTTPError:
+            pass
+
+
 class NeuraCPUClient:
     """検索サーバーを1つだけ動かし、GUI を閉じる時に止める"""
 
@@ -123,6 +179,8 @@ class NeuraCPUClient:
 
         def run():
             try:
+                ensure_ollama_model()
+                preload_models()
                 self.ensure_started()
             except Exception:
                 pass

@@ -18,7 +18,7 @@ class ModelPreset(str, Enum):
         "ollama/qwen3.5:4b-text"  # ローカルLLM (完全オフライン)。PC の CPU で実測して選定
     )
     # CPU だけで動く NeuraCPU。手元の資料と Web の検索を、発言ごとに AI が自分で選ぶ
-    NEURACPU = "neuracpu/qwen3.5:4b-text"
+    NEURACPU = "neuracpu/qwen2.5-3b"
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -54,12 +54,18 @@ class Settings(BaseModel):
     neuracpu_root: Path = Field(
         default_factory=lambda: Path(os.getenv("NEURACPU_ROOT", str(NEURACPU_DEFAULT_ROOT)))
     )
-    # 判断と回答に使う Ollama のモデル。qwen3.5:4b-text は判断が最も正確だった。
-    # NeuraCPU の Qwen2.5-3B（ollama create neuracpu-qwen2.5-3b）は回答が約3秒速い
+    # 判断と回答に使う Ollama のモデル。NeuraCPU の Qwen2.5-3B Q4_K_M を、最初に使う時に
+    # NeuraCPU の GGUF から Ollama へ登録する（ダウンロードはしない）。
+    # qwen3.5:4b-text より読み込み・生成が速く、途中まで巻き戻せるので読み直しが少ない
     neuracpu_model: str = Field(
-        default_factory=lambda: os.getenv(
-            "NEURACPU_MODEL", ModelPreset.NEURACPU.value.split("/", 1)[1]
-        )
+        default_factory=lambda: os.getenv("NEURACPU_MODEL", "neuracpu-qwen2.5-3b")
+    )
+    # 一般知識と会話の答えに使うモデル（従来のローカル LLM と同じ）
+    neuracpu_knowledge_model: str = Field(
+        default_factory=lambda: os.getenv("NEURACPU_KNOWLEDGE_MODEL", "qwen3.5:4b-text")
+    )
+    neuracpu_gguf: str = Field(
+        default_factory=lambda: os.getenv("NEURACPU_GGUF", "models/qwen2.5-3b-instruct-q4_k_m.gguf")
     )
     neuracpu_port: int = Field(default_factory=lambda: int(os.getenv("NEURACPU_PORT", "18765")))
     neuracpu_sources: tuple = Field(

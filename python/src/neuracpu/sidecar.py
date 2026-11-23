@@ -26,14 +26,22 @@ import re
 import sys
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
+from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Dict, List
 
-CHUNK_CHARS = 400
-CHUNK_OVERLAP = 80
+# 手元の資料に答えがありそうかの目安。操作マニュアル・250文字の索引・BGE-M3 で、答えのある質問
+# （密 0.56〜0.71、語 12〜57）と、ない質問（ほとんど該当なし、最も近いもので密 0.56・語 9.7）を
+# 分けられた値（2026-11-23 実測）。資料や索引の大きさを変えたら測り直す
+MIN_DENSE = 0.5
+MIN_SPARSE = 11.0
+STRONG_DENSE = 0.62
+CHUNK_CHARS = 250
+CHUNK_OVERLAP = 60
 USER_AGENT = "PiCarX-NeuraCPU/0.1 (local robot assistant)"
 WIKIPEDIA_API = "https://ja.wikipedia.org/w/api.php"
 # 検索語に要らない、質問の言い回し
@@ -50,6 +58,43 @@ def search_terms(query: str) -> str:
     text = LEADING_WEB.sub("", query.strip())
     text = QUESTION_TAIL.sub("", text).strip()
     return text or query.strip()
+
+
+# 漢字・カタカナ・英数字のまとまり。ひらがなは助詞や送り仮名として区切りに使う
+CONTENT_RUN = re.compile(r"[㐀-鿿゠-ヿー々A-Za-z0-9][㐀-鿿゠-ヿー々A-Za-z0-9.\-_]*")
+OKURIGANA = set("いさしっくきけかめみれ")
+QUESTION_WORDS = re.compile(r"^(何.*|誰|一番|最も|全部|全体|今|今日|教|調)$")
+
+
+def content_runs(query: str) -> List[str]:
+    """内容の語の並び。送り仮名で切れた1文字（「高さ」の「高」、「作った」の「作」）は外す"""
+    text = search_terms(query)
+    runs = []
+    for match in CONTENT_RUN.finditer(text):
+        run = match.group()
+        following = text[match.end() : match.end() + 1]
+        if QUESTION_WORDS.match(run) or (len(run) == 1 and following in OKURIGANA):
+            continue
+        runs.append(run)
+    return runs
+
+
+def keywords(query: str) -> str:
+    """「将棋の駒は全部で何枚？」→「将棋 駒」。Wikipedia の検索は語を並べた方が目的の記事に当たる"""
+    return " ".join(content_runs(query)) or search_terms(query)
+
+
+def title_candidates(query: str) -> List[str]:
+    """記事の題名の候補。助詞「の」でつないだ先頭の名詞句（「将棋の駒」）と、一番長い語"""
+    text = search_terms(query)
+    candidates = []
+    head = re.match(r"^(.+?)(?:[はがをにでともへや]|について|って)", text)
+    if head and len(head.group(1)) >= 2:
+        candidates.append(head.group(1).strip())
+    runs = sorted(content_runs(query), key=len, reverse=True)
+    if runs and len(runs[0]) >= 2:
+        candidates.append(runs[0])
+    return list(dict.fromkeys(candidates))[:2] or [text]
 
 
 def best_passages(tokens_of, query: str, text: str, max_chars: int, keep_lead: bool = True) -> str:
@@ -100,6 +145,12 @@ def line_range(result: Dict) -> str:
     return f"{locator}行" if re.fullmatch(r"\d+(-\d+)?", locator) else locator
 
 
+def is_relevant(result: Dict) -> bool:
+    dense = float(result.get("dense_score", 0.0))
+    sparse = float(result.get("sparse_score", 0.0))
+    return dense >= STRONG_DENSE or (dense >= MIN_DENSE and sparse >= MIN_SPARSE)
+
+
 def select_evidence(tokens_of, query: str, texts: List[str], max_chars: int) -> List[tuple]:
     """検索の上位から順に、残りの量を等分して要点を抜き出す。(順位, 抜き出した文) を返す。"""
     picked, remaining = [], max_chars
@@ -116,54 +167,105 @@ def select_evidence(tokens_of, query: str, texts: List[str], max_chars: int) -> 
 
 
 class Wikipedia:
-    name = "wikipedia"
+    """日本語版 Wikipedia。API の利用の決まりに合わせ、1秒に1回までにし、同じ質問は覚えておく"""
 
-    def __init__(self, timeout: float = 6.0):
+    name = "wikipedia"
+    MIN_INTERVAL_SEC = 1.0
+    CACHE_SIZE = 128
+    BACKOFF_SEC = 120.0
+
+    def __init__(self, timeout: float = 6.0, clock=time.monotonic, sleep=time.sleep):
         self.timeout = timeout
+        self._clock = clock
+        self._sleep = sleep
+        self._last = 0.0
+        self._blocked_until = 0.0
+        self._lock = threading.Lock()
+        self._cache: "OrderedDict[str, List[Dict]]" = OrderedDict()
 
     def _get(self, params: Dict) -> Dict:
         url = f"{WIKIPEDIA_API}?{urllib.parse.urlencode({**params, 'format': 'json'})}"
         request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with self._lock:
+            if self._clock() < self._blocked_until:
+                raise RuntimeError("Wikipedia の利用の上限に達したので、しばらく待っています")
+            wait = self._last + self.MIN_INTERVAL_SEC - self._clock()
+            if wait > 0:
+                self._sleep(wait)
+            self._last = self._clock()
+        try:
+            return self._fetch(request)
+        except urllib.error.HTTPError as error:
+            if error.code == 429:
+                # 続けて頼むと止められる時間が延びるので、しばらく問い合わせない
+                self._blocked_until = self._clock() + self.BACKOFF_SEC
+            raise
+
+    def _fetch(self, request) -> Dict:
         with urllib.request.urlopen(request, timeout=self.timeout) as response:
             return json.loads(response.read(2_000_000).decode("utf-8"))
 
-    def search(self, query: str, count: int = 2) -> List[Dict]:
-        terms = search_terms(query)
-        found = self._get(
-            {"action": "query", "list": "search", "srsearch": terms, "srlimit": count, "srprop": ""}
-        )
-        titles = [item["title"] for item in found.get("query", {}).get("search", [])]
-        if not titles:
-            return []
-        pages = (
-            self._get(
-                {
-                    "action": "query",
-                    "prop": "extracts|info",
-                    "explaintext": 1,
-                    "exsectionformat": "plain",
-                    "exchars": 6000,
-                    "inprop": "url",
-                    "titles": "|".join(titles),
-                }
-            )
-            .get("query", {})
-            .get("pages", {})
-        )
-        by_title = {page.get("title"): page for page in pages.values()}
+    def _pages(self, titles: List[str]) -> List[Dict]:
+        """記事の本文を取る。転送（「エベレスト」→「エベレスト山」など）もたどる"""
+        data = self._get(
+            {
+                "action": "query",
+                "prop": "extracts|info",
+                "explaintext": 1,
+                "exsectionformat": "plain",
+                "exchars": 6000,
+                "inprop": "url",
+                "redirects": 1,
+                "titles": "|".join(titles),
+            }
+        ).get("query", {})
         results = []
-        for title in titles:
-            page = by_title.get(title, {})
-            if page.get("extract"):
+        for page in data.get("pages", {}).values():
+            if page.get("extract") and "missing" not in page:
                 results.append(
                     {
-                        "title": title,
+                        "title": page.get("title", ""),
                         "source": "Wikipedia",
                         "locator": "",
                         "url": page.get("fullurl", ""),
                         "text": page["extract"],
                     }
                 )
+        # 頼んだ順に並べる（API は順を保たない）。表記の正規化と転送の先もたどる
+        renamed = {}
+        for item in data.get("normalized", []) + data.get("redirects", []):
+            renamed[item.get("from")] = item.get("to")
+
+        def final(title):
+            for _ in range(3):
+                title = renamed.get(title, title)
+            return title
+
+        order = {final(title): index for index, title in enumerate(titles)}
+        return sorted(results, key=lambda r: order.get(r["title"], len(titles)))
+
+    def search(self, query: str, count: int = 2) -> List[Dict]:
+        key = search_terms(query)
+        if key in self._cache:
+            self._cache.move_to_end(key)
+            return self._cache[key]
+        # 全文検索の1位（「日本で一番長い川」→「信濃川」）と、題名で引いた記事（「東京タワー」）の
+        # 2つを使う。問い合わせは検索と本文の2回にまとめる（Wikipedia の上限に当たりにくくする）
+        found = self._get(
+            {
+                "action": "query",
+                "list": "search",
+                "srsearch": search_terms(query),
+                "srlimit": count,
+                "srprop": "",
+            }
+        )
+        hits = [item["title"] for item in found.get("query", {}).get("search", [])]
+        titles = list(dict.fromkeys(hits[:1] + title_candidates(query)[:1] + hits[1:]))[:count]
+        results = self._pages(titles) if titles else []
+        self._cache[key] = results
+        if len(self._cache) > self.CACHE_SIZE:
+            self._cache.popitem(last=False)
         return results
 
 
@@ -216,6 +318,9 @@ class Service:
             if self.sources:
                 self.rag.refresh_if_changed(self.sources, interval_seconds=30)
             results = self.rag.search(query, top_k=top_k, candidate_k=40)
+        # 一番よく合う箇所でも弱ければ、資料には答えがないとみなす（Agent は Web を調べる）
+        if results and not is_relevant(results[0]):
+            return []
         picked = select_evidence(self.tokens, query, [r["text"] for r in results], max_chars)
         items = []
         for rank, text in picked:

@@ -230,7 +230,10 @@ def main():
     )
     parser.add_argument("--datasets", default="picarx,neuracpu")
     parser.add_argument("--output", default="bench_qa.json")
+    parser.add_argument("--evidence-chars", type=int, default=700)
     args = parser.parse_args()
+    global EVIDENCE_CHARS
+    EVIDENCE_CHARS = args.evidence_chars
 
     root = Path(args.neuracpu_root)
     sys.path.insert(0, str(root))

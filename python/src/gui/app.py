@@ -556,7 +556,7 @@ class PicarxMainWindow(QMainWindow):
     def _start_agent_turn(self, text):
         timing = self._take_turn_timing()
         self.chat_history.append(f"<i>Thinking with {preset_name(self.current_model)}...</i>")
-        if is_look_question(text):
+        if self._is_look_turn(text):
             timing.kind = "look"
             # 画像の認識に約10秒かかるので、先に返事をしておく
             self.chat_history.append(f"<b>Assistant:</b> {ACKNOWLEDGEMENT}")
@@ -611,6 +611,16 @@ class PicarxMainWindow(QMainWindow):
             from src.neuracpu.client import shared_client
 
             shared_client().warm_up()
+
+    def _is_look_turn(self, text):
+        """カメラで見る発言か。NeuraCPU は「画面に何がある？」を資料の質問として扱う"""
+        if not is_look_question(text):
+            return False
+        if self.current_model == ModelPreset.NEURACPU:
+            from src.agents.neuracpu_agent import LOCAL_CUES
+
+            return not LOCAL_CUES.search(text)
+        return True
 
     def _warm_up_vision(self):
         """見る質問の VLM は読み込みに約5.6秒かかるので、起動時に読み込んでおく"""
