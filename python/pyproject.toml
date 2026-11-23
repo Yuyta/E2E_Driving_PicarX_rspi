@@ -58,3 +58,7 @@ select = ["E", "F", "I", "W"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff.lint.per-file-ignores]
+# 実行例のコマンドと日本語の指示文は折り返すと読みにくい
+"src/neuracpu/*.py" = ["E501"]

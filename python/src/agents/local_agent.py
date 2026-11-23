@@ -144,13 +144,18 @@ class LocalAction(NamedTuple):
     value: str = ""
 
 
-def parse_action(content: object) -> Optional[LocalAction]:
+def action_schema(actions=ACTIONS) -> dict:
+    return {**ACTION_SCHEMA, "properties": {
+        **ACTION_SCHEMA["properties"], "action": {"type": "string", "enum": list(actions)}}}
+
+
+def parse_action(content: object, actions=ACTIONS) -> Optional[LocalAction]:
     """LLM の出力を行動に変換する。解釈できなければ None を返す。"""
     try:
         data = json.loads(str(content))
     except ValueError:
         return None
-    if not isinstance(data, dict) or data.get("action") not in ACTIONS:
+    if not isinstance(data, dict) or data.get("action") not in actions:
         return None
     return LocalAction(
         action=data["action"],
@@ -215,6 +220,10 @@ def conversation_messages(messages: List[BaseMessage]) -> List[BaseMessage]:
 class LocalAgent:
     """`create_agent_graph` の戻り値と同じく `ainvoke` で呼べるローカル用の Agent"""
 
+    # 派生の Agent が行動を足せるよう、指示と行動の一覧はクラスに持たせる
+    PROMPT = LOCAL_PROMPT
+    ACTIONS = ACTIONS
+
     def __init__(
         self,
         llm=None,
@@ -259,7 +268,7 @@ class LocalAgent:
         if context:
             self._contexts[id(latest)] = context
         response = await self._llm.ainvoke(self._build_prompt(messages))
-        action = parse_action(message_text(response))
+        action = parse_action(message_text(response), self.ACTIONS)
         if action is None:
             return NOT_UNDERSTOOD
         return await self._execute(action, text)
@@ -274,7 +283,7 @@ class LocalAgent:
                 start += 1
             self._history_start = start
 
-        prompt: List[BaseMessage] = [SystemMessage(content=LOCAL_PROMPT)]
+        prompt: List[BaseMessage] = [SystemMessage(content=self.PROMPT)]
         for message in history[self._history_start :]:
             context = self._contexts.get(id(message))
             if context:

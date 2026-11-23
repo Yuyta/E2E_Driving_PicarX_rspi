@@ -57,10 +57,15 @@ def create_agent_graph(preset: Optional[ModelPreset] = None, status_client=None,
     """
     # 応答を待たせないよう、状態の取得は短く打ち切る
     status_client = status_client or PicarxClient(timeout=STATUS_TIMEOUT_SEC)
-    if ModelPreset(preset or settings.default_model) == ModelPreset.OLLAMA_LOCAL:
+    selected = ModelPreset(preset or settings.default_model)
+    if selected == ModelPreset.OLLAMA_LOCAL:
         from src.agents.local_agent import LocalAgent
 
         return LocalAgent(status_client=status_client, memory=memory)
+    if selected == ModelPreset.NEURACPU:
+        from src.agents.neuracpu_agent import NeuraCPUAgent
+
+        return NeuraCPUAgent(status_client=status_client, memory=memory)
 
     llm = LLMFactory.create(preset=preset).bind_tools(ALL_TOOLS)
 
