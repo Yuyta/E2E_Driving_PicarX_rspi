@@ -178,7 +178,6 @@ h3 { font-size: 13px; margin: 0 0 8px; font-weight: 650; color: var(--ink-2); te
 .flow.compact { padding-bottom: 14px; min-width: 560px; }
 .flow-track { position: absolute; inset: 0; pointer-events: none; overflow: visible; }
 .flow-base { fill: none; stroke: var(--hair); stroke-width: 2; }
-.flow-base.loop { stroke-dasharray: 3 5; }
 .flow-dots { fill: none; stroke-width: 3.2; stroke-linecap: round; stroke-dasharray: 0 16; animation: flow-run 1.15s linear infinite; }
 .flow-dots.loop { stroke-width: 2.6; animation-duration: 1.6s; opacity: .85; }
 @keyframes flow-run { to { stroke-dashoffset: -16; } }
@@ -222,7 +221,9 @@ button.danger-ghost { background: transparent; color: var(--bad-ink); border-col
 button.danger-ghost:hover { background: var(--bad-wash); }
 .page-phase { display: inline-flex; gap: 4px; }
 .page-phase:empty { display: none; }
-.flow-card .card-head { margin-bottom: 18px; }
+.flow-card .card-head { margin-bottom: 6px; }
+/* 横スクロールの箱は縦もはみ出しを切るので、丸の浮き上がりと外側の輪の分だけ上に余白を取る */
+.flow-card .flow-scroll { padding-top: 12px; }
 
 /* 車体の版 */
 .badge.body { border-color: color-mix(in srgb, #6f7a8c 45%, transparent); color: var(--ink-2); font-family: var(--mono); font-weight: 600; text-decoration: none; }
@@ -354,11 +355,13 @@ ul.checks li { display: flex; gap: 8px; align-items: flex-start; font-size: 13px
 .lin-col-title { fill: var(--muted); font-size: 11.5px; letter-spacing: .06em; }
 .lin-link { transition: opacity .15s; }
 .lin-edge { fill: none; stroke: var(--hair); stroke-width: 1.5; }
-.lin-edge.val { stroke-dasharray: 5 4; }
-.lin-edge.same_data { stroke-dasharray: 2 4; }
-.lin-flow { fill: none; stroke-width: 2.6; stroke-linecap: round; stroke-dasharray: 0 15; animation: flow-run 1.3s linear infinite; opacity: .8; }
-.lin-link.val .lin-flow { stroke-dasharray: 0 22; }
-.lin-link.same_data .lin-flow { stroke-width: 2; stroke-dasharray: 0 10; }
+/* つながりの種類は、流れる印の形で見分ける（学習: 丸い粒 ・・・、検証: 長い棒 — —、同じデータで評価: 棒と粒 —・—・）。
+   動かす量は模様の1周期と同じにして、継ぎ目でずれないようにする */
+.lin-flow { fill: none; stroke-width: 2.6; stroke-linecap: round; stroke-dasharray: 0 16; animation: lin-run-16 1.3s linear infinite; opacity: .8; }
+.lin-link.val .lin-flow { stroke-width: 2.4; stroke-dasharray: 12 10; animation-name: lin-run-22; }
+.lin-link.same_data .lin-flow { stroke-width: 2.2; stroke-dasharray: 6 5 0 5; animation-name: lin-run-16; }
+@keyframes lin-run-16 { to { stroke-dashoffset: -16; } }
+@keyframes lin-run-22 { to { stroke-dashoffset: -22; } }
 .lin-link.hi .lin-edge { stroke: color-mix(in srgb, var(--accent) 35%, var(--hair)); stroke-width: 2; }
 .lin-link.hi .lin-flow { stroke-width: 3.4; opacity: 1; animation-duration: .75s; }
 .lin-node { cursor: pointer; transition: opacity .15s; }
@@ -375,6 +378,8 @@ ul.checks li { display: flex; gap: 8px; align-items: flex-start; font-size: 13px
 .dim .lin-node:not(.hi), .dim .lin-link:not(.hi) { opacity: .12; }
 .legend-flow { stroke: var(--accent); stroke-width: 3; stroke-linecap: round; stroke-dasharray: 0 9; animation: flow-run-legend 1s linear infinite; }
 @keyframes flow-run-legend { to { stroke-dashoffset: -9; } }
+/* 凡例のつながりの種類: 図と同じ粒の並び方を、止めた状態で見せる */
+.lin-flow.legend-kind { stroke: var(--ink-2); opacity: 1; animation: none; }
 @media (prefers-reduced-motion: reduce) { .lin-flow, .legend-flow { animation: none; } }
 
 /* ---------- frames */
@@ -406,6 +411,8 @@ ul.checks li { display: flex; gap: 8px; align-items: flex-start; font-size: 13px
 .log { background: #101214; color: #d6dae0; font-family: var(--mono); font-size: 12.5px; line-height: 1.5; border-radius: 8px; padding: 12px 14px; height: min(60vh, 560px); overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
 .log .err { color: #ff9c9c; }
 .log .ok { color: #9be39b; }
+/* 出力がない時は、黒い大きな枠にせず、理由の1行だけを出す */
+.log.is-empty { height: auto; background: var(--surface-2); color: var(--muted); font-family: var(--font); font-size: 13px; border: 1px dashed var(--hair); }
 .status-dot { display: inline-flex; gap: 6px; align-items: center; font-size: 12.5px; font-weight: 600; }
 .status-dot::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
 .status-dot.running::before { background: var(--accent); animation: pulse 1.2s infinite; }
