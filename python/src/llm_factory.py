@@ -16,7 +16,7 @@ GEMINI_MAX_RETRIES = 0
 
 
 class LLMFactory:
-    """4種のモデル（Gemini 3種 + Ollama 1種）を動的に切り替えるファクトリ"""
+    """Gemini 3種とローカル（Ollama、NeuraCPU）を動的に切り替えるファクトリ"""
 
     @classmethod
     def create(
@@ -40,7 +40,9 @@ class LLMFactory:
 
             # モデル名のマッピング
             model_map = {
-                model: model.value for model in ModelPreset if model != ModelPreset.OLLAMA_LOCAL
+                model: model.value
+                for model in ModelPreset
+                if model not in (ModelPreset.OLLAMA_LOCAL, ModelPreset.NEURACPU)
             }
             model_name = model_map[selected]
 
@@ -55,6 +57,10 @@ class LLMFactory:
 
         elif selected == ModelPreset.OLLAMA_LOCAL:
             return LLMFactory.create_local(temperature=temperature)
+
+        elif selected == ModelPreset.NEURACPU:
+            # NeuraCPU は検索を足した Agent で、生成は同じ Ollama のモデルを使う
+            return LLMFactory.create_local(model=settings.neuracpu_model, temperature=temperature)
 
         else:
             raise ValueError(f"サポートされていないモデルプリセットです: {selected}")

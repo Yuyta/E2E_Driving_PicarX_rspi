@@ -13,7 +13,7 @@ from PySide6.QtCore import QEvent  # noqa: E402
 from PySide6.QtWidgets import QApplication, QGroupBox, QLabel, QPushButton, QScrollArea  # noqa: E402
 
 from src.config import ModelPreset  # noqa: E402
-from src.gui.app import PicarxMainWindow  # noqa: E402
+from src.gui.app import LOCAL_AGENT_TIMEOUT_SEC, PicarxMainWindow  # noqa: E402
 from src.gui.async_runner import AsyncRunner  # noqa: E402
 from src.memory.store import MemoryStore  # noqa: E402
 from src.voice.listener import SAMPLE_RATE, TOO_QUIET, Transcript  # noqa: E402
@@ -277,6 +277,32 @@ def test_local_llm_failure_is_reported_not_retried(window):
     win._agent_graph = fake_graph(ConnectionError("ollama is not running"))
     with pytest.raises(ConnectionError):
         asyncio.run(win._invoke_agent_with_recovery())
+
+
+@pytest.mark.parametrize("preset", [ModelPreset.OLLAMA_LOCAL, ModelPreset.NEURACPU])
+def test_local_presets_get_the_longer_timeout_and_no_gemini_fallback(window, preset):
+    win, _, _ = window
+    win.current_model = preset
+    win._agent_graph = fake_graph(ConnectionError("ollama is not running"))
+    with (
+        patch("src.gui.app.asyncio.wait_for", side_effect=asyncio.wait_for) as wait_for,
+        patch.object(win, "_create_agent_graph") as create,
+        pytest.raises(ConnectionError),
+    ):
+        asyncio.run(win._invoke_agent_with_recovery())
+    assert wait_for.call_args.kwargs["timeout"] == LOCAL_AGENT_TIMEOUT_SEC
+    create.assert_not_called()
+
+
+def test_neuracpu_is_offered_in_the_model_list_and_warms_up(window):
+    win, _, _ = window
+    index = win.model_combo.findData(ModelPreset.NEURACPU)
+    assert index >= 0
+    assert "NeuraCPU" in win.model_combo.itemText(index)
+    with patch("src.neuracpu.client.shared_client") as shared:
+        win.model_combo.setCurrentIndex(index)
+    shared.return_value.warm_up.assert_called_once()
+    assert win.current_model == ModelPreset.NEURACPU
 
 
 def send_chat(win, text):

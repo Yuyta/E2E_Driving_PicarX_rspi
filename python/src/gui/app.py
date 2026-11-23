@@ -46,6 +46,13 @@ from src.voice.speaker import Speaker
 AGENT_TIMEOUT_SEC = 60.0
 # ローカル LLM は最初の読み込みに時間がかかる
 LOCAL_AGENT_TIMEOUT_SEC = 120.0
+# PC の CPU で動かすモデル。Gemini が使えない時の切り替え先にはならない
+LOCAL_PRESETS = (ModelPreset.OLLAMA_LOCAL, ModelPreset.NEURACPU)
+MODEL_LABELS = {ModelPreset.NEURACPU: "NeuraCPU（CPU・資料と Web を自動で検索）"}
+
+
+def preset_name(preset: ModelPreset) -> str:
+    return MODEL_LABELS.get(preset, preset.value)
 
 
 class PicarxMainWindow(QMainWindow):
@@ -84,6 +91,7 @@ class PicarxMainWindow(QMainWindow):
         self._init_timer()
         self._init_voice()
         self._warm_up_vision()
+        self._warm_up_model(self.current_model)
 
     def _init_ui(self):
         self.setStyleSheet(APP_STYLE)
@@ -126,7 +134,7 @@ class PicarxMainWindow(QMainWindow):
         self.model_combo = QComboBox()
         for preset in ModelPreset:
             is_default = "（既定）" if preset == settings.default_model else ""
-            self.model_combo.addItem(f"{preset.value}{is_default}", preset)
+            self.model_combo.addItem(f"{preset_name(preset)}{is_default}", preset)
         # 一覧の先頭ではなく、実際に使う既定のモデルを表示する
         self.model_combo.setCurrentIndex(self.model_combo.findData(self.current_model))
 
@@ -295,8 +303,9 @@ class PicarxMainWindow(QMainWindow):
             self._agent_graph = None
             self._agent_model = None
             self.chat_history.append(
-                f"<b>[System]</b> モデルを <code>{preset.value}</code> に切り替えました。"
+                f"<b>[System]</b> モデルを <code>{preset_name(preset)}</code> に切り替えました。"
             )
+            self._warm_up_model(preset)
 
     @staticmethod
     def _coerce_model_preset(value):
@@ -546,7 +555,7 @@ class PicarxMainWindow(QMainWindow):
 
     def _start_agent_turn(self, text):
         timing = self._take_turn_timing()
-        self.chat_history.append(f"<i>Thinking with {self.current_model.value}...</i>")
+        self.chat_history.append(f"<i>Thinking with {preset_name(self.current_model)}...</i>")
         if is_look_question(text):
             timing.kind = "look"
             # 画像の認識に約10秒かかるので、先に返事をしておく
@@ -594,6 +603,14 @@ class PicarxMainWindow(QMainWindow):
                 self._finish_turn_timing(timing, ok=False)
 
         self._async_call(task())
+
+    @staticmethod
+    def _warm_up_model(preset):
+        """NeuraCPU は検索の準備（埋め込みモデルと索引）に数秒以上かかるので、選んだ時に始める"""
+        if preset == ModelPreset.NEURACPU:
+            from src.neuracpu.client import shared_client
+
+            shared_client().warm_up()
 
     def _warm_up_vision(self):
         """見る質問の VLM は読み込みに約5.6秒かかるので、起動時に読み込んでおく"""
@@ -643,11 +660,11 @@ class PicarxMainWindow(QMainWindow):
             )
 
         try:
+            if self.current_model in LOCAL_PRESETS:
+                return await invoke(LOCAL_AGENT_TIMEOUT_SEC)
             return await invoke()
         except Exception as error:
-            if self.current_model == ModelPreset.OLLAMA_LOCAL or not self._is_model_unavailable(
-                error
-            ):
+            if self.current_model in LOCAL_PRESETS or not self._is_model_unavailable(error):
                 raise
             first_error = error
 
