@@ -1200,9 +1200,11 @@ async function viewLineage(root, _p, query) {
     h("p", { class: "lead" }, "どのモデルがどのデータから作られ、どう評価され、どこで走ったかをたどれます（走行データ → 手作業のラベル → モデル → 交差検証・Pi での走行）。記録（metadata.json のセッション、データのハッシュ、run.json の版）だけから作っています。"),
     h("div", { class: "legend" },
       h("span", {}, s("svg", { width: 34, height: 8 }, s("line", { class: "legend-flow", x1: 2, x2: 32, y1: 4, y2: 4 })), "流れの向き（元 → 作られたもの）"),
-      h("span", {}, s("svg", { width: 28, height: 8 }, s("line", { x1: 0, x2: 28, y1: 4, y2: 4, stroke: "var(--axis)", "stroke-width": 2 })), "学習に使用"),
-      h("span", {}, s("svg", { width: 28, height: 8 }, s("line", { x1: 0, x2: 28, y1: 4, y2: 4, stroke: "var(--axis)", "stroke-width": 2, "stroke-dasharray": "5 4" })), "検証に使用"),
-      h("span", {}, s("svg", { width: 28, height: 8 }, s("line", { x1: 0, x2: 28, y1: 4, y2: 4, stroke: "var(--axis)", "stroke-width": 2, "stroke-dasharray": "2 4" })), "同じデータで評価"),
+      // つながりの種類は、図と同じ流れる印の形（丸い粒・長い棒・棒と粒）で見せる。下地の線はどれも同じ実線
+      ...[["train", "学習に使用"], ["val", "検証に使用"], ["same_data", "同じデータで評価"]].map(([kind, text]) =>
+        h("span", {}, s("svg", { width: 60, height: 8, class: `lin-link ${kind}` },
+          s("line", { class: "lin-edge", x1: 0, x2: 60, y1: 4, y2: 4 }),
+          s("line", { class: "lin-flow legend-kind", x1: 4, x2: 60, y1: 4, y2: 4 })), text)),
       h("span", {}, h("i", { class: "box", style: { background: "var(--good)" } }), "有効"),
       h("span", {}, h("i", { class: "box", style: { background: "var(--muted)" } }), "候補"),
       h("span", {}, h("i", { class: "box", style: { background: "var(--bad)" } }), "却下")),
@@ -1370,12 +1372,25 @@ async function viewJob(root, [id]) {
     try { const r = await api(`/jobs/${id}/stop`, { method: "POST", body: {} }); toast(r.stop_note ? `止めました（${r.stop_note}）` : "止めました"); } catch (err) { toast(err.message, "error"); }
   } }, job.moves_car ? "■ 車体を止めて終了" : "止める");
   const producedLink = h("span");
+  // 出力がまだない間は、大きな黒い枠ではなく、なぜ空なのかを1行で書く
+  const emptyNote = h("div", { class: "log-empty" });
+  log.classList.add("is-empty");
+  log.append(emptyNote);
+  const showEmpty = (status) => {
+    if (!log.classList.contains("is-empty")) return;
+    emptyNote.textContent = status === "running"
+      ? (job.kind === "window" ? "この画面のツールは、ここに出力を書き出しません。操作は開いたウィンドウで行います。" : "出力を待っています…")
+      : "出力はありませんでした。";
+  };
+  const hideEmpty = () => { if (log.classList.contains("is-empty")) { log.classList.remove("is-empty"); emptyNote.remove(); } };
+  showEmpty(job.status);
   let since = 0, stick = true;
   log.addEventListener("scroll", () => { stick = log.scrollTop + log.clientHeight >= log.scrollHeight - 20; });
   const poll = async () => {
     try {
       const res = await api(`/jobs/${id}/log?since=${since}`);
       since = res.next;
+      if (res.lines.length) hideEmpty(); else showEmpty(res.status);
       for (const line of res.lines) log.append(h("div", { class: /error|traceback|failed|失敗/i.test(line) ? "err" : /✓|success|finished|成功/i.test(line) ? "ok" : "" }, line || " "));
       if (stick) log.scrollTop = log.scrollHeight;
       statusEl.replaceChildren(statusDot(res.status), res.exit_code !== null && res.exit_code !== undefined ? h("span", { class: "muted small" }, `  終了コード ${res.exit_code}`) : null);
@@ -1386,7 +1401,7 @@ async function viewJob(root, [id]) {
         const v = job.produces.split("/").pop();
         if (state.catalog.models.find((m) => m.version === v)) producedLink.replaceChildren(h("a", { href: `#/models/${v}` }, `作ったモデル ${v} を開く →`));
       }
-    } catch (err) { log.append(h("div", { class: "err" }, err.message)); }
+    } catch (err) { hideEmpty(); log.append(h("div", { class: "err" }, err.message)); }
   };
   root.append(h("div", { class: "stack" },
     h("section", { class: "card" },
@@ -1398,7 +1413,8 @@ async function viewJob(root, [id]) {
           job.produces ? [h("dt", {}, "成果物"), h("dd", {}, h("span", { class: "mono" }, job.produces), " ", producedLink)] : null,
           job.stop_note ? [h("dt", {}, "停止"), h("dd", {}, job.stop_note)] : null),
         h("div", { class: "row" }, stopBtn, h("button", { type: "button", class: "ghost", onclick: () => launch(job.workflow, job.args.map((a) => (/\s/.test(a) ? `"${a}"` : a)).join(" ")) }, "同じ引数でもう一度…")))),
-    job.kind === "window" ? h("div", { class: "alert info" }, healthBadge("unknown", "画面"), "別のウィンドウで開いています。閉じるとこのジョブも終わります。") : null,
+    job.kind === "window" ? h("div", { class: "alert info" }, healthBadge("unknown", "画面"),
+      job.status === "running" ? "別のウィンドウで開いています。閉じるとこのジョブも終わります。" : "別のウィンドウで開く画面のツールです。ウィンドウを閉じた時にこのジョブも終わりました。") : null,
     log));
   poll();
 }
@@ -1564,12 +1580,23 @@ async function render() {
 window.addEventListener("hashchange", render);
 document.getElementById("refresh").addEventListener("click", async () => { await loadCatalog(true); render(); toast("最新の状態を読み直しました"); });
 document.getElementById("menu-toggle").addEventListener("click", () => document.body.classList.toggle("menu-open"));
-document.getElementById("theme-toggle").addEventListener("click", () => {
-  const dark = document.documentElement.dataset.theme === "dark" || (!document.documentElement.dataset.theme && matchMedia("(prefers-color-scheme: dark)").matches);
-  document.documentElement.dataset.theme = dark ? "light" : "dark";
+// 表示の明暗の切り替え。ボタンには押すと何になるかを出す（「テーマ」だけでは分からないため）
+const themeButton = document.getElementById("theme-toggle");
+const darkQuery = matchMedia("(prefers-color-scheme: dark)");
+const isDark = () => document.documentElement.dataset.theme === "dark" || (!document.documentElement.dataset.theme && darkQuery.matches);
+function syncThemeButton() {
+  const next = isDark() ? "明るい表示" : "暗い表示";
+  themeButton.textContent = `${isDark() ? "☀" : "☾"} ${next}にする`;
+  themeButton.title = `画面を${next}に切り替えます（今は${isDark() ? "暗い" : "明るい"}表示）`;
+}
+themeButton.addEventListener("click", () => {
+  document.documentElement.dataset.theme = isDark() ? "light" : "dark";
   try { localStorage.setItem("picarx-theme", document.documentElement.dataset.theme); } catch { /* 保存できなくても表示は変える */ }
+  syncThemeButton();
 });
+darkQuery.addEventListener("change", syncThemeButton);
 try { const t = localStorage.getItem("picarx-theme"); if (t) document.documentElement.dataset.theme = t; } catch { /* なし */ }
+syncThemeButton();
 
 (async () => {
   try {

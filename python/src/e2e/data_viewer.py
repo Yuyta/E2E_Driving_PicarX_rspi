@@ -816,13 +816,23 @@ class SessionTimeline(QWidget):
         painter.drawPixmap(0, 0, self._base_pixmap)
         rect = self._plot_rect()
         band_top = self.BAND_TOP
+        # 見出しの続き。ふだんは操作の案内、帯の上にカーソルがある時はそのフレームの値を出す。
+        # 見出しの実際の幅の後ろに置き、セッション名と重ならないようにする
         if self._hover is not None:
             hover = self.table.rows[self.rows[self._hover]]
-            text = f"#{hover['index']}  {hover['time_s']} 秒  {hover['steering_deg']}°"
+            text = f"#{hover['index']}  {hover['time_s']} 秒  舵角 {hover['steering_deg']}°"
+            painter.setPen(QColor(C_TEXT))
+        else:
+            text = "ドラッグで範囲を選択"
             painter.setPen(QColor(C_MUTED))
-            painter.drawText(
-                QRectF(rect.left() + 190, 0, rect.width() - 190, 18), Qt.AlignLeft, text
-            )
+        metrics = painter.fontMetrics()
+        left = rect.left() + metrics.horizontalAdvance(self._header_text() + "  ・  ")
+        room = max(0.0, rect.right() - left)
+        painter.drawText(
+            QRectF(left, 0, room, 18),
+            Qt.AlignLeft,
+            metrics.elidedText(text, Qt.ElideRight, int(room)),
+        )
 
         if self.selection is not None:
             a, b = self.selection
@@ -840,22 +850,28 @@ class SessionTimeline(QWidget):
             painter.setPen(QPen(QColor(C_TEXT), 2))
             painter.drawLine(QPointF(x, band_top - 6), QPointF(x, rect.bottom()))
 
+    def _header_text(self) -> str:
+        """見出しの前半（セッション名とフレーム数）。後半は paintEvent が状態に合わせて書く"""
+        session = self.table.sessions[self.session_index].session_dir.name
+        return f"{session}  ・  {len(self.rows):,} フレーム"
+
     def _render_base(self) -> QPixmap:
         """Render session-sized chart content once; selection and hover stay cheap."""
         pixmap = QPixmap(self.size())
         pixmap.fill(QColor(C_SURFACE))
         painter = QPainter(pixmap)
+        # 見出しの続きは paintEvent が同じ文字の幅を測って書くので、同じ字体で描く
+        painter.setFont(self.font())
         painter.setRenderHint(QPainter.Antialiasing)
         rect = self._plot_rect()
         rows = [self.table.rows[r] for r in self.rows]
         n = len(rows)
         width = max(1, int(rect.width()))
-        session = self.table.sessions[self.session_index].session_dir.name
         painter.setPen(QColor(C_MUTED))
         painter.drawText(
             QRectF(rect.left(), 0, rect.width(), 18),
             Qt.AlignLeft,
-            f"{session}  ・  {n:,} フレーム  ・  ドラッグで範囲を選択",
+            self._header_text() + "  ・  ",
         )
         band_top = self.BAND_TOP
         for x in range(width):
@@ -2021,6 +2037,17 @@ class ViewerStartup(QMainWindow):
     def _on_failed(self, message: str) -> None:
         QMessageBox.critical(self, "読み込めません", message)
         self.close()
+
+    def closeEvent(self, event) -> None:
+        # 読み込みの途中で閉じられた時。読み込みのスレッドが動いたままアプリが終わると、Qt が
+        # プロセスを強制終了させる（終了コード 0xC0000409）。結果は受け取らずに、窓を隠して
+        # 読み込みが終わるのを待ってから閉じる
+        if self.loader.isRunning():
+            self.loader.loaded.disconnect(self._on_loaded)
+            self.loader.failed.disconnect(self._on_failed)
+            self.hide()
+            self.loader.wait()
+        super().closeEvent(event)
 
 
 def main(argv: Optional[List[str]] = None) -> int:

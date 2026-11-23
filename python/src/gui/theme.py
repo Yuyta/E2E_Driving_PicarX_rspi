@@ -41,7 +41,9 @@ QGroupBox {{
 }}
 QGroupBox::title {{ subcontrol-origin: padding; subcontrol-position: top left;
     left: 16px; top: 13px; padding: 0; color: {TEXT}; background: transparent; }}
-QGroupBox > QWidget {{ background: transparent; }}
+/* 枠の中のただの入れ物だけを透明にする（.QWidget は派生クラスに当たらない）。QWidget に
+   すると枠の直下の入力欄まで透明になり、Windows 11 の見た目ではプルダウンの一覧が黒くなる */
+QGroupBox > .QWidget {{ background: transparent; }}
 QGroupBox QLabel {{ font-weight: normal; font-size: 10pt; }}
 QScrollArea {{ background: transparent; border: none; }}
 QScrollArea > QWidget > QWidget {{ background: transparent; }}
@@ -65,6 +67,11 @@ QPushButton#danger {{ background: {DANGER}; border-color: {DANGER}; color: white
     font-weight: 700; }}
 QPushButton#danger:hover {{ background: {DANGER_HOVER}; color: white; }}
 QComboBox::drop-down {{ border: 0; width: 22px; }}
+/* プルダウンを開いた時の一覧。OS の色に任せず、画面と同じ明るい色で描く。Fusion は一覧の
+   選んでいる行を QComboBox 自身の選択の色で塗るので、そちらも淡い色にして文字を読めるようにする */
+QComboBox {{ selection-background-color: {ACCENT_SOFT}; selection-color: {TEXT}; }}
+QComboBox QAbstractItemView {{ background: {SURFACE}; color: {TEXT}; border: 1px solid {BORDER};
+    outline: 0; selection-background-color: {ACCENT_SOFT}; selection-color: {TEXT}; }}
 /* −・＋ のボタンを横に置く数値の欄。中の矢印は幅 0 で隠す（NoButtons にすると、スタイルを
    当てた時に Qt が数字を描かない） */
 QSpinBox#stepper {{ padding: 2px 6px; min-height: 26px; font-size: 11pt; font-weight: 700; }}
