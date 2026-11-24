@@ -35,7 +35,7 @@ from src.models import DRIVE_SPEED, MIN_MOVING_SPEED, DriveDirection
 from src.picarx_client.client import PicarxClient
 
 try:
-    from .avoidance import AvoidancePolicy, Decision
+    from .avoidance import AvoidancePolicy, Decision, turn_floor
     from .cycle_profiler import CycleProfiler
     from .dataset.disengagement_manager import DisengagementBuffer
     from .gamepad import Gamepad, PadInput
@@ -49,7 +49,7 @@ try:
     from .safety.trajectory_tracker import TrajectoryTracker
     from .safety.watchdog import CommunicationWatchdog
 except ImportError:
-    from src.e2e.avoidance import AvoidancePolicy, Decision
+    from src.e2e.avoidance import AvoidancePolicy, Decision, turn_floor
     from src.e2e.cycle_profiler import CycleProfiler
     from src.e2e.dataset.disengagement_manager import DisengagementBuffer
     from src.e2e.gamepad import Gamepad, PadInput
@@ -752,14 +752,16 @@ class RemoteAutonomousDriver:
                 # ----------------------------------------------------
                 # 6. Phase 3.2: 動的車速制御 (Speed Limiter)
                 # ----------------------------------------------------
+                # 避けている間は意図の向きへ少なくとも20°切る（Pi の走行ループと同じ）
+                steer_angle = turn_floor(int(steering_norm * self.max_steering_angle), decision)
+                # 速度は実際に切る舵角で決める（下限で強く切った分も落とす）
                 dynamic_speed = self.speed_limiter.calculate(
-                    steering_norm=steering_norm,
+                    steering_norm=steer_angle / self.max_steering_angle,
                     obstacle_distance_cm=distance,
                 )
                 if decision is not None and decision.slow:
                     # カメラが前を塞がっていそうと見ている（超音波で見えない物かもしれない）
                     dynamic_speed = min(dynamic_speed, self.min_speed)
-                steer_angle = int(steering_norm * self.max_steering_angle)
 
                 # 直前リングバッファに保存
                 self.buffer.append(

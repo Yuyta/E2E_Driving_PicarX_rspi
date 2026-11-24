@@ -1,0 +1,26 @@
+# 依存関係の更新の提案（ROADMAP の「保守」）。脆弱性の通知（Dependabot alerts）は
+# リポジトリの Settings → Code security で有効にする（このファイルでは有効にならない）。
+version: 2
+updates:
+  - package-ecosystem: "uv"
+    directory: "/python"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      python-minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "cargo"
+    directory: "/rust"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      rust-minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"

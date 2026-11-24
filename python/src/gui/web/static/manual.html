@@ -42,6 +42,7 @@
       <tr><td>新しいモデルを作る</td><td><a href="#/manual?s=tool-train">モデル学習</a></td><td>—</td></tr>
       <tr><td>設定を変えたら良くなるか、偏りなく確かめる</td><td><a href="#/manual?s=tool-cross_validate">交差検証</a> → <a href="#/manual?s=tool-compare_cv">交差検証の比較</a></td><td>—</td></tr>
       <tr><td>モデルを採用するか決める</td><td><a href="#/manual?s=cc-models">モデル</a> 画面の「採否を変える」</td><td>—</td></tr>
+      <tr><td>新しいモデルが、前にぶつかった場面で避けるか確かめる</td><td><a href="#/manual?s=gui-viewer">データ確認・ラベル</a> で門番のタグを付ける → <a href="#/manual?s=tool-gate">門番の試験</a></td><td>—</td></tr>
       <tr><td>モデルを Pi に入れて使う</td><td><a href="#/manual?s=tool-deploy_push">Pi へデプロイ</a>（失敗したら <a href="#/manual?s=tool-deploy_rollback">Pi のモデルを戻す</a>）</td><td>—</td></tr>
       <tr><td>Pi で自律走行させる</td><td><a href="#/manual?s=tool-pi_autopilot">Pi 自律走行</a></td><td class="moves-cell">動く</td></tr>
       <tr><td>走りの良し悪しをモデルごとに比べる</td><td><a href="#/manual?s=tool-deploy_pull_runs">走行記録の取り込み</a> → <a href="#/manual?s=cc-runs">走行記録</a> 画面</td><td>—</td></tr>
@@ -65,7 +66,7 @@
       <tr><td><span class="ph-icon" data-phase="collect" style="--ph: #2a78d6"></span> データ収集</td><td>走らせて走行データを記録する。1回 150 秒ほどで、セッションが <code>data/raw/&lt;日時&gt;</code> にできる</td><td><a href="#/manual?s=cc-data">データ</a></td><td><a href="#/manual?s=gui-collector">走行データ収集</a>、<a href="#/manual?s=tool-auto_collector">自動データ収集</a></td></tr>
       <tr><td><span class="ph-icon" data-phase="curate" style="--ph: #13899a"></span> データ整備</td><td>記録の質を確かめ、おかしいフレームを除外し、マニフェストで封をする</td><td><a href="#/manual?s=cc-data">データ</a></td><td><a href="#/manual?s=tool-session_report">セッションの報告</a>、<a href="#/manual?s=gui-viewer">データ確認・ラベル</a>、<a href="#/manual?s=tool-manifest">マニフェスト</a></td></tr>
       <tr><td><span class="ph-icon" data-phase="train" style="--ph: #7b5fd6"></span> モデル学習</td><td>モデルを作る。出力先は次の版（<code>models/v007</code> など）が自動で入る</td><td><a href="#/manual?s=cc-models">モデル</a></td><td><a href="#/manual?s=tool-train">モデル学習</a></td></tr>
-      <tr><td><span class="ph-icon" data-phase="evaluate" style="--ph: #c46f1a"></span> モデル評価</td><td>交差検証で今の設定と比べ、モデル詳細の「採否を変える」で <span class="badge stage-approved">有効</span> か <span class="badge stage-rejected">却下</span> にする（理由も書く）</td><td><a href="#/manual?s=cc-compare">比較・評価</a></td><td><a href="#/manual?s=tool-cross_validate">交差検証</a>、<a href="#/manual?s=tool-compare_cv">交差検証の比較</a></td></tr>
+      <tr><td><span class="ph-icon" data-phase="evaluate" style="--ph: #c46f1a"></span> モデル評価</td><td>交差検証で今の設定と比べ、モデル詳細の「採否を変える」で <span class="badge stage-approved">有効</span> か <span class="badge stage-rejected">却下</span> にする（理由も書く）</td><td><a href="#/manual?s=cc-compare">比較・評価</a></td><td><a href="#/manual?s=tool-cross_validate">交差検証</a>、<a href="#/manual?s=tool-compare_cv">交差検証の比較</a>、<a href="#/manual?s=tool-gate">門番の試験</a></td></tr>
       <tr><td><span class="ph-icon" data-phase="deploy" style="--ph: #2f9e5b"></span> デプロイ</td><td>有効なモデルを Pi へ送り、使用中にする。走りが悪ければ戻す</td><td><a href="#/manual?s=cc-deploy">デプロイ</a></td><td><a href="#/manual?s=tool-deploy_push">Pi へデプロイ</a>、<a href="#/manual?s=tool-deploy_rollback">Pi のモデルを戻す</a></td></tr>
       <tr><td><span class="ph-icon" data-phase="operate" style="--ph: #c8467f"></span> 実走行</td><td>自律走行させ、走行の記録を取り込んで人の介入の回数を比べる。介入が多い場面のデータを集めに 1 へ戻る</td><td><a href="#/manual?s=cc-runs">走行記録</a></td><td><a href="#/manual?s=tool-pi_autopilot">Pi 自律走行</a>、<a href="#/manual?s=tool-deploy_pull_runs">走行記録の取り込み</a></td></tr>
       <tr><td><span class="ph-icon" data-phase="common" style="--ph: #898781"></span> 共通</td><td>どのフェーズでも使う</td><td><a href="#/manual?s=cc-lineage">トレーサビリティ</a>、<a href="#/manual?s=cc-tools">ツール・ジョブ</a></td><td><a href="#/manual?s=gui-app">会話・手動操作</a></td></tr>
@@ -191,6 +192,7 @@
     <li><b>フレーム</b>タブ: 「表示」と「条件」で絞り込みます。表の色は、緑=学習に使う、灰=使わない（止まっている等）、黄=注意あり、赤=手作業で除外、です。見出しの右クリックで、表示する列を選べます。</li>
     <li>表の下の帯は、セッション全体の流れ（状態の色と舵角の線）です。ドラッグした範囲のフレームを選べます。</li>
     <li>右側の「ラベル」で、選んだすべてのフレームに、タグ、学習からの除外、意図・前方の上書き、メモを付けます。</li>
+    <li><a href="#/manual?s=tool-gate">門番の試験</a>の場面は、タグの候補にある <code>門番:左へ避ける</code>、<code>門番:右へ避ける</code>、<code>門番:まっすぐ</code> を付けて選びます。ぶつかった、詰まった、避け損ねた場面には避けるべき向きを、普通にまっすぐ走れた場面には「まっすぐ」を付けます。学習から除外したフレームにも付けられます（試験は学習と別に使います）。</li>
     <li><b>統計</b>タブ: 列ごとの数と割合、2つの列の組み合わせです。表の行をダブルクリックすると、その値で絞り込んでフレームへ戻ります。</li>
   </ul>
   <table>
@@ -383,6 +385,21 @@
     </tbody></table>
   </div>
 
+  <div class="tool" id="tool-gate">
+    <h4>門番の試験 <code>src.e2e.evaluation.gate</code></h4>
+    <p class="when"><b>使う場面</b>: 新しいモデルを Pi へ送る前に、門番のタグを付けた場面で1フレームずつ採点する。左・右へ避けるべき場面ではその向きの意図を渡して 5.25°以上切るか、まっすぐの場面では意図を渡さず（おまかせ）5.25°以下に収まるかを数えます。記録の意図は使いません。結果はモデルのフォルダの <code>gate.json</code> に残り、<a href="#/manual?s=cc-models">モデル</a> 詳細に出ます。<em>「Pi へデプロイ」はこの試験を中で行い、合格しないモデルを送りません</em>。記録した画像の再生なので、モデルの判断で次の画像が変わる走り方までは試せません。</p>
+    <p>合格の条件（提案値）: 避ける場面とまっすぐの場面がそれぞれ 5 フレーム以上、合格率が 左・右 70% 以上・まっすぐ 90% 以上、比べる元（Pi で使用中、なければ <span class="badge stage-approved">有効</span> の版）より 5 ポイントを超えて下がらない。</p>
+    <table class="args"><thead><tr><th>引数</th><th>意味</th><th>既定</th></tr></thead><tbody>
+      <tr><td><code>--model_dir</code></td><td>試すモデル（<code>models/&lt;版&gt;</code>）。<code>--list</code> の時は不要</td><td>—</td></tr>
+      <tr><td><code>--baseline</code></td><td>比べる元のモデル。<code>auto</code> は Pi で使用中か有効の版、<code>none</code> は比べない</td><td><code>auto</code></td></tr>
+      <tr><td><code>--data_dir</code></td><td>場面を探すフォルダ（複数可）</td><td><code>data/raw data/interventions</code></td></tr>
+      <tr><td><code>--min_cases</code> / <code>--max_drop</code></td><td>必要な場面の数 / 比べる元からの下がり幅の上限（0〜1）</td><td><code>5</code> / <code>0.05</code></td></tr>
+      <tr><td><code>--list</code></td><td>採点せず、門番の場面の数だけを表示</td><td>なし</td></tr>
+      <tr><td><code>--no_write</code></td><td><code>gate.json</code> を書かない</td><td>なし</td></tr>
+    </tbody></table>
+    <p class="example">例: <code>--model_dir models/v007</code> / 比べる元を指定 <code>--model_dir models/v007 --baseline models/v006</code> / 場面の確認 <code>--list</code></p>
+  </div>
+
   <div class="tool" id="tool-registry_compare">
     <h4>モデル比較 <code>src.e2e.registry.compare</code></h4>
     <p class="when"><b>使う場面</b>: データとモデルの一覧を文字の表で出す（Control Center のモデル画面と同じ内容の簡易版）。</p>
@@ -406,11 +423,13 @@
 
   <div class="tool" id="tool-deploy_push">
     <h4>Pi へデプロイ <code>src.e2e.deploy.pi push</code> <span class="badge confirm-badge">Pi を変更</span></h4>
-    <p class="when"><b>使う場面</b>: 採用したモデルを Pi に入れて、使用中にする。次の自律走行の開始から使われます。<em>「有効」にしたモデルを送ります</em>（そうでないと警告が出ます）。結果はデプロイの記録に残ります。</p>
+    <p class="when"><b>使う場面</b>: 採用したモデルを Pi に入れて、使用中にする。次の自律走行の開始から使われます。<em>「有効」にしたモデルを送ります</em>（そうでないと警告が出ます）。送る前に <a href="#/manual?s=tool-gate">門番の試験</a> を行い、<em>合格しないモデルは理由を表示して送りません</em>。結果は試験の結果と一緒にデプロイの記録に残ります。</p>
     <table class="args"><thead><tr><th>引数</th><th>意味</th><th>既定</th></tr></thead><tbody>
       <tr><td><code>push</code> <span class="req">必須</span></td><td>デプロイの操作（最初に書く）</td><td>—</td></tr>
       <tr><td><code>--model_dir</code> <span class="req">必須</span></td><td>送るモデル（<code>models/&lt;版&gt;</code>）</td><td>—</td></tr>
       <tr><td><code>--no_activate</code></td><td>入れるだけで、使用中にはしない</td><td>なし</td></tr>
+      <tr><td><code>--skip_gate "理由"</code></td><td>門番の試験をせずに送る。理由が必要で、デプロイの記録に残ります</td><td>なし</td></tr>
+      <tr><td><code>--baseline</code> / <code>--gate_data_dir</code></td><td>門番の試験の比べる元 / 場面を探すフォルダ</td><td><code>auto</code> / <code>data/raw data/interventions</code></td></tr>
       <tr><td><code>--host</code>（<code>push</code> の前）</td><td>接続先。なければ <code>PICARX_SSH_HOST</code></td><td>環境変数</td></tr>
       <tr><td><code>--pi_bin</code>（<code>push</code> の前）</td><td>Pi の実行ファイル</td><td><code>~/picar-x-rust</code></td></tr>
     </tbody></table>

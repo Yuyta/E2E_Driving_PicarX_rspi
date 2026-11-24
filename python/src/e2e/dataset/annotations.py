@@ -32,6 +32,18 @@ except ImportError:
 ANNOTATIONS_DIRNAME = "annotations"
 SCHEMA_VERSION = 1
 
+# 門番の試験（`evaluation/gate.py`）の場面を選ぶタグ → 期待する動き。日本語が正式な名前で、
+# データビューアのタグの候補にいつも出す。英語は別名
+GATE_TAGS = {
+    "門番:左へ避ける": "left",
+    "門番:右へ避ける": "right",
+    "門番:まっすぐ": "straight",
+    "gate:left": "left",
+    "gate:right": "right",
+    "gate:straight": "straight",
+}
+GATE_TAG_CHOICES = ("門番:左へ避ける", "門番:右へ避ける", "門番:まっすぐ")
+
 # 上書きできる学習のラベル
 OVERRIDE_FIELDS = ("intent", "blocked")
 FIELDS = ("tags", "exclude", "note") + OVERRIDE_FIELDS

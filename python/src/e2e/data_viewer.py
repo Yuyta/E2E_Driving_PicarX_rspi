@@ -110,7 +110,7 @@ from PySide6.QtWidgets import (
 
 try:
     from ..gui import theme
-    from .dataset.annotations import AnnotationStore
+    from .dataset.annotations import GATE_TAG_CHOICES, AnnotationStore
     from .dataset.frame_table import (
         COLUMN_BY_KEY,
         COLUMNS,
@@ -129,7 +129,7 @@ try:
     )
     from .intent import INTENTS
 except ImportError:
-    from src.e2e.dataset.annotations import AnnotationStore
+    from src.e2e.dataset.annotations import GATE_TAG_CHOICES, AnnotationStore
     from src.e2e.dataset.frame_table import (
         COLUMN_BY_KEY,
         COLUMNS,
@@ -1687,7 +1687,9 @@ class DataViewer(QMainWindow):
     def _refresh_tag_choices(self) -> None:
         current = self.tag_input.currentText()
         self.tag_input.clear()
-        self.tag_input.addItems(self.store.all_tags())
+        # 門番の試験のタグは、まだ誰も付けていなくても選べるようにする
+        tags = self.store.all_tags()
+        self.tag_input.addItems(tags + [t for t in GATE_TAG_CHOICES if t not in tags])
         self.tag_input.setCurrentText(current)
 
     # ---- 統計 ----

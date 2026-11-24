@@ -1,0 +1,1059 @@
+{
+ "format": 1,
+ "model_version": "v006",
+ "model_sha256": "8721cdfbfe2a0588ee9fd845c1789f66b70f09cf366c4451ffedb0424a0bf473",
+ "tested_at": "2026-11-24T21:04:40+0900",
+ "passed": false,
+ "reasons": [
+  "右へ避ける: 合格率 42%（28/67）が基準 70% より低い"
+ ],
+ "suite": {
+  "fingerprint": "048e4eeda0dd316d5fbd493dc18d6189e21cefe90a4a7676b56159310523a97f",
+  "cases": 144,
+  "sessions": [
+   "20261115_162318",
+   "20261115_172737",
+   "20261115_172906"
+  ],
+  "warnings": []
+ },
+ "criteria": {
+  "turn_min_deg": 5.25,
+  "straight_max_deg": 5.25,
+  "min_rate": {
+   "left": 0.7,
+   "right": 0.7,
+   "straight": 0.9
+  },
+  "max_drop": 0.05,
+  "min_cases": 5
+ },
+ "by_kind": {
+  "left": {
+   "cases": 39,
+   "passed": 38,
+   "rate": 0.9744
+  },
+  "right": {
+   "cases": 67,
+   "passed": 28,
+   "rate": 0.4179
+  },
+  "straight": {
+   "cases": 38,
+   "passed": 38,
+   "rate": 1.0
+  }
+ },
+ "frames": [
+  {
+   "frame": "20261115_162318/frame_000047.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -19.69,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000057.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 21.92,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000058.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 13.01,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000059.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 5.17,
+   "passed": false
+  },
+  {
+   "frame": "20261115_162318/frame_000060.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 0.99,
+   "passed": false
+  },
+  {
+   "frame": "20261115_162318/frame_000073.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -4.14,
+   "passed": false
+  },
+  {
+   "frame": "20261115_162318/frame_000091.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -12.62,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000092.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -14.9,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000093.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -20.72,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000094.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -29.37,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000100.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -30.77,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000101.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -31.2,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000102.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -33.21,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000103.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -33.88,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000104.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -32.11,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000105.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -31.57,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000108.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -25.88,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000109.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -17.21,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000110.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -15.18,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000114.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -13.99,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000145.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.05,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000146.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.02,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000147.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.02,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000148.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.01,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000149.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.03,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000150.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.02,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000151.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.02,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000152.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.02,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000158.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -9.1,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000163.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -7.79,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000167.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -11.55,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000168.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -10.26,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000169.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -6.57,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000170.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -12.8,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000171.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -16.36,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000172.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -17.55,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000174.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -22.43,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000182.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -23.39,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000212.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -20.02,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000213.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -27.62,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000214.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -29.54,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000215.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -30.61,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000217.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -12.57,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000218.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -24.79,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000219.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -26.83,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000232.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 8.91,
+   "passed": true
+  },
+  {
+   "frame": "20261115_162318/frame_000236.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 2.08,
+   "passed": false
+  },
+  {
+   "frame": "20261115_162318/frame_000237.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 2.81,
+   "passed": false
+  },
+  {
+   "frame": "20261115_162318/frame_000238.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 3.32,
+   "passed": false
+  },
+  {
+   "frame": "20261115_162318/frame_000239.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 1.52,
+   "passed": false
+  },
+  {
+   "frame": "20261115_162318/frame_000240.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 0.86,
+   "passed": false
+  },
+  {
+   "frame": "20261115_162318/frame_000241.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 0.79,
+   "passed": false
+  },
+  {
+   "frame": "20261115_162318/frame_000242.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 0.93,
+   "passed": false
+  },
+  {
+   "frame": "20261115_162318/frame_000249.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": -0.52,
+   "passed": false
+  },
+  {
+   "frame": "20261115_162318/frame_000259.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": -0.22,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172737/frame_000004.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 1.29,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172737/frame_000012.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 1.6,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172737/frame_000019.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 3.09,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172737/frame_000023.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 5.08,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172737/frame_000025.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 2.29,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172737/frame_000026.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 5.27,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000027.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 5.32,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000028.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 6.23,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000029.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 8.97,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000030.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 10.73,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000031.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 13.25,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000032.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 17.01,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000033.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 20.25,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000034.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 20.26,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000035.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 18.39,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000036.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 21.28,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000057.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 19.37,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000284.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.06,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000285.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.06,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000286.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.07,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000287.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.1,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000288.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.12,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000289.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.14,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000290.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.12,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000291.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -16.65,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000292.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -16.91,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000293.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -20.23,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000294.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -24.68,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000295.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -26.34,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000296.jpg",
+   "expect": "left",
+   "intent": "left",
+   "steer_deg": -28.53,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000322.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.09,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000323.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.09,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000324.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.09,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000325.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.09,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000326.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.09,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000327.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.09,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000328.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.09,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000329.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": -0.66,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172737/frame_000330.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": -0.66,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172737/frame_000331.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 8.85,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000332.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 18.78,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000333.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 18.67,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000338.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 21.87,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000380.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": -0.23,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172737/frame_000391.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": -0.66,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172737/frame_000441.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 1.06,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172737/frame_000442.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": -0.13,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172737/frame_000443.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 0.56,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172737/frame_000444.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 2.21,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172737/frame_000445.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 3.27,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172737/frame_000446.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 4.02,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172737/frame_000474.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 6.87,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000481.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 6.76,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000482.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 8.68,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000483.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 8.77,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000484.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 6.19,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000485.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 2.26,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172737/frame_000486.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 1.7,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172737/frame_000487.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": -0.46,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172737/frame_000488.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": -0.63,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172737/frame_000489.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": -1.0,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172737/frame_000490.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": -1.19,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172737/frame_000491.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": -1.01,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172737/frame_000492.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": -0.15,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172737/frame_000493.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 0.49,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172737/frame_000494.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 7.98,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000495.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 14.23,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000496.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 12.64,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000497.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 8.64,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172737/frame_000508.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.03,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172906/frame_000018.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 4.1,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172906/frame_000019.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 3.72,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172906/frame_000020.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 2.52,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172906/frame_000021.jpg",
+   "expect": "right",
+   "intent": "right",
+   "steer_deg": 3.11,
+   "passed": false
+  },
+  {
+   "frame": "20261115_172906/frame_000035.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.03,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172906/frame_000036.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.04,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172906/frame_000037.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.04,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172906/frame_000038.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.07,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172906/frame_000039.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.07,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172906/frame_000040.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.08,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172906/frame_000050.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.13,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172906/frame_000051.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.11,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172906/frame_000052.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.14,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172906/frame_000053.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.16,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172906/frame_000054.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.13,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172906/frame_000055.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.16,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172906/frame_000056.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.16,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172906/frame_000057.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.16,
+   "passed": true
+  },
+  {
+   "frame": "20261115_172906/frame_000058.jpg",
+   "expect": "straight",
+   "intent": "any",
+   "steer_deg": -0.15,
+   "passed": true
+  }
+ ],
+ "baseline": null
+}

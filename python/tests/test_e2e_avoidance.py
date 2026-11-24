@@ -104,3 +104,20 @@ def test_config_is_checked():
         AvoidanceConfig(blocked_enter=0.3, blocked_exit=0.5)
     with pytest.raises(ValueError):
         AvoidancePolicy().step(0.0, None, None, "straight")
+
+
+def test_turn_floor_matches_the_pi_while_avoiding():
+    """避けている間は意図の向きへ少なくとも20°切る（rust/src/autopilot/avoidance.rs と同じ）"""
+    from src.e2e.avoidance import AVOID_MIN_STEER_DEG, Decision, turn_floor
+
+    assert AVOID_MIN_STEER_DEG == 20
+    right = Decision("right", False, AVOID)
+    left = Decision("left", False, AVOID)
+    assert turn_floor(8, right) == 20
+    assert turn_floor(-5, right) == 20
+    assert turn_floor(30, right) == 30  # 強く切っていればそのまま
+    assert turn_floor(-8, left) == -20
+    assert turn_floor(-30, left) == -30
+    assert turn_floor(8, Decision("right", False, CRUISE)) == 8  # 避けていなければそのまま
+    assert turn_floor(3, Decision("any", False, AVOID)) == 3
+    assert turn_floor(3, None) == 3

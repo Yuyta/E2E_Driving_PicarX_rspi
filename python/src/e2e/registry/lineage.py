@@ -186,6 +186,25 @@ def _stage_fields(stage: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _gate_summary(report: Optional[Dict[str, Any]], onnx_sha256: Optional[str]):
+    """門番の試験の結果（`gate.json`、`evaluation/gate.py`）の要約。試していなければ None"""
+    if not report:
+        return None
+    baseline = report.get("baseline") or {}
+    return {
+        "passed": bool(report.get("passed")),
+        # 試した後に model.onnx が変わっていれば、その結果は今のモデルのものではない
+        "current": bool(onnx_sha256) and report.get("model_sha256") == onnx_sha256,
+        "tested_at": report.get("tested_at"),
+        "reasons": list(report.get("reasons") or []),
+        "cases": (report.get("suite") or {}).get("cases"),
+        "by_kind": report.get("by_kind") or {},
+        "baseline_version": baseline.get("version"),
+        "baseline_by_kind": baseline.get("by_kind") or {},
+        "regressed_frames": len(baseline.get("regressed_frames") or []),
+    }
+
+
 def collect_models(models_dir: Path) -> List[Dict[str, Any]]:
     models_dir = Path(models_dir)
     if not models_dir.is_dir():
@@ -203,6 +222,7 @@ def collect_models(models_dir: Path) -> List[Dict[str, Any]]:
         split = meta.get("split") or {}
         data = meta.get("data") or {}
         evaluation = _read_json(path / "eval_metrics.json")
+        onnx_sha256 = _short_hash(path / "model.onnx")
         models.append(
             {
                 "version": path.name,
@@ -217,7 +237,8 @@ def collect_models(models_dir: Path) -> List[Dict[str, Any]]:
                     "weights": (path / "best_model.pth").is_file(),
                     "eval": evaluation is not None,
                 },
-                "onnx_sha256": _short_hash(path / "model.onnx"),
+                "onnx_sha256": onnx_sha256,
+                "gate": _gate_summary(_read_json(path / "gate.json"), onnx_sha256),
                 "train_sessions": list(split.get("train_sessions") or meta.get("sessions") or []),
                 "val_sessions": list(split.get("val_sessions") or []),
                 "train_samples": split.get("train_samples"),
@@ -302,6 +323,16 @@ def model_checks(model: Dict[str, Any], sessions_by_id: Dict[str, Dict[str, Any]
         add("manifest", "warn", f"マニフェストのないセッション: {', '.join(unverified)}")
     elif used and not missing:
         add("manifest", "ok", "学習データは学習時のまま（マニフェストのハッシュが一致）")
+
+    gate = model.get("gate")
+    if gate is not None:
+        # 試していないモデルには印を付けない（Pi へ送る時に deploy.pi が試す）
+        if not gate["current"]:
+            add("gate", "warn", "門番の試験の後に model.onnx が変わった（試し直す）")
+        elif gate["passed"]:
+            add("gate", "ok", f"門番の試験に合格（{gate['cases']} フレーム）")
+        else:
+            add("gate", "warn", "門番の試験に不合格: " + "; ".join(gate["reasons"][:2]))
 
     for session_id, recorded_hash in model["annotations"].items():
         current = sessions_by_id.get(session_id, {}).get("annotation_hash")
