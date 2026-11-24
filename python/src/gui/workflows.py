@@ -254,6 +254,16 @@ WORKFLOWS = (
         id="evaluate",
     ),
     Workflow(
+        "門番の試験",
+        "門番のタグを付けた場面でモデルを1フレームずつ採点し、gate.json に残す"
+        "（合格しないモデルは Pi へ送らない）",
+        "src.e2e.evaluation.gate",
+        "evaluate",
+        arguments="--model_dir models/v006",
+        examples=(("採点", "--model_dir models/v006"), ("場面の一覧", "--list")),
+        id="gate",
+    ),
+    Workflow(
         "モデル比較",
         "登録済みモデルの評価値を比較",
         "src.e2e.registry.compare",
@@ -271,7 +281,7 @@ WORKFLOWS = (
     ),
     Workflow(
         "Pi へデプロイ",
-        "モデルを Pi へ送り、確かめてから使用中にする",
+        "門番の試験に合格したモデルを Pi へ送り、確かめてから使用中にする",
         "src.e2e.deploy.pi",
         "deploy",
         arguments="push --model_dir models/v006",

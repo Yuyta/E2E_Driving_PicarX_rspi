@@ -1,0 +1,77 @@
+name: Dependency audit
+
+# 依存関係の既知の脆弱性を調べる（ROADMAP の「保守」）。
+# Python は uv.lock を書き出して pip-audit、Rust は Cargo.lock を cargo-audit で調べる。
+# 新しい脆弱性は依存関係を変えなくても公開されるので、毎週も実行する。
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: security-audit-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: pip-audit (python/uv.lock)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: python
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Export the locked dependencies
+        # すべての extra（dev、voice、e2e）を含める。プロジェクト自身は PyPI にないので除く
+        run: >-
+          uv export --frozen --all-extras --no-hashes --no-emit-project
+          --format requirements-txt --output-file "$RUNNER_TEMP/requirements.txt"
+
+      - name: Run pip-audit
+        # 書き出した一覧は全部の版が固定済みなので、解決し直さずにそのまま調べる
+        run: >-
+          uvx --from pip-audit pip-audit
+          --requirement "$RUNNER_TEMP/requirements.txt"
+          --no-deps --disable-pip --progress-spinner off
+          --format markdown --output "$RUNNER_TEMP/pip-audit.md"
+
+      - name: Add the report to the summary
+        if: ${{ always() }}
+        run: |
+          {
+            echo "## pip-audit"
+            if [ -s "$RUNNER_TEMP/pip-audit.md" ]; then
+              cat "$RUNNER_TEMP/pip-audit.md"
+            else
+              echo "No known vulnerabilities found."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  rust:
+    name: cargo-audit (rust/Cargo.lock)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: rust
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@cargo-audit
+
+      - name: Run cargo-audit
+        # 保守されていないクレートなどの警告は表示だけにし、脆弱性だけで失敗にする
+        run: cargo audit --file Cargo.lock

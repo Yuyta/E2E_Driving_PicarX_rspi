@@ -1,0 +1,10 @@
+# cargo-audit の設定（.github/workflows/security-audit.yml）
+[advisories]
+ignore = [
+    # tract-nnef 0.21.12: NNEF のテンソルの読み込みでの範囲外読み取り。
+    # 走行サーバーは tract_onnx::onnx() で ONNX だけを読み、NNEF の読み込みは使わない。
+    # Pi はマニフェストの SHA256 を確かめてからモデルを読む（rust/src/autopilot/model.rs）。
+    # 修正済みの 0.21.16 以降は脆弱な time 0.3.41 に固定されるため、0.23 への更新
+    # （Docker でのビルドと Pi でのモデルの読み込みの確認が要る）までこの扱いにする。
+    "RUSTSEC-2026-0217",
+]

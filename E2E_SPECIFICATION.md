@@ -260,6 +260,13 @@ CPU推論を想定した4層の軽量CNN（推論時間の実測値は未記録�
 - **ステージと配置の記録 (`registry/stages.py`)**:
   - 採否は `models/registry.json` に置き、モデルと一緒に git で残す。`candidate`（候補、既定）、`approved`（有効）、`rejected`（却下）、`archived`（廃止）。変えるたびに前後のステージ、時刻、理由を履歴に足す。
   - `src.e2e.deploy.pi` の `push`（使用中にする）、`push --no_activate`（`install`）、`rollback` の結果を `data/deployments.jsonl` に追記する。接続先のホスト名は残さない。push で積み、rollback で1つ戻して、記録からわかる Pi の使用中の版を出す。記録の外で Pi を操作すると合わないので、Pi の最後の走行の版とも並べて見せる。
+- **門番の試験（回帰テスト） (`evaluation/gate.py`)**（2026-11-23）:
+  - データビューアのタグで場面を選ぶ。`門番:左へ避ける`、`門番:右へ避ける`（ぶつかった、詰まった、避け損ねた場面。避けるべき向き）、`門番:まっすぐ`（普通にまっすぐ走れた場面）。英語の別名 `gate:left` / `gate:right` / `gate:straight` も使える。1つのフレームに矛盾するタグがあれば試験を始めない。学習から除外したフレームにも付けられる（試験は学習と別に使う）。
+  - Pi へ送る `model.onnx` を、学習と同じ前処理（`metadata.json` の値）で1フレームずつ動かす。モデルへ渡す意図はタグで決める（左右へ避ける場面はその向き、まっすぐは `any`。記録の意図は人がパッドで押していた向きで場面の正解とは限らないので使わない）。走行モデルは向きを意図で受け取り、`any` ではまっすぐ進むので、「渡された向きへはっきり切るか」と「何も渡されない時に勝手に曲がらないか」を確かめる。左右は意図の向きへ 5.25°（`STRAIGHT_LIMIT`）以上切れば、まっすぐは舵角の大きさが 5.25°以下なら合格。
+  - 合格の条件（提案値）: 避ける場面とまっすぐの場面がそれぞれ5フレーム以上、合格率が左右 70%・まっすぐ 90% 以上、比べる元より種類ごとに 5 ポイントを超えて下がらない。比べる元は、配置の記録で Pi が使用中の版、なければ有効（`approved`）の最新の版（`--baseline` で指定、`none` で比べない）。前は合格し今回は不合格になったフレームを一覧にする。
+  - 結果は `models/<版>/gate.json`（フレームの名前と数値のみ。画像は含まない）。`model.onnx` のハッシュを残し、試した後にモデルが変わった結果は来歴で注意（warn）にする。Control Center のモデル詳細に合否と種類ごとの合格率を出す。
+  - `deploy.pi push` は送る前に試験をし、不合格か試験ができない時は理由を表示して送らず、配置の記録に `gate failed: …` を残す。人が `--skip_gate "<理由>"` を付けた時だけ試験なしで送り、理由を記録に残す。
+  - 記録した画像の再生なので、モデルの判断で次の画像が変わる閉じたループは試せない。走行全体の再生は M7 の記録装置で画像が残るようになってから。
 - **マニフェスト (`dataset/manifest.py`)**:
   - 走行データはセッション単位で追記のみとする。各セッションに `manifest.json`（ファイルごとの SHA256 と大きさ、全体のハッシュ）を作り、`--verify` で変更、欠落、追加を検出する。`metadata.json` は集計から作り直せるので対象外。既存のマニフェストは書き換えない。
 - **バックアップ (`scripts/backup.ps1`)**:
@@ -275,7 +282,7 @@ CPU推論を想定した4層の軽量CNN（推論時間の実測値は未記録�
   2. `/api/status` で Pi の状態を確認。`--gamepad` の時はパッドを読み、操作があれば人が運転を引き継ぐ（入力がなくなって1.5秒で自律に戻る、HOME で走行を終える）。引き継いでいる間はモデルを使わず、画像と人の操作を `data/interventions/<走行ID>/` に保存する（`intervention.py`）
   3. Pi が前進を拒否していれば、理由に応じて脱出または待機（`safety/body_status.py`）
   4. 指令と実際の動きの食い違いの検出（§4.7）。食い違いが1秒続くと止まり、介入（`motion_mismatch`）と記憶の出来事として記録して走行を終える。`--disable_motion_check` を付けた時だけ、旧スタック検知（後退と車体振りで脱出）を使う
-  5. 120×160 に変換し、ONNX Runtime でステアリング角を推論。モデルが意図を入力に持つ時は、障害物を避ける判断（`avoidance.py`）がいつ、どちらへ曲がるかを決めて意図で渡す。超音波が 50cm より近いか、塞がっている確率（学習済みの時だけ）が 0.6 以上で2フレーム続いたら曲がり始める。向きは上の層の意図が左右ならその向き、おまかせなら右から。超音波もカメラも空いた状態が4フレーム続き1秒たったら曲がり終え、4秒で空かないか Pi が障害物で止めたら反対側へ切り替える。塞がっている確率が 0.5 以上の間は最低の速度まで落とす。`--no_avoidance`、`--ignore_blocked` で切れる
+  5. 120×160 に変換し、ONNX Runtime でステアリング角を推論。モデルが意図を入力に持つ時は、障害物を避ける判断（`avoidance.py`）がいつ、どちらへ曲がるかを決めて意図で渡す。超音波が 50cm より近いか、塞がっている確率（学習済みの時だけ）が 0.6 以上で2フレーム続いたら曲がり始める。向きは上の層の意図が左右ならその向き、おまかせなら右から。超音波もカメラも空いた状態が4フレーム続き1秒たったら曲がり終え、4秒で空かないか Pi が障害物で止めたら反対側へ切り替える。塞がっている確率が 0.5 以上の間は最低の速度まで落とす。避けている間は、Pi と同じく意図の向きへ少なくとも 20° 切り（`turn_floor`、`AVOID_MIN_STEER_DEG`）、速度は実際に切る舵角で決める。`--no_avoidance`、`--ignore_blocked` で切れる
   6. 速度リミッターで速度を決定し、介入バッファを更新
   7. `/api/drive/steer` と `/api/drive/move`（TTL 400ms）を送信。受け付けられた移動だけ軌跡と地図に反映
   8. 地図の描画
@@ -415,7 +422,6 @@ PiCar-X には車輪の回転数を測るセンサーがないので、カメラ
 ---
 
 ### 計画中の機能
-- **回帰テスト（門番）**: データビューアのタグで選んだ過去の失敗場面とふつうの場面で、新しいモデルを1フレームずつ採点し、合格しないモデルを `deploy.pi push` で送らない（ROADMAP の M3）
 - 走行データの収集し直し、「前方が塞がっているか」の見直し、実走での介入回数の比較は、M6 の装備の見直しの後に行う
 
 MLflow、DVC、モデルの署名は採用しない（[ROADMAP.md §7](ROADMAP.md)）。
@@ -464,7 +470,7 @@ PiCarX/
 │   │   ├── gamepad.py             # プロコンの読み取り（収集 GUI 用）
 │   │   ├── dataset/               # cleaner.py, disengagement_manager.py, manifest.py,
 │   │   │                          # annotations.py, frame_table.py, session_report.py
-│   │   ├── evaluation/            # evaluate.py, metrics.py, compare_cv.py, interventions.py
+│   │   ├── evaluation/            # evaluate.py, metrics.py, compare_cv.py, interventions.py, gate.py
 │   │   ├── mapping/               # occupancy_grid.py, visualizer.py
 │   │   ├── motion/                # estimator.py, checker.py, monitor.py, analyze.py
 │   │   ├── registry/              # compare.py, dataset.py, models.py, lineage.py, stages.py, body.py
@@ -503,9 +509,10 @@ PiCarX/
 | **データクリーニング (外れ値除外)** | `uv run python -m src.e2e.dataset.cleaner --data_dir data/raw --model models/<version>/model.onnx --threshold 0.4 --output_dir data/processed/clean_v2` |
 | **クリーンデータでの再学習** | `uv run python -m src.e2e.training.train --data_dir data/processed/clean_v2 --output_dir models/<version> --epochs 25` |
 | **モデルオフライン評価** | `uv run python -m src.e2e.evaluation.evaluate --data_dir data/raw --model_path models/<version>/best_model.pth` |
+| **門番の試験** | `uv run python -m src.e2e.evaluation.gate --model_dir models/<version>`（比べる元は `--baseline models/<版>`、場面の一覧は `--list`。不合格なら終了コード 1、試験を始められなければ 2） |
 | **MLOps レジストリ確認** | `uv run python -m src.e2e.registry.compare` |
 | **Control Center（来歴・採否・比較・配置・ジョブの画面）** | `uv run python -m src.gui.web`（ブラウザで開く。来歴の要約だけなら `uv run python -m src.e2e.registry.lineage --summary`） |
-| **Pi へモデルを送る** | `uv run python -m src.e2e.deploy.pi --host pi@<ホスト> push --model_dir models/<version>`（戻すのは `rollback`、Pi の版の一覧は `list`、走行の記録を持ってくるのは `pull-runs`。`--host` の代わりに `PICARX_SSH_HOST` でもよい） |
+| **Pi へモデルを送る** | `uv run python -m src.e2e.deploy.pi --host pi@<ホスト> push --model_dir models/<version>`（送る前に門番の試験をし、不合格なら送らない。試験なしで送るのは `--skip_gate "<理由>"`。戻すのは `rollback`、Pi の版の一覧は `list`、走行の記録を持ってくるのは `pull-runs`。`--host` の代わりに `PICARX_SSH_HOST` でもよい） |
 | **Pi 上の自律走行** | `uv run python -m src.e2e.pi_autopilot --speed 50`（`--intent left` / `right`、パッドで引き継いで修正操作を記録するなら `--gamepad`。Ctrl+C で止める） |
 | **実機自律走行** | `uv run python -m src.e2e.autonomous_driver --model models/<version>/model.onnx --speed 50`（行きたい向きは `--intent left` / `right`、既定は `any`。パッドで引き継いで修正操作を記録するなら `--gamepad`） |
 | **モデル別の介入率** | `uv run python -m src.e2e.evaluation.interventions --runs_dir data/runs` |
@@ -527,6 +534,7 @@ PiCarX/
   - リンター/フォーマッタ: `uv run ruff check --config pyproject.toml src tests`
   - ユニットテスト: `uv run pytest tests`
   - 新機能追加時もテスト全件合格を維持する。Python は `.github/workflows/python-ci.yml` で `ruff check` と `pytest` を実行する。
+  - 依存関係の脆弱性: `.github/workflows/security-audit.yml` が push、pull request、毎週月曜に、`uv.lock` を書き出して `pip-audit`、`Cargo.lock` を `cargo-audit` で調べる。更新の提案は `.github/dependabot.yml`（uv、cargo、GitHub Actions）。脆弱性の通知（Dependabot alerts）はリポジトリの設定で有効にする。
 - **機密情報と個人データ**: `.env`、走行データ（室内画像を含む）、音声、記憶 DB は git に追加しない（`.gitignore` で除外）。
 
 ---

@@ -138,3 +138,25 @@ class AvoidancePolicy:
         self.next_side = other
         self._enter_avoid(other, now)
         return Decision(self.side, slow, self.state, "switch", reason)
+
+
+# 避けている間の舵角の下限（度）。Pi（`rust/src/autopilot/avoidance.rs` の AVOID_MIN_STEER_DEG）と
+# 同じ値。床での最初の走行（2026-11-15）では右の意図で 8〜17°しか切らず、椅子やテーブルの脚へ
+# 寄っていった（左は 18〜30°）。避けている間は、意図の向きへ少なくともこれだけ切る
+AVOID_MIN_STEER_DEG = 20
+
+
+def turn_floor(
+    steer_deg: int, decision: Optional[Decision], min_deg: int = AVOID_MIN_STEER_DEG
+) -> int:
+    """避けている間だけ、モデルの舵角を意図の向きへ `min_deg` 以上にする。それ以外はそのまま
+
+    舵角は右が正（Pi と同じ）。判断がない（避ける判断を使わない）時もそのまま。
+    """
+    if decision is None or decision.state != AVOID:
+        return steer_deg
+    if decision.intent == INTENT_RIGHT:
+        return max(steer_deg, min_deg)
+    if decision.intent == INTENT_LEFT:
+        return min(steer_deg, -min_deg)
+    return steer_deg

@@ -893,7 +893,29 @@ function modelEval(m, c) {
           { name: "常に直進", value: x.baselines.zero?.steering_mae, color: "var(--div-mid)" },
         ].filter((r) => r.value !== undefined), { title: "交差検証の MAE（基準と比べる）" }))))
       : h("div", { class: "empty" }, "このモデルと同じ学習データの交差検証はありません")),
+    gateCard(m),
     m.evaluation ? card("オフライン評価（eval_metrics.json）", "", h("dl", { class: "kv" }, Object.entries(m.evaluation).flatMap(([k, val]) => [h("dt", { class: "mono" }, k), h("dd", {}, typeof val === "number" ? fmt(val, 4) : JSON.stringify(val))]))) : null);
+}
+
+// 門番の試験（gate.json）。合格しないモデルは deploy.pi が Pi へ送らない
+function gateCard(m) {
+  const g = m.gate;
+  const sub = "src.e2e.evaluation.gate の結果。門番のタグを付けた場面で1フレームずつ採点";
+  if (!g) return card("門番の試験", sub, h("div", { class: "empty" }, "まだ試していません（Pi へ送る時に試します）"));
+  const kinds = [["left", "左へ避ける"], ["right", "右へ避ける"], ["straight", "まっすぐ"]];
+  const rows = kinds.filter(([k]) => g.by_kind[k]?.cases).map(([k, label]) => {
+    const kind = g.by_kind[k];
+    const base = g.baseline_by_kind[k];
+    return { name: label, value: kind.rate, text: `${fmt(kind.rate * 100, 0)}%`, color: SERIES[0],
+      extra: [[null, "合格", `${fmtInt(kind.passed)}/${fmtInt(kind.cases)}`],
+        [null, g.baseline_version || "比べる元", base?.rate == null ? "—" : `${fmt(base.rate * 100, 0)}%`]] };
+  });
+  const verdict = !g.current ? "試した後にモデルが変わった" : g.passed ? "合格" : "不合格";
+  return card("門番の試験", sub, h("div", { class: "stack" },
+    h("div", { class: "row" }, h("b", {}, verdict), h("span", { class: "muted small" }, `${fmtInt(g.cases)} フレーム・${fmtDate(g.tested_at, true)}`
+      + (g.regressed_frames ? `・前は合格して今回不合格 ${fmtInt(g.regressed_frames)}` : ""))),
+    rows.length ? hbars(rows, { max: 1, title: "種類ごとの合格率" }) : null,
+    g.reasons.length ? h("ul", {}, g.reasons.map((r) => h("li", {}, r))) : null));
 }
 
 function modelField(m, c) {
