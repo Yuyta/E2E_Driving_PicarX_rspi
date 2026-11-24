@@ -115,7 +115,7 @@ jobs:
 
       - name: Publish JUnit test report
         if: ${{ always() }}
-        uses: dorny/test-reporter@v1
+        uses: dorny/test-reporter@v3
         with:
           name: Rust unit tests
           path: rust/test-results/junit.xml
