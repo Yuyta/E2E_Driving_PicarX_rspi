@@ -128,7 +128,7 @@ jobs:
 
       - name: Upload JUnit XML
         if: ${{ always() }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rust-unit-test-results
           path: rust/test-results/junit.xml
@@ -164,7 +164,7 @@ jobs:
 
       - name: Upload Pi 5 binary
         if: ${{ steps.build.outcome == 'success' }}
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: picar-x-rust-pi5
           path: rust/target/aarch64-unknown-linux-gnu/release/picar-x-rust
