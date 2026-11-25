@@ -43,9 +43,11 @@
       <tr><td>設定を変えたら良くなるか、偏りなく確かめる</td><td><a href="#/manual?s=tool-cross_validate">交差検証</a> → <a href="#/manual?s=tool-compare_cv">交差検証の比較</a></td><td>—</td></tr>
       <tr><td>モデルを採用するか決める</td><td><a href="#/manual?s=cc-models">モデル</a> 画面の「採否を変える」</td><td>—</td></tr>
       <tr><td>新しいモデルが、前にぶつかった場面で避けるか確かめる</td><td><a href="#/manual?s=gui-viewer">データ確認・ラベル</a> で門番のタグを付ける → <a href="#/manual?s=tool-gate">門番の試験</a></td><td>—</td></tr>
+      <tr><td>Pi の走行サーバーを起動・停止する（ssh で入らずに）</td><td><a href="#/manual?s=tool-pi_server_start">Pi の走行サーバーを起動</a>（床で走らせる時は <a href="#/manual?s=tool-pi_server_start_floor">床用</a>）、<a href="#/manual?s=tool-pi_server_stop">停止</a></td><td>—</td></tr>
       <tr><td>モデルを Pi に入れて使う</td><td><a href="#/manual?s=tool-deploy_push">Pi へデプロイ</a>（失敗したら <a href="#/manual?s=tool-deploy_rollback">Pi のモデルを戻す</a>）</td><td>—</td></tr>
       <tr><td>Pi で自律走行させる</td><td><a href="#/manual?s=tool-pi_autopilot">Pi 自律走行</a></td><td class="moves-cell">動く</td></tr>
       <tr><td>走りの良し悪しをモデルごとに比べる</td><td><a href="#/manual?s=tool-deploy_pull_runs">走行記録の取り込み</a> → <a href="#/manual?s=cc-runs">走行記録</a> 画面</td><td>—</td></tr>
+      <tr><td>部品の役割、安全機能の分け方と今の状態、Pi と PC の版を見る</td><td><a href="#/manual?s=cc-components">構成</a> 画面</td><td>—</td></tr>
       <tr><td>どのモデルがどのデータから作られたか見る</td><td><a href="#/manual?s=cc-lineage">トレーサビリティ</a> 画面、モデル詳細の「トレーサビリティ」タブ</td><td>—</td></tr>
       <tr><td>車体の安全機能が働くか確かめる</td><td><a href="#/manual?s=tool-m1_check">安全チェック</a></td><td>一部動く</td></tr>
       <tr><td>動きの食い違いの検出を校正する</td><td><a href="#/manual?s=tool-m3_check">動きの計測</a></td><td>一部動く</td></tr>
@@ -132,6 +134,14 @@
 
   <h3 id="cc-lineage">トレーサビリティ</h3>
   <p>どのモデルがどのデータから作られ、どう評価され、どこで走ったかをたどる画面です（来歴、lineage とも呼びます）。走行データ → 手作業のラベル → モデル → 交差検証・Pi での走行 のつながりを図で見せます。線は実際につながっているところだけに引き、光の粒が元から作られたものへ流れます（色は元の種類の色から先の種類の色へ変わります）。節を押すと、その元になったものと、そこから作られたものへの流れだけを強調します。どこにもつながっていない節（まだ学習に使っていないセッションなど）は線を引かず、薄く表示します。つながりの種類は流れる印の形で分かります。丸い粒（・・・）は学習に使用、長い棒（— —）は検証に使用、棒と粒（—・—・）は同じデータで評価、を表します。図の上の凡例にも同じ形を出しています。</p>
+
+  <h3 id="cc-components">構成</h3>
+  <p>PiCar-X を役割ごとの部品に分けて、Pi（体）と PC（脳）のどちらで動くか、安全にどう関わるか、どの版かを並べた画面です。上の欄は、Pi の走行サーバーの版（最後の走行の記録から）、Pi で使用中のモデル、今の車体、PC のコードのコミット（<code>*</code> は未コミットの変更あり）です。</p>
+  <ul>
+    <li><b>Pi の安全機能（今の状態）</b>: 緊急停止、段差の検知が有効か、反射ループの速さ、前進・後退を拒否している理由、カメラ。Pi につながっている時だけ出ます。床で走らせるために段差の検知を切っている時は注意の印が出るので、机の上では走らせないでください。</li>
+    <li><b>安全との関わり</b>: <span class="badge tag">安全の要</span> は Pi の中だけで、どの指示よりも先に止める部品です。<span class="badge outline">安全に関わる</span> は、指令が安全の要の許可を通るか、読み込む物を確かめる部品です。<span class="badge stage-archived">安全から切り離す</span> は、モーターを直接動かせず、Pi の API へ意図や指令を渡すだけの部品です。</li>
+  </ul>
+  <p>部品の一覧は <code>python/src/gui/components.py</code> にあります。部品を足したり役割を変えたりしたら、ここも直します。</p>
 
   <h3 id="cc-deploy"><span class="ph-icon" data-phase="deploy" style="--ph: #2f9e5b"></span> デプロイ</h3>
   <p>Pi で使用中の版、最後の走行で使った版、最新の有効なモデル、今の車体を並べます。「デプロイするモデル」の表は有効なモデルが上に並び、「Pi へデプロイ…」でそのモデルを入れた状態の起動の画面を開きます。学習データの車体が今の車体と違うモデルには「今と違う」の印が付きます。下にはデプロイの履歴（<code>data/deployments.jsonl</code>）が出ます。</p>
@@ -478,6 +488,34 @@
       <tr><td><code>--runs_dir</code></td><td>走行の記録のフォルダ</td><td><code>data/runs</code></td></tr>
       <tr><td><code>--json</code></td><td>表ではなく JSON で出す</td><td>なし</td></tr>
     </tbody></table>
+  </div>
+
+  <h3 id="tools-common"><span class="ph-icon" data-phase="common" style="--ph: #898781"></span> 共通 — Pi の走行サーバー</h3>
+  <div class="note warn"><b>準備</b>: ツールは ssh で Pi へ入ります。ジョブはパスワードを入力できないので、<em>鍵でパスワードなしに入れるようにしておきます</em>（PowerShell で <code>ssh -o BatchMode=yes rspi true</code> がエラーなく終われば準備済み）。接続先は <code>python/.env</code> に <code>PICARX_SSH_HOST=rspi</code> と書いておくと、毎回 <code>--host</code> を付けずに済みます。どれも車は動きません。</div>
+
+  <div class="tool" id="tool-pi_server_start">
+    <h4>Pi の走行サーバーを起動 <code>src.e2e.deploy.pi_server start</code></h4>
+    <p class="when"><b>使う場面</b>: Pi の電源を入れた後、会話・手動操作・収集・自律走行の前に。<code>ssh rspi</code> して <code>./picar-x-rust</code> を実行していた操作と同じで、ssh を切っても動き続けます。もう動いていれば何もしません。出力は Pi の <code>~/picarx/server.log</code> に残り、前の記録は <code>server.log.1</code> になります。起動すると、画面の右上が「Pi 接続中」になります。</p>
+    <table class="args"><thead><tr><th>引数</th><th>意味</th><th>既定</th></tr></thead><tbody>
+      <tr><td><code>--no_cliff_guard</code></td><td>段差の検知を切る（床で走らせる時だけ。下の「床用」と同じ）</td><td>なし</td></tr>
+      <tr><td><code>--host</code>（<code>start</code> の前）</td><td>接続先。なければ <code>PICARX_SSH_HOST</code>（環境変数か <code>python/.env</code>）</td><td>—</td></tr>
+      <tr><td><code>--pi_bin</code>（<code>start</code> の前）</td><td>Pi の実行ファイル</td><td><code>~/picar-x-rust</code></td></tr>
+    </tbody></table>
+  </div>
+
+  <div class="tool" id="tool-pi_server_start_floor">
+    <h4>Pi の走行サーバーを起動（床用） <code>src.e2e.deploy.pi_server start --no_cliff_guard</code> <span class="badge confirm-badge">段差の検知なし</span></h4>
+    <p class="when"><b>使う場面</b>: 床で走らせる時。黒いマットを段差と見て止まるので、段差の検知を切って起動します（<code>PICARX_DISABLE_CLIFF_GUARD=1</code>）。<em>机の上など、落ちる所では使いません</em>。今どちらで動いているかは、「状態」か <a href="#/manual?s=cc-components">構成</a> 画面の「段差の検知」で分かります。切り替えるには、止めてから起動し直します。</p>
+  </div>
+
+  <div class="tool" id="tool-pi_server_stop">
+    <h4>Pi の走行サーバーを停止 <code>src.e2e.deploy.pi_server stop</code> <span class="badge confirm-badge">Pi を変更</span></h4>
+    <p class="when"><b>使う場面</b>: 走らせ終わった時や、段差の検知の設定を変える前。自律走行中なら止めてから終わります。止まるまで最大 10 秒待ちます。</p>
+  </div>
+
+  <div class="tool" id="tool-pi_server_status">
+    <h4>Pi の走行サーバーの状態 <code>src.e2e.deploy.pi_server status</code></h4>
+    <p class="when"><b>使う場面</b>: 「Pi 未接続」の時に、走行サーバーが動いているか、段差の検知が有効か、出力の最後の行を見る。<code>log --lines 50</code> で出力の記録をもっと見られます。</p>
   </div>
 
 </section>

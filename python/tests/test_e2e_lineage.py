@@ -194,3 +194,21 @@ def test_deploy_cli_records_without_host(tmp_path, monkeypatch):
     events = stages.load_deployments()
     assert events[-1]["action"] == "rollback" and events[-1]["ok"] is True
     assert "example" not in json.dumps(events)
+
+
+def test_runs_keep_the_pi_server_build(tmp_path):
+    """走行の記録の code.server（Pi の走行サーバーのビルド）を構成の画面で見せる"""
+    import json as _json
+
+    from src.e2e.registry import lineage as _lineage
+
+    run = tmp_path / "runs" / "r1"
+    run.mkdir(parents=True)
+    (run / "run.json").write_text(
+        _json.dumps(
+            {"run_id": "r1", "where": "pi", "code": {"server": "picar-x-rust 0.1.0 (abc)"}}
+        ),
+        encoding="utf-8",
+    )
+    runs = _lineage.collect_runs(tmp_path / "runs")
+    assert runs[0]["server_build"] == "picar-x-rust 0.1.0 (abc)"

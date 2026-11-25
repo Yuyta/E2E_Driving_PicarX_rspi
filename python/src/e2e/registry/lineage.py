@@ -436,6 +436,8 @@ def collect_runs(runs_dir: Path) -> List[Dict[str, Any]]:
                 "model_version": data.get("model_version"),
                 "data_fingerprint": data.get("data_fingerprint"),
                 "model_commit": data.get("model_commit"),
+                # Pi の走行サーバーのビルド（例: picar-x-rust 0.1.0 (6c139ea)）
+                "server_build": (data.get("code") or {}).get("server"),
                 "where": data.get("where"),
                 "started_at": _iso(data.get("started_at")),
                 "started_ts": data.get("started_at"),
@@ -677,6 +679,7 @@ def build_catalog(
             "deployed": deployed,
             "last_pi_run": {
                 "model_version": last_pi_run["model_version"],
+                "server_build": last_pi_run["server_build"],
                 "run_id": last_pi_run["run_id"],
                 "started_at": last_pi_run["started_at"],
             }

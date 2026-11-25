@@ -1330,6 +1330,79 @@ async function viewBody(root) {
     ], bodies, { empty: "車体の版がまだありません" }))));
 }
 
+/* ------------------------------------------------------------------ views: components (共通 構成) */
+
+// 安全の区分（src/gui/components.py の SAFETY_LEVELS）
+const SAFETY = {
+  core: ["安全の要", "badge tag"],
+  related: ["安全に関わる", "badge outline"],
+  isolated: ["安全から切り離す", "badge stage-archived"],
+};
+
+async function viewComponents(root) {
+  const [cv, robot] = await Promise.all([api("/components"), api("/robot/status").catch(() => ({ online: false, error: "取得できません" }))]);
+  const v = cv.versions;
+  const versionOf = (c) => {
+    const x = v[c.version] || {};
+    if (!x.value) return h("span", { class: "muted" }, "—");
+    // 表では短く（走行サーバーは括弧の中のコミットだけ）。全体は上の欄に出す
+    const short = c.version === "pi_server" ? (String(x.value).match(/\(([^)]+)\)/)?.[1] || x.value) : x.value;
+    const text = c.version === "model" ? h("a", { href: `#/models/${x.value}` }, x.value) : short;
+    return h("span", { class: "hash" }, text, x.dirty ? "*" : "");
+  };
+  const fact2 = (label, x, href) => h("div", { class: "fact" }, h("div", { class: "label" }, label),
+    h("div", { class: "value" }, x.value ? (href ? h("a", { href }, x.value) : h("span", { class: "mono" }, x.value + (x.dirty ? "*" : ""))) : h("span", { class: "muted" }, "—")),
+    h("div", { class: "foot" }, x.at ? `${x.note}・${fmtDate(x.at, true)}` : x.note));
+  const cols = [
+    { key: "title", label: "部品", render: (c) => h("div", {}, h("b", {}, c.title), h("div", { class: "muted small mono" }, c.source)), sort: (c) => c.title },
+    { key: "role", label: "役割", nosort: true },
+    { key: "safety", label: "安全との関わり", render: (c) => h("div", {}, h("span", { class: SAFETY[c.safety][1] }, SAFETY[c.safety][0]), h("div", { class: "muted small" }, c.safety_note)), sort: (c) => Object.keys(SAFETY).indexOf(c.safety) },
+    { key: "interface", label: "窓口", render: (c) => h("span", { class: "mono small" }, c.interface), nosort: true },
+    { key: "version", label: "版", render: versionOf, nosort: true },
+  ];
+  const part = (place) => cv.components.filter((c) => c.place === place);
+  root.append(h("div", { class: "stack" },
+    h("p", { class: "lead" }, "PiCar-X を役割ごとの部品に分けて、どこで動き、安全にどう関わり、どの版かを並べています。安全機能は Pi（体）だけが持ち、PC（脳）や LLM はモーターを直接動かせません。Pi は PC が止まっても安全に止まります。"),
+    h("section", { class: "card" }, h("div", { class: "facts" },
+      fact2("Pi の走行サーバー", v.pi_server),
+      fact2("Pi で使用中のモデル", v.model, v.model.value ? `#/models/${v.model.value}` : null),
+      fact2("今の車体", v.body, v.body.value ? "#/body" : null),
+      fact2("PC のコード", v.pc_code))),
+    card("Pi の安全機能（今の状態）", "Pi の走行サーバーの /api/status から", robotSafety(robot)),
+    card("Pi（体）— Rust の走行サーバー", "安全の要はここだけに置く", table(cols, part("pi"))),
+    card("PC（脳）— Python", "Pi の API を通してだけ車に指示する", table(cols, part("pc")))));
+}
+
+// Pi が走行を拒否している理由（python/src/models.py の SafetyReason）
+const REFUSAL = {
+  emergency_stop: "緊急停止", obstacle: "障害物", cliff: "段差", distance_unknown: "距離が分からない",
+  floor_unknown: "床センサーの値が分からない", cliff_uncalibrated: "段差の校正がまだ",
+  reflex_stalled: "反射ループが止まっている", ttl_expired: "指令の期限切れ",
+};
+
+function robotSafety(r) {
+  if (!r.online) return h("div", { class: "stack", style: { gap: "10px" } },
+    h("div", { class: "empty" }, `Pi につながっていません（${r.error || "不明"}）。Pi の電源を入れて走行サーバーを起動すると、今の状態が出ます`),
+    h("div", { class: "row" },
+      h("button", { type: "button", class: "small", onclick: () => launch("pi_server_start") }, "走行サーバーを起動…"),
+      h("button", { type: "button", class: "small ghost", onclick: () => launch("pi_server_start_floor") }, "床用で起動…"),
+      h("button", { type: "button", class: "small ghost", onclick: () => launch("pi_server_status") }, "状態を確かめる…")));
+  const st = r.status;
+  const blocked = (x) => (x ? healthBadge("warn", REFUSAL[x] || x) : healthBadge("ok", "なし"));
+  return h("dl", { class: "kv" },
+    h("dt", {}, "緊急停止"), h("dd", {}, st.emergency_stop ? healthBadge("error", "緊急停止中（解除するまで走行を拒否）") : healthBadge("ok", "なし")),
+    h("dt", {}, "段差の検知"), h("dd", {}, st.cliff?.guard_enabled ? healthBadge("ok", "有効") : healthBadge("warn", "無効（PICARX_DISABLE_CLIFF_GUARD=1）。机の上では走らせない")),
+    h("dt", {}, "反射ループ"), h("dd", {}, st.reflex ? `${fmt(st.reflex.hz, 1)} Hz・最大の間隔 ${fmt(st.reflex.max_interval_ms, 1)} ms` : "—"),
+    h("dt", {}, "前進の拒否"), h("dd", {}, blocked(st.blocked?.forward)),
+    h("dt", {}, "後退の拒否"), h("dd", {}, blocked(st.blocked?.backward)),
+    // カメラは画像を使う間だけ動く（rpi_camera/stream.rs の wants_frames）。止まっていても誤りがなければ待機
+    h("dt", {}, "カメラ"), h("dd", {}, st.camera?.running ? `${fmt(st.camera.fps, 1)} fps`
+      : st.camera?.error ? healthBadge("warn", `止まっている（${st.camera.error}）`)
+        : h("span", { class: "muted" }, "待機中（画像を使う時に動く）")),
+    h("dt", {}, "モード"), h("dd", { class: "mono" }, st.mode),
+    h("dt", {}, "走行サーバー"), h("dd", {}, h("button", { type: "button", class: "small ghost", onclick: () => launch("pi_server_stop") }, "停止…")));
+}
+
 /* ------------------------------------------------------------------ views: deploy (5 デプロイ) */
 
 async function viewDeploy(root) {
@@ -1561,6 +1634,7 @@ const ROUTES = {
   deploy: ["デプロイ", viewDeploy],
   runs: ["走行記録", viewRuns],
   lineage: ["トレーサビリティ", viewLineage],
+  components: ["構成", viewComponents],
   tools: ["ツール", viewTools],
   jobs: ["ジョブ", viewJobs, viewJob],
   manual: ["操作マニュアル", viewManual],

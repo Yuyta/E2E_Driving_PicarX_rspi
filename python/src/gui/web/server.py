@@ -33,6 +33,8 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlparse
 
 from src.e2e.registry import lineage, stages
+from src.e2e.training.provenance import git_state
+from src.gui import components
 from src.gui.web.jobs import JobManager
 from src.gui.workflows import PATH_ARGS, PHASES, WORKFLOWS, WORKFLOWS_BY_ID
 
@@ -103,6 +105,10 @@ class App:
             catalog = lineage.default_catalog(self.base)
             self._catalog_cache = (time.monotonic(), catalog)
             return catalog
+
+    def components(self) -> Dict[str, Any]:
+        """「構成」画面: 部品の一覧と、部品ごとの版（Pi の状態は /api/robot/status で別に読む）"""
+        return components.view(self.catalog()["summary"], git_state(self.base))
 
     def set_stage(self, version: str, body: Dict[str, Any]) -> Dict[str, Any]:
         result = stages.set_stage(
@@ -346,6 +352,8 @@ class Handler(BaseHTTPRequestHandler):
         if method == "GET":
             if parts == ["catalog"]:
                 return self._json(200, app.catalog(fresh="fresh" in query))
+            if parts == ["components"]:
+                return self._json(200, app.components())
             if parts == ["workflows"]:
                 return self._json(200, app.workflows())
             if parts == ["phases"]:

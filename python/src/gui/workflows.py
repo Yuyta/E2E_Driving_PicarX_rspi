@@ -341,6 +341,42 @@ WORKFLOWS = (
         kind="window",
         id="app",
     ),
+    # Pi の走行サーバー（ssh で起動・停止。車は動かない）
+    Workflow(
+        "Pi の走行サーバーを起動",
+        "ssh で Pi へ入り、走行サーバー（picar-x-rust）を起動する。動いていれば何もしない",
+        "src.e2e.deploy.pi_server",
+        "common",
+        arguments="start",
+        id="pi_server_start",
+    ),
+    Workflow(
+        "Pi の走行サーバーを起動（床用）",
+        "段差の検知を切って走行サーバーを起動する。黒いマットで止まらないよう、床で走らせる時だけ使う",
+        "src.e2e.deploy.pi_server",
+        "common",
+        arguments="start --no_cliff_guard",
+        confirm="段差の検知を切ります。机の上など、落ちる所では走らせないでください。",
+        id="pi_server_start_floor",
+    ),
+    Workflow(
+        "Pi の走行サーバーを停止",
+        "走行サーバーを止める。自律走行中なら止めてから終わる",
+        "src.e2e.deploy.pi_server",
+        "common",
+        arguments="stop",
+        confirm="Pi の走行サーバーを止めます。止めている間は、会話や手動操作で車を動かせません。",
+        id="pi_server_stop",
+    ),
+    Workflow(
+        "Pi の走行サーバーの状態",
+        "動いているか、段差の検知が有効か、出力の最後の行",
+        "src.e2e.deploy.pi_server",
+        "common",
+        arguments="status",
+        examples=(("状態", "status"), ("出力の記録", "log --lines 50")),
+        id="pi_server_status",
+    ),
 )
 
 WORKFLOWS_BY_ID = {workflow.key: workflow for workflow in WORKFLOWS}
