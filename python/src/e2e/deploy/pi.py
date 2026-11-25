@@ -9,8 +9,8 @@
 - `pull-runs`: Pi の走行の記録（`~/picarx/runs`）を `data/runs` へ持ってくる。PC の
   `src.e2e.evaluation.interventions` でモデル別の介入率を集計できる
 
-ssh の接続先は `--host`（例: pi@rspi）か、環境変数 `PICARX_SSH_HOST`。パスワードを聞かれたら
-入力する。
+ssh の接続先は `--host`（例: rspi）か、環境変数 `PICARX_SSH_HOST`（`python/.env` に
+書いてもよい）。パスワードを聞かれたら入力する。
 
 使い方:
     uv run python -m src.e2e.deploy.pi push --model_dir models/v006
@@ -116,10 +116,26 @@ def check_gate(model_dir, skip_reason: Optional[str], data_dirs, baseline) -> Tu
     return False, "gate failed: " + "; ".join(report["reasons"])
 
 
+# 接続先を python/.env にも書ける（Control Center のジョブは起動した画面の環境変数を引き継ぐので、
+# 毎回 --host を書かずに済むように）。テストで差し替えられるよう、置き場所は変数にする
+DOTENV_PATH = Path(__file__).resolve().parents[3] / ".env"
+
+
+def _dotenv_host() -> Optional[str]:
+    if not DOTENV_PATH.is_file():
+        return None
+    from dotenv import dotenv_values
+
+    return dotenv_values(DOTENV_PATH).get(HOST_ENV) or None
+
+
 def resolve_host(host: Optional[str]) -> str:
-    host = host or os.environ.get(HOST_ENV)
+    """接続先: --host、環境変数 PICARX_SSH_HOST、python/.env の PICARX_SSH_HOST の順"""
+    host = host or os.environ.get(HOST_ENV) or _dotenv_host()
     if not host:
-        raise SystemExit(f"Give --host (for example pi@rspi) or set {HOST_ENV}")
+        raise SystemExit(
+            f"Give --host (for example rspi) or set {HOST_ENV} (environment or python/.env)"
+        )
     return host
 
 

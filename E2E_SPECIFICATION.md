@@ -511,8 +511,9 @@ PiCarX/
 | **モデルオフライン評価** | `uv run python -m src.e2e.evaluation.evaluate --data_dir data/raw --model_path models/<version>/best_model.pth` |
 | **門番の試験** | `uv run python -m src.e2e.evaluation.gate --model_dir models/<version>`（比べる元は `--baseline models/<版>`、場面の一覧は `--list`。不合格なら終了コード 1、試験を始められなければ 2） |
 | **MLOps レジストリ確認** | `uv run python -m src.e2e.registry.compare` |
-| **Control Center（来歴・採否・比較・配置・ジョブの画面）** | `uv run python -m src.gui.web`（ブラウザで開く。来歴の要約だけなら `uv run python -m src.e2e.registry.lineage --summary`） |
+| **Control Center（来歴・採否・比較・配置・ジョブ・構成の画面）** | `uv run python -m src.gui.web`（ブラウザで開く。来歴の要約だけなら `uv run python -m src.e2e.registry.lineage --summary`。「構成」は役割ごとの部品、安全との関わり、Pi の安全機能の今の状態、Pi の走行サーバー・使用中のモデル・車体・PC のコードの版を並べる。部品の一覧は `python/src/gui/components.py`） |
 | **Pi へモデルを送る** | `uv run python -m src.e2e.deploy.pi --host pi@<ホスト> push --model_dir models/<version>`（送る前に門番の試験をし、不合格なら送らない。試験なしで送るのは `--skip_gate "<理由>"`。戻すのは `rollback`、Pi の版の一覧は `list`、走行の記録を持ってくるのは `pull-runs`。`--host` の代わりに `PICARX_SSH_HOST` でもよい） |
+| **Pi の走行サーバーの起動と停止** | `uv run python -m src.e2e.deploy.pi_server start`（床で走らせる時は `start --no_cliff_guard`、止めるのは `stop`、確かめるのは `status`。ssh で入り、Pi の上で後ろで動かす。出力は Pi の `~/picarx/server.log`。パスワードを聞かないので、鍵で入れるようにしておく。接続先は `--host`、`PICARX_SSH_HOST`（環境変数か `python/.env`）） |
 | **Pi 上の自律走行** | `uv run python -m src.e2e.pi_autopilot --speed 50`（`--intent left` / `right`、パッドで引き継いで修正操作を記録するなら `--gamepad`。Ctrl+C で止める） |
 | **実機自律走行** | `uv run python -m src.e2e.autonomous_driver --model models/<version>/model.onnx --speed 50`（行きたい向きは `--intent left` / `right`、既定は `any`。パッドで引き継いで修正操作を記録するなら `--gamepad`） |
 | **モデル別の介入率** | `uv run python -m src.e2e.evaluation.interventions --runs_dir data/runs` |

@@ -80,7 +80,8 @@ def test_rollback_list_and_pull_runs(tmp_path: Path, monkeypatch):
     assert run.calls[-1] == ["scp", "-r", "pi@rspi:~/picarx/runs/*", str(tmp_path / "runs")]
 
 
-def test_host_is_required(monkeypatch):
+def test_host_is_required(tmp_path, monkeypatch):
     monkeypatch.delenv(pi.HOST_ENV, raising=False)
+    monkeypatch.setattr(pi, "DOTENV_PATH", tmp_path / "missing.env")
     with pytest.raises(SystemExit):
         pi.main(["list"])

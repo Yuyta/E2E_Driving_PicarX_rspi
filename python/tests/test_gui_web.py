@@ -302,3 +302,57 @@ def test_path_arguments_split_and_join_back():
         ]
         assert all(f in PATH_ARGS for f, _ in found)
         assert not any(t in PATH_ARGS for t in flags) or found
+
+
+def test_components_page_lists_parts_and_versions(running):
+    """構成の画面: 部品の一覧と、部品ごとの版。トークンなしでは読めない"""
+    _, port, _ = running
+    assert request(port, "GET", "/api/components", token=None)[0] == 401
+    status, body = request(port, "GET", "/api/components")
+    assert status == 200
+    data = json.loads(body)
+    ids = {c["id"] for c in data["components"]}
+    assert {"reflex", "autopilot", "agent", "mlops"} <= ids
+    assert set(data["versions"]) == {"pi_server", "model", "pc_code", "body"}
+    # 走行の記録がまだない時は Pi の版は分からない
+    assert data["versions"]["pi_server"]["value"] is None
+    status, body = request(port, "GET", "/", token=None)
+    assert b'data-route="components"' in body
+
+
+def test_components_versions_come_from_the_records():
+    from src.gui import components
+
+    summary = {
+        "last_pi_run": {
+            "model_version": "v005",
+            "server_build": "picar-x-rust 0.1.0 (6c139ea)",
+            "started_at": "2026-11-16T21:58:58+0900",
+        },
+        "deployed": {"version": "v006", "at": "2026-11-24T21:20:07+0900"},
+        "body_current": "b3",
+    }
+    v = components.versions(summary, {"commit": "0123456789abcdef", "dirty": True})
+    assert v["pi_server"]["value"] == "picar-x-rust 0.1.0 (6c139ea)"
+    assert v["model"] == {
+        "value": "v006",
+        "at": "2026-11-24T21:20:07+0900",
+        "note": "デプロイの記録から",
+    }
+    assert v["pc_code"]["value"] == "0123456" and v["pc_code"]["dirty"]
+    assert v["body"]["value"] == "b3"
+    # デプロイの記録がなければ、最後の走行のモデル
+    summary["deployed"] = {"version": None}
+    assert components.versions(summary, {})["model"]["value"] == "v005"
+    assert components.versions({}, {})["model"]["note"] == "記録なし"
+
+
+def test_only_the_pi_holds_the_safety_core():
+    """安全の要は Pi の部品だけ。PC の部品は安全から切り離す"""
+    from src.gui.components import COMPONENTS, Component
+
+    assert all(c.place == "pi" for c in COMPONENTS if c.safety == "core")
+    assert all(c.safety == "isolated" for c in COMPONENTS if c.place == "pc")
+    assert len({c.id for c in COMPONENTS}) == len(COMPONENTS)
+    with pytest.raises(ValueError):
+        Component("x", "x", "cloud", "", "core", "", "", "", "pi_server")
